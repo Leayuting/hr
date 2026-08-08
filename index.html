@@ -206,6 +206,32 @@ function Icon({ name, size = 18 }) {
   );
 }
 
+const AVATAR_PALETTE = [
+  { bg: "#EAC4B7", fg: "#8B4B3A" },
+  { bg: "#D6DAC0", fg: "#5C6B3E" },
+  { bg: "#E8D2A0", fg: "#8A6A2A" },
+  { bg: "#E3C2B0", fg: "#7A4A38" },
+];
+function RosterAvatar({ name, index, size = 32 }) {
+  const c = AVATAR_PALETTE[index % AVATAR_PALETTE.length];
+  return (
+    <div style={{ width: size, height: size, borderRadius: "999px", background: c.bg, color: c.fg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: Math.round(size * 0.42), fontWeight: 600, flexShrink: 0 }}>
+      {name?.slice(0, 1)}
+    </div>
+  );
+}
+function RosterCell({ r, index, showStore, storeName }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <RosterAvatar name={r.name} index={index} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 500 }}>{r.name}</div>
+        <div style={{ fontSize: 11.5, color: T.sub }}>{r.position}{showStore && storeName ? `・${storeName}` : ""}</div>
+      </div>
+    </div>
+  );
+}
+
 function Badge({ children, tone = "sub" }) {
   const map = {
     sub: { color: T.sub, background: T.subBg },
@@ -449,11 +475,10 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
                 </tr>
               </thead>
               <tbody>
-                {roster.map((r) => (
+                {roster.map((r, idx) => (
                   <tr key={r.id}>
-                    <td style={{ position: "sticky", left: 0, background: "#fff", fontWeight: 500 }}>
-                      {r.name}
-                      {scopeStoreIds.length > 1 && <div style={{ fontSize: 11, color: T.sub, fontWeight: 400 }}>{storeById[r.store_id]?.name}</div>}
+                    <td style={{ position: "sticky", left: 0, background: "#fff" }}>
+                      <RosterCell r={r} index={idx} showStore={scopeStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
                     </td>
                     {dateList.map((d) => {
                       const s = shiftMap[`${r.id}_${d}`];
@@ -491,16 +516,13 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
               <span style={{ fontSize: 14, fontWeight: 500 }}>{dateList[mobileDayIdx]}（週{weekdayZh(dateList[mobileDayIdx])}）</span>
               <button className="ph-btn small" onClick={() => setMobileDayIdx((i) => Math.min(days - 1, i + 1))} disabled={mobileDayIdx === days - 1}>›</button>
             </div>
-            {roster.map((r) => {
+            {roster.map((r, idx) => {
               const d = dateList[mobileDayIdx];
               const s = shiftMap[`${r.id}_${d}`];
               return (
                 <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: canEdit ? "pointer" : "default" }}
                   onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, date: d, existing: s })}>
-                  <div>
-                    <div style={{ fontWeight: 500, fontSize: 13.5 }}>{r.name}</div>
-                    <div style={{ fontSize: 11.5, color: T.sub }}>{storeById[r.store_id]?.name}・{r.position}</div>
-                  </div>
+                  <RosterCell r={r} index={idx} showStore storeName={storeById[r.store_id]?.name} />
                   <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
                 </div>
               );
@@ -1555,9 +1577,9 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {scopedRoster.map((r) => (
+                  {scopedRoster.map((r, idx) => (
                     <tr key={r.id}>
-                      <td><div style={{ fontWeight: 500 }}>{r.name}</div><div style={{ fontSize: 11.5, color: T.sub }}>{storeById[r.store_id]?.name}</div></td>
+                      <td><RosterCell r={r} index={idx} showStore={scopeStoreIds.length > 1} storeName={storeById[r.store_id]?.name} /></td>
                       {weekDates.map((d) => {
                         const s = weekShifts.find((sh) => sh.employee_id === r.id && sh.work_date === d);
                         const cls = s ? (s.is_day_off ? "cell-off" : "cell-work") : "";
@@ -1574,12 +1596,12 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
                 <span style={{ fontSize: 13.5, fontWeight: 500 }}>{weekDates[mobileDayIdx]}（週{weekdayZh(weekDates[mobileDayIdx])}）</span>
                 <button className="ph-btn small" onClick={() => setMobileDayIdx((i) => Math.min(6, i + 1))} disabled={mobileDayIdx === 6}>後一天 ›</button>
               </div>
-              {scopedRoster.map((r) => {
+              {scopedRoster.map((r, idx) => {
                 const d = weekDates[mobileDayIdx];
                 const s = weekShifts.find((sh) => sh.employee_id === r.id && sh.work_date === d);
                 return (
-                  <div key={r.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
-                    <div><div style={{ fontWeight: 500, fontSize: 13.5 }}>{r.name}</div><div style={{ fontSize: 11.5, color: T.sub }}>{storeById[r.store_id]?.name}</div></div>
+                  <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
+                    <RosterCell r={r} index={idx} showStore={scopeStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
                     <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "–"}</div>
                   </div>
                 );
