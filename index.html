@@ -121,7 +121,7 @@ const css = `
 .ph-daycell.off { color:${T.sub}; }
 .ph-daycell:hover { background:${T.brownSoft}; }
 .ph-err { color:${T.red}; font-size:12.5px; margin-top:4px; }
-.ph-debug { position:fixed; top:0; left:0; right:0; background:${T.red}; color:#fff; font-size:12px; padding:8px; z-index:999; white-space:pre-wrap; max-height:40vh; overflow:auto; }
+.ph-debug { position:fixed; bottom:0; left:0; right:0; background:${T.red}; color:#fff; font-size:12px; padding:8px; z-index:999; white-space:pre-wrap; max-height:30vh; overflow:auto; pointer-events:none; }
 @media (max-width: 720px) {
   .ph-hide-mobile { display:none; }
   .ph-table th, .ph-table td { padding:6px 6px; font-size:12px; }
@@ -172,11 +172,16 @@ function Login() {
   async function submit(e) {
     e.preventDefault();
     setErr(""); setBusy(true);
-    const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
-    setBusy(false);
-    if (error) {
-      sb.rpc("record_failed_login", { p_email: email.trim() }).catch(() => {});
-      setErr("登入失敗，請確認帳號密碼");
+    try {
+      const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
+      if (error) {
+        sb.rpc("record_failed_login", { p_email: email.trim() }).catch(() => {});
+        setErr("登入失敗，請確認帳號密碼（" + error.message + "）");
+      }
+    } catch (e2) {
+      setErr("登入時發生錯誤：" + (e2?.message || String(e2)));
+    } finally {
+      setBusy(false);
     }
   }
   async function forgotPw() {
@@ -192,10 +197,10 @@ function Login() {
         <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 20 }}>排班・請假加班・電子日總表・薪資試算</p>
         <form onSubmit={submit}>
           <Field label="Email">
-            <input className="ph-input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+            <input className="ph-input" type="email" name="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
           </Field>
           <Field label="密碼">
-            <input className="ph-input" type="password" required value={pw} onChange={(e) => setPw(e.target.value)} />
+            <input className="ph-input" type="password" name="password" autoComplete="current-password" required value={pw} onChange={(e) => setPw(e.target.value)} />
           </Field>
           {err && <div className="ph-err">{err}</div>}
           {resetSent && <div style={{ color: T.green, fontSize: 12.5, marginBottom: 8 }}>已寄出重設密碼信件</div>}
@@ -1149,11 +1154,17 @@ function App() {
 }
 
 // 全域錯誤攔截：本機除錯用（無 DevTools 情境下把錯誤直接顯示在畫面上）
-window.addEventListener("error", (e) => {
+function showDebugBox(text) {
   const el = document.getElementById("debug-box") || document.createElement("div");
   el.id = "debug-box"; el.className = "ph-debug";
-  el.textContent = "JS Error: " + e.message + "\n" + (e.filename || "") + ":" + (e.lineno || "");
+  el.textContent = text;
   document.body.appendChild(el);
+}
+window.addEventListener("error", (e) => {
+  showDebugBox("JS Error: " + e.message + "\n" + (e.filename || "") + ":" + (e.lineno || ""));
+});
+window.addEventListener("unhandledrejection", (e) => {
+  showDebugBox("Unhandled Promise Rejection: " + (e.reason?.message || e.reason));
 });
 
 ReactDOM.createRoot(document.getElementById("root")).render(<><style>{css}</style><App /></>);
