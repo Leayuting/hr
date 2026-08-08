@@ -1,0 +1,1168 @@
+<!DOCTYPE html>
+<!--
+  PHASE 人事排班系統 · Supabase 正式版
+  架構：單頁 React（無建置流程），Supabase Auth 登入 + 逐表 RLS 依角色/門市限制，
+  詳見同目錄 phase-hr_schema.sql。直接把這份檔案當 index.html 部署到 GitHub Pages 即可。
+-->
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>PHASE 人事排班系統</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<meta name="theme-color" content="#7B4326">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="人事排班">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+<style>html,body{margin:0;padding:0;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+const { createClient } = supabase;
+
+/* ────────────────────────────────────────────
+   PHASE 人事排班系統
+   設計語言沿用 phase-ledger／phase-attendance 的共同語言：
+   暖白底・深墨字・低飽和棕主色，明體標題（Noto Serif TC）＋ 黑體內文（Noto Sans TC）
+──────────────────────────────────────────── */
+
+const T = {
+  bg: "#FAF7F1", card: "#FFFFFF", ink: "#2B2521", sub: "#7A7168",
+  brown: "#7B4326", brownSoft: "#F1E7DD", line: "#E8E0D4",
+  green: "#3F7350", greenBg: "#E9F1EA",
+  yellow: "#A8791A", yellowBg: "#FBF3DC",
+  red: "#AE3B2C", redBg: "#F9E9E6",
+  rose: "#A85C7A", roseBg: "#F5E9EF",
+};
+
+const SB_URL = "https://msrjtjpanejszhlxuqyd.supabase.co";
+const SB_KEY = "sb_publishable_1clgZF2darBDVaoPyC1zdQ_ez_4OiWb";
+const sb = createClient(SB_URL, SB_KEY);
+
+const ROLE_LABEL = { staff: "夥伴", manager: "店長", hr: "營運／人資" };
+const REQ_TYPE_LABEL = { annual_leave: "特休", personal_leave: "事假", overtime: "加班" };
+const REQ_STATUS_LABEL = { pending: "待審核", approved: "已核准", rejected: "已拒絕" };
+const REPORT_STATUS_LABEL = { draft: "未送出", submitted: "待簽核", signed: "待人資交接", hr_received: "已完成" };
+const BACKUP_TABLES = ["stores", "employees", "shifts", "requests", "payroll_runs", "daily_reports", "daily_report_entries", "daily_report_attachments", "audit_logs"];
+
+/* ────────────────────────────────────────────
+   共用工具
+──────────────────────────────────────────── */
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+function todayStr() {
+  const now = new Date(Date.now() + 8 * 3600 * 1000); // UTC+8，台灣無日光節省時間
+  return `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`;
+}
+function thisMonthStr() { return todayStr().slice(0, 7); }
+function fmtTaipei(iso) {
+  if (!iso) return "";
+  const d = new Date(new Date(iso).getTime() + 8 * 3600 * 1000);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+}
+function monthDays(yearMonth) {
+  const [y, m] = yearMonth.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+function money(n) { return Math.round(Number(n) || 0).toLocaleString("zh-TW"); }
+function isHalfHourStep(n) { return Number.isFinite(n) && n > 0 && Math.round(n * 2) === n * 2; }
+async function logAudit(actorLabel, action, target, detail = "") {
+  try {
+    await sb.from("audit_logs").insert({ actor_label: actorLabel, action, target, detail });
+  } catch (e) { console.warn("audit log failed", e); }
+}
+
+/* ────────────────────────────────────────────
+   共用 UI 元件
+──────────────────────────────────────────── */
+
+const css = `
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap');
+* { box-sizing: border-box; }
+.ph-root { font-family:'Noto Sans TC', sans-serif; background:${T.bg}; color:${T.ink}; min-height:100vh; font-size:14px; }
+.ph-serif { font-family:'Noto Serif TC', serif; }
+.ph-root input, .ph-root select, .ph-root textarea, .ph-root button { font-family:'Noto Sans TC', sans-serif; font-size:14px; }
+.ph-input { width:100%; padding:8px 10px; border:1px solid ${T.line}; border-radius:6px; background:#fff; color:${T.ink}; }
+.ph-input:focus { outline:2px solid ${T.brown}33; border-color:${T.brown}; }
+.ph-input[disabled] { background:#F5F1EA; color:${T.sub}; }
+.ph-btn { padding:8px 16px; border-radius:6px; border:1px solid ${T.line}; background:#fff; color:${T.ink}; cursor:pointer; transition:background .15s; white-space:nowrap; }
+.ph-btn:hover { background:#F5F0E8; }
+.ph-btn.primary { background:${T.brown}; border-color:${T.brown}; color:#fff; }
+.ph-btn.primary:hover { background:#6A3920; }
+.ph-btn.danger { color:${T.red}; border-color:${T.red}55; }
+.ph-btn.danger:hover { background:${T.redBg}; }
+.ph-btn.small { padding:4px 10px; font-size:12.5px; }
+.ph-btn[disabled] { opacity:.4; cursor:not-allowed; }
+.ph-table { width:100%; border-collapse:separate; border-spacing:0; background:#fff; }
+.ph-table th { text-align:left; padding:8px 10px; font-weight:500; color:${T.sub}; border-bottom:1px solid ${T.line}; font-size:12px; white-space:nowrap; background:#FCFAF6; }
+.ph-table td { padding:8px 10px; border-bottom:1px solid ${T.line}; vertical-align:middle; font-size:13px; }
+.ph-table tr:hover td { background:#FBF8F2; }
+.ph-card { background:${T.card}; border:1px solid ${T.line}; border-radius:10px; }
+.ph-nav-item { display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:8px; cursor:pointer; color:${T.ink}; border:none; background:none; width:100%; text-align:left; }
+.ph-nav-item:hover { background:${T.brownSoft}; }
+.ph-nav-item.on { background:${T.brown}; color:#fff; }
+.ph-badge { display:inline-flex; align-items:center; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:500; white-space:nowrap; }
+.ph-modal-backdrop { position:fixed; inset:0; background:rgba(43,37,33,.45); display:flex; align-items:center; justify-content:center; z-index:60; padding:16px; }
+.ph-modal { background:#fff; border-radius:12px; max-width:520px; width:100%; max-height:88vh; overflow:auto; padding:20px; }
+.ph-toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:${T.ink}; color:#fff; padding:10px 18px; border-radius:999px; font-size:13px; z-index:80; }
+.ph-field label { display:block; font-size:12.5px; color:${T.sub}; margin-bottom:4px; }
+.ph-field { margin-bottom:12px; }
+.ph-daycell { min-width:64px; text-align:center; cursor:pointer; }
+.ph-daycell.off { color:${T.sub}; }
+.ph-daycell:hover { background:${T.brownSoft}; }
+.ph-err { color:${T.red}; font-size:12.5px; margin-top:4px; }
+.ph-debug { position:fixed; top:0; left:0; right:0; background:${T.red}; color:#fff; font-size:12px; padding:8px; z-index:999; white-space:pre-wrap; max-height:40vh; overflow:auto; }
+@media (max-width: 720px) {
+  .ph-hide-mobile { display:none; }
+  .ph-table th, .ph-table td { padding:6px 6px; font-size:12px; }
+}
+`;
+
+function Badge({ children, tone = "sub" }) {
+  const map = {
+    sub: { color: T.sub, background: "#EFEAE1" },
+    green: { color: T.green, background: T.greenBg },
+    yellow: { color: T.yellow, background: T.yellowBg },
+    red: { color: T.red, background: T.redBg },
+    rose: { color: T.rose, background: T.roseBg },
+    brown: { color: T.brown, background: T.brownSoft },
+  };
+  return <span className="ph-badge" style={map[tone] || map.sub}>{children}</span>;
+}
+
+function Modal({ title, onClose, children, wide }) {
+  return (
+    <div className="ph-modal-backdrop" onMouseDown={() => onClose()}>
+      <div className="ph-modal" style={wide ? { maxWidth: 760 } : undefined} onMouseDown={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <h3 className="ph-serif" style={{ margin: 0, fontSize: 17 }}>{title}</h3>
+          <button className="ph-btn small" onClick={onClose}>關閉</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return <div className="ph-field"><label>{label}</label>{children}</div>;
+}
+
+/* ────────────────────────────────────────────
+   登入
+──────────────────────────────────────────── */
+
+function Login() {
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setErr(""); setBusy(true);
+    const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
+    setBusy(false);
+    if (error) {
+      sb.rpc("record_failed_login", { p_email: email.trim() }).catch(() => {});
+      setErr("登入失敗，請確認帳號密碼");
+    }
+  }
+  async function forgotPw() {
+    if (!email.trim()) { setErr("請先輸入 Email"); return; }
+    await sb.auth.resetPasswordForEmail(email.trim());
+    setResetSent(true);
+  }
+
+  return (
+    <div className="ph-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div className="ph-card" style={{ width: 360, padding: 28 }}>
+        <h1 className="ph-serif" style={{ fontSize: 20, marginTop: 0, marginBottom: 4 }}>PHASE 人事排班系統</h1>
+        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 20 }}>排班・請假加班・電子日總表・薪資試算</p>
+        <form onSubmit={submit}>
+          <Field label="Email">
+            <input className="ph-input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+          </Field>
+          <Field label="密碼">
+            <input className="ph-input" type="password" required value={pw} onChange={(e) => setPw(e.target.value)} />
+          </Field>
+          {err && <div className="ph-err">{err}</div>}
+          {resetSent && <div style={{ color: T.green, fontSize: 12.5, marginBottom: 8 }}>已寄出重設密碼信件</div>}
+          <button className="ph-btn primary" style={{ width: "100%", marginTop: 6 }} disabled={busy} type="submit">
+            {busy ? "登入中…" : "登入"}
+          </button>
+          <button type="button" className="ph-btn" style={{ width: "100%", marginTop: 8, border: "none", background: "none", color: T.sub, fontSize: 12.5 }} onClick={forgotPw}>
+            忘記密碼？
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────
+   排班表
+──────────────────────────────────────────── */
+
+function SchedulePage({ me, stores, storeId, setStoreId, toast }) {
+  const [ym, setYm] = useState(thisMonthStr());
+  const [roster, setRoster] = useState([]);
+  const [shifts, setShifts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null); // {employeeId, employeeName, date}
+  const canEdit = me.role === "manager" || me.role === "hr";
+
+  const load = useCallback(async () => {
+    if (!storeId) return;
+    setLoading(true);
+    const days = monthDays(ym);
+    const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
+    const [rosterRes, shiftRes] = await Promise.all([
+      sb.rpc("store_roster", { p_store_id: storeId }),
+      sb.from("shifts").select("*").eq("store_id", storeId).gte("work_date", from).lte("work_date", to),
+    ]);
+    if (rosterRes.error) console.error("store_roster", rosterRes.error);
+    if (shiftRes.error) console.error("shifts", shiftRes.error);
+    setRoster((rosterRes.data || []).filter((r) => r.active));
+    setShifts(shiftRes.data || []);
+    setLoading(false);
+  }, [storeId, ym]);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const ch = sb.channel("schedule_" + storeId)
+      .on("postgres_changes", { event: "*", schema: "public", table: "shifts", filter: `store_id=eq.${storeId}` }, () => load())
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [storeId, load]);
+
+  const days = monthDays(ym);
+  const dateList = Array.from({ length: days }, (_, i) => `${ym}-${pad2(i + 1)}`);
+  const shiftMap = useMemo(() => {
+    const m = {};
+    shifts.forEach((s) => { m[`${s.employee_id}_${s.work_date}`] = s; });
+    return m;
+  }, [shifts]);
+
+  async function saveShift(employeeId, date, { startTime, endTime, isDayOff, note }) {
+    const payload = {
+      employee_id: employeeId, store_id: storeId, work_date: date,
+      start_time: isDayOff ? null : (startTime || null),
+      end_time: isDayOff ? null : (endTime || null),
+      is_day_off: isDayOff, note: note || "",
+      updated_by: me.id, updated_at: new Date().toISOString(),
+    };
+    const { error } = await sb.from("shifts").upsert(payload, { onConflict: "employee_id,work_date" });
+    if (error) { toast("儲存失敗：" + (error.message.includes("row-level security") ? "此月份薪資已鎖定或無權限" : error.message)); return; }
+    await logAudit(me.name, "update_shift", `${employeeId}:${date}`, isDayOff ? "休" : `${startTime}-${endTime}`);
+    setEditing(null);
+    load();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <h2 className="ph-serif" style={{ margin: 0 }}>排班表</h2>
+        {me.role === "hr" && (
+          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        )}
+        <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+      </div>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+        <div className="ph-card" style={{ overflowX: "auto" }}>
+          <table className="ph-table">
+            <thead>
+              <tr>
+                <th style={{ position: "sticky", left: 0, background: "#FCFAF6" }}>夥伴</th>
+                {dateList.map((d) => <th key={d}>{Number(d.slice(8))}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {roster.map((r) => (
+                <tr key={r.id}>
+                  <td style={{ position: "sticky", left: 0, background: "#fff", fontWeight: 500 }}>{r.name}</td>
+                  {dateList.map((d) => {
+                    const s = shiftMap[`${r.id}_${d}`];
+                    const mine = r.id === me.id;
+                    return (
+                      <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
+                        style={mine ? { background: T.brownSoft } : undefined}
+                        onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, date: d, existing: s })}>
+                        {s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              {roster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {editing && (
+        <ShiftEditModal editing={editing} onClose={() => setEditing(null)} onSave={saveShift} />
+      )}
+    </div>
+  );
+}
+
+function ShiftEditModal({ editing, onClose, onSave }) {
+  const ex = editing.existing;
+  const [isDayOff, setIsDayOff] = useState(ex ? ex.is_day_off : false);
+  const [startTime, setStartTime] = useState(ex?.start_time?.slice(0, 5) || "10:00");
+  const [endTime, setEndTime] = useState(ex?.end_time?.slice(0, 5) || "19:00");
+  const [note, setNote] = useState(ex?.note || "");
+  return (
+    <Modal title={`${editing.employeeName}・${editing.date}`} onClose={onClose}>
+      <Field label="班次">
+        <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+          <input type="checkbox" checked={isDayOff} onChange={(e) => setIsDayOff(e.target.checked)} /> 休假
+        </label>
+        {!isDayOff && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <input className="ph-input" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+            <input className="ph-input" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+          </div>
+        )}
+      </Field>
+      <Field label="備註"><input className="ph-input" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button className="ph-btn" onClick={onClose}>取消</button>
+        <button className="ph-btn primary" onClick={() => onSave(editing.employeeId, editing.date, { startTime, endTime, isDayOff, note })}>儲存</button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ────────────────────────────────────────────
+   請假／加班申請
+──────────────────────────────────────────── */
+
+function RequestsPage({ me, stores, storeId, setStoreId, toast }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const canReview = me.role === "manager" || me.role === "hr";
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    let q = sb.from("requests").select("*, employees!requests_employee_id_fkey(name)").order("submitted_at", { ascending: false }).limit(200);
+    if (canReview && storeId) q = q.eq("store_id", storeId);
+    if (!canReview) q = q.eq("employee_id", me.id);
+    const { data, error } = await q;
+    if (error) console.error("requests load", error);
+    setRows(data || []);
+    setLoading(false);
+  }, [storeId, canReview, me.id]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("requests_sync").on("postgres_changes", { event: "*", schema: "public", table: "requests" }, () => load()).subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
+
+  async function decide(id, decision) {
+    const { error } = await sb.from("requests").update({ status: decision, reviewed_by: me.id, reviewed_at: new Date().toISOString() }).eq("id", id);
+    if (error) { toast("操作失敗：" + error.message); return; }
+    await logAudit(me.name, decision, `request:${id}`);
+    toast(decision === "approved" ? "已核准" : "已拒絕");
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <h2 className="ph-serif" style={{ margin: 0 }}>請假／加班</h2>
+        {canReview && me.role === "hr" && (
+          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        )}
+        <button className="ph-btn primary" onClick={() => setShowForm(true)}>＋ 送出申請</button>
+      </div>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+        <div className="ph-card" style={{ overflowX: "auto" }}>
+          <table className="ph-table">
+            <thead><tr>
+              <th>夥伴</th><th>類型</th><th>起</th><th>迄</th><th>時數</th><th>事由</th><th>狀態</th>{canReview && <th>操作</th>}
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.employees?.name || "—"}</td>
+                  <td>{REQ_TYPE_LABEL[r.type]}</td>
+                  <td>{fmtTaipei(r.start_at)}</td>
+                  <td>{fmtTaipei(r.end_at)}</td>
+                  <td>{r.hours}</td>
+                  <td>{r.reason}</td>
+                  <td><Badge tone={r.status === "approved" ? "green" : r.status === "rejected" ? "red" : "yellow"}>{REQ_STATUS_LABEL[r.status]}</Badge></td>
+                  {canReview && (
+                    <td>
+                      {r.status === "pending" ? (
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button className="ph-btn small" onClick={() => decide(r.id, "approved")}>核准</button>
+                          <button className="ph-btn small danger" onClick={() => decide(r.id, "rejected")}>拒絕</button>
+                        </div>
+                      ) : "—"}
+                    </td>
+                  )}
+                </tr>
+              ))}
+              {rows.length === 0 && <tr><td colSpan={canReview ? 8 : 7} style={{ color: T.sub, textAlign: "center" }}>沒有紀錄</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {showForm && <RequestFormModal me={me} storeId={storeId} onClose={() => setShowForm(false)} onSaved={() => { setShowForm(false); load(); toast("已送出申請"); }} />}
+    </div>
+  );
+}
+
+function RequestFormModal({ me, storeId, onClose, onSaved }) {
+  const [type, setType] = useState("annual_leave");
+  const [date, setDate] = useState(todayStr());
+  const [startTime, setStartTime] = useState("09:00");
+  const [endTime, setEndTime] = useState("18:00");
+  const [reason, setReason] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setErr("");
+    const startAt = `${date}T${startTime}:00+08:00`;
+    const endAt = `${date}T${endTime}:00+08:00`;
+    const hours = (new Date(endAt) - new Date(startAt)) / 3600000;
+    if (!(hours > 0)) { setErr("結束時間須晚於開始時間"); return; }
+    if (!isHalfHourStep(hours)) { setErr("時數須為 0.5 小時單位"); return; }
+    if (!reason.trim()) { setErr("請填寫事由"); return; }
+    setBusy(true);
+    const { error } = await sb.from("requests").insert({
+      employee_id: me.id, store_id: storeId, type, start_at: startAt, end_at: endAt, hours, reason: reason.trim(),
+    });
+    setBusy(false);
+    if (error) { setErr(error.message.includes("row-level security") ? "此月份薪資已鎖定，無法送出" : error.message); return; }
+    await logAudit(me.name, "submit_request", type);
+    onSaved();
+  }
+
+  return (
+    <Modal title="送出請假／加班申請" onClose={onClose}>
+      <Field label="類型">
+        <select className="ph-input" value={type} onChange={(e) => setType(e.target.value)}>
+          <option value="annual_leave">特休</option>
+          <option value="personal_leave">事假</option>
+          <option value="overtime">加班</option>
+        </select>
+      </Field>
+      <Field label="日期"><input className="ph-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label="開始時間"><input className="ph-input" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} /></Field>
+        <Field label="結束時間"><input className="ph-input" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} /></Field>
+      </div>
+      <Field label="事由"><textarea className="ph-input" rows={2} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      {err && <div className="ph-err">{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button className="ph-btn" onClick={onClose}>取消</button>
+        <button className="ph-btn primary" disabled={busy} onClick={submit}>{busy ? "送出中…" : "送出"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ────────────────────────────────────────────
+   電子日總表
+──────────────────────────────────────────── */
+
+function DailyReportPage({ me, stores, storeId, setStoreId, toast }) {
+  const [date, setDate] = useState(todayStr());
+  const [roster, setRoster] = useState([]);
+  const [report, setReport] = useState(null);
+  const [entries, setEntries] = useState({}); // employeeId -> entry draft
+  const [attachments, setAttachments] = useState([]);
+  const [posVerified, setPosVerified] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [attachmentsComplete, setAttachmentsComplete] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!storeId) return;
+    setLoading(true);
+    const [rosterRes, reportRes] = await Promise.all([
+      sb.rpc("store_roster", { p_store_id: storeId }),
+      sb.from("daily_reports").select("*").eq("store_id", storeId).eq("report_date", date).maybeSingle(),
+    ]);
+    if (rosterRes.error) console.error("store_roster", rosterRes.error);
+    if (reportRes.error) console.error("daily_reports", reportRes.error);
+    const rosterActive = (rosterRes.data || []).filter((r) => r.active);
+    setRoster(rosterActive);
+    const rep = reportRes.data;
+    setReport(rep);
+    setPosVerified(rep?.pos_verified || false);
+    let entryMap = {};
+    let attachRows = [];
+    if (rep) {
+      const [entriesRes, attachRes] = await Promise.all([
+        sb.from("daily_report_entries").select("*").eq("daily_report_id", rep.id),
+        sb.from("daily_report_attachments").select("*").eq("daily_report_id", rep.id),
+      ]);
+      (entriesRes.data || []).forEach((e) => { entryMap[e.employee_id] = e; });
+      attachRows = attachRes.data || [];
+    }
+    const draft = {};
+    rosterActive.forEach((r) => {
+      const e = entryMap[r.id];
+      draft[r.id] = e ? { ...e } : { late: false, missed_punch: false, leave: false, overtime: false, overtime_hours: "", reason: "", improvement: "", note: "" };
+    });
+    setEntries(draft);
+    setAttachments(attachRows);
+    setLoading(false);
+  }, [storeId, date]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const hasAnomaly = Object.values(entries).some((e) => e.late || e.missed_punch || e.leave || e.overtime);
+  const canWrite = (me.role === "manager" || me.role === "hr") && (!report || report.status === "draft" || report.status === "submitted");
+
+  function updateEntry(employeeId, patch) {
+    setEntries((prev) => ({ ...prev, [employeeId]: { ...prev[employeeId], ...patch } }));
+  }
+
+  async function submitReport() {
+    if (!posVerified) { toast("請先勾選已完成 POS 出缺勤與加班核對"); return; }
+    for (const r of roster) {
+      const e = entries[r.id];
+      const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
+      if (anomaly && (!e.reason?.trim() || !e.improvement?.trim())) { toast(`${r.name}的異常須填寫原因與改善方式`); return; }
+      if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { toast(`${r.name}的加班時數須以 0.5 小時為單位`); return; }
+    }
+    let reportId = report?.id;
+    if (!reportId) {
+      const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString() }).select().single();
+      if (error) { toast("送出失敗：" + error.message); return; }
+      reportId = data.id;
+    } else {
+      const { error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), signed_by: null, signed_at: null }).eq("id", reportId);
+      if (error) { toast("送出失敗：" + error.message); return; }
+    }
+    for (const r of roster) {
+      const e = entries[r.id];
+      await sb.from("daily_report_entries").upsert({
+        daily_report_id: reportId, store_id: storeId, employee_id: r.id,
+        late: e.late, missed_punch: e.missed_punch, leave: e.leave, overtime: e.overtime,
+        overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
+        reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
+      }, { onConflict: "daily_report_id,employee_id" });
+    }
+    await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
+    toast("已送出，等待領班簽核");
+    load();
+  }
+
+  async function signReport() {
+    if (hasAnomaly && (!attachments.length || !attachmentsComplete)) { toast("請先上傳所有相關附件並勾選確認"); return; }
+    const { error } = await sb.from("daily_reports").update({ status: "signed", signed_by: me.id, signed_at: new Date().toISOString() }).eq("id", report.id);
+    if (error) { toast("簽核失敗：" + error.message); return; }
+    await logAudit(me.name, "sign_daily_report", report.id);
+    toast("已完成領班簽核");
+    load();
+  }
+
+  async function handoffReport() {
+    const { error } = await sb.from("daily_reports").update({ status: "hr_received", hr_received_by: me.id, hr_received_at: new Date().toISOString() }).eq("id", report.id);
+    if (error) { toast("交接失敗：" + error.message); return; }
+    await logAudit(me.name, "handoff_daily_report", report.id);
+    toast("已完成人資交接");
+    load();
+  }
+
+  async function uploadFile(file) {
+    if (!report?.id) { toast("請先送出日總表後再上傳附件"); return; }
+    if (file.size > 10 * 1024 * 1024) { toast("單檔上限 10MB"); return; }
+    const path = `${report.id}/${Date.now()}_${file.name}`;
+    const { error: upErr } = await sb.storage.from("daily-report-attachments").upload(path, file);
+    if (upErr) { toast("上傳失敗：" + upErr.message); return; }
+    const { error } = await sb.from("daily_report_attachments").insert({
+      daily_report_id: report.id, store_id: storeId, storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "application/octet-stream", uploaded_by: me.id,
+    });
+    if (error) { toast("附件登錄失敗：" + error.message); return; }
+    load();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <h2 className="ph-serif" style={{ margin: 0 }}>電子日總表</h2>
+        {me.role === "hr" && (
+          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        )}
+        <input className="ph-input" style={{ width: 150 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        {report && <Badge tone={report.status === "hr_received" ? "green" : report.status === "signed" ? "brown" : report.status === "submitted" ? "yellow" : "sub"}>{REPORT_STATUS_LABEL[report.status]}</Badge>}
+      </div>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+        <>
+          <div className="ph-card" style={{ padding: 14, marginBottom: 14, overflowX: "auto" }}>
+            <table className="ph-table">
+              <thead><tr><th>夥伴</th><th>遲到</th><th>漏打卡</th><th>請假</th><th>加班</th><th className="ph-hide-mobile">加班時數</th><th className="ph-hide-mobile">原因</th><th className="ph-hide-mobile">改善方式</th></tr></thead>
+              <tbody>
+                {roster.map((r) => {
+                  const e = entries[r.id] || {};
+                  const dis = !canWrite;
+                  return (
+                    <tr key={r.id}>
+                      <td>{r.name}</td>
+                      <td><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} /></td>
+                      <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /></td>
+                      <td><input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} /></td>
+                      <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => updateEntry(r.id, { overtime: ev.target.checked })} /></td>
+                      <td className="ph-hide-mobile">{e.overtime && <input className="ph-input" style={{ width: 70 }} type="number" step="0.5" min="0.5" disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })} />}</td>
+                      <td className="ph-hide-mobile"><input className="ph-input" disabled={dis} value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value })} /></td>
+                      <td className="ph-hide-mobile"><input className="ph-input" disabled={dis} value={e.improvement || ""} onChange={(ev) => updateEntry(r.id, { improvement: ev.target.value })} /></td>
+                    </tr>
+                  );
+                })}
+                {roster.length === 0 && <tr><td colSpan={8} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="ph-card" style={{ padding: 14, marginBottom: 14 }}>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+              <input type="checkbox" disabled={!canWrite} checked={posVerified} onChange={(e) => setPosVerified(e.target.checked)} />
+              已完成 POS 出缺勤與加班核對
+            </label>
+            <div style={{ marginBottom: 10 }}>
+              <strong style={{ fontSize: 13 }}>相關附件</strong>
+              <p style={{ color: T.sub, fontSize: 12, margin: "4px 0" }}>漏打卡／請假／加班須上傳補單或證明，支援 PDF 與圖片，單檔上限 10MB。</p>
+              {attachments.length === 0 && <p style={{ color: T.sub, fontSize: 12.5 }}>{hasAnomaly ? "目前沒有附件，簽核前必須上傳" : "目前沒有附件"}</p>}
+              <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
+                {attachments.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
+              </ul>
+              {canWrite && report?.id && (
+                <input type="file" accept="application/pdf,image/*" onChange={(e) => e.target.files[0] && uploadFile(e.target.files[0])} />
+              )}
+              {hasAnomaly && (
+                <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12.5 }}>
+                  <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || me.role !== "manager" && me.role !== "hr"} />
+                  確認附件已完整上傳
+                </label>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {(!report || report.status === "draft" || report.status === "submitted") && canWrite && (
+                <button className="ph-btn primary" onClick={submitReport}>{report ? "更新並重新送出" : "送出日總表"}</button>
+              )}
+              {report?.status === "submitted" && canWrite && (
+                <button className="ph-btn primary" onClick={signReport}>領班簽核</button>
+              )}
+              {report?.status === "signed" && me.role === "hr" && (
+                <button className="ph-btn primary" onClick={handoffReport}>確認人資交接</button>
+              )}
+              {report?.status === "signed" && me.role !== "hr" && <span style={{ color: T.sub, fontSize: 12.5 }}>✓ 已完成領班簽核，等待人資交接</span>}
+              {report?.status === "hr_received" && <span style={{ color: T.green, fontSize: 12.5 }}>✓ 領班與人資流程皆已完成</span>}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────
+   薪資試算
+──────────────────────────────────────────── */
+
+function PayrollPage({ me, stores, storeId, setStoreId, toast }) {
+  const [ym, setYm] = useState(thisMonthStr());
+  const [roster, setRoster] = useState([]);
+  const [employeesFull, setEmployeesFull] = useState([]);
+  const [shifts, setShifts] = useState([]);
+  const [requests, setRequests] = useState([]);
+  const [run, setRun] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    if (!storeId) return;
+    setLoading(true);
+    const days = monthDays(ym);
+    const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
+    const [empRes, shiftRes, reqRes, runRes] = await Promise.all([
+      sb.from("employees").select("*").eq("store_id", storeId).eq("active", true),
+      sb.from("shifts").select("*").eq("store_id", storeId).gte("work_date", from).lte("work_date", to),
+      sb.from("requests").select("*").eq("store_id", storeId).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
+      sb.from("payroll_runs").select("*").eq("store_id", storeId).eq("year_month", ym).maybeSingle(),
+    ]);
+    [empRes, shiftRes, reqRes, runRes].forEach((r) => { if (r.error) console.error("payroll load", r.error); });
+    setEmployeesFull(empRes.data || []);
+    setRoster(empRes.data || []);
+    setShifts(shiftRes.data || []);
+    setRequests(reqRes.data || []);
+    setRun(runRes.data || null);
+    setLoading(false);
+  }, [storeId, ym]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const rows = useMemo(() => {
+    return roster.map((emp) => {
+      const empShifts = shifts.filter((s) => s.employee_id === emp.id && !s.is_day_off && s.start_time && s.end_time);
+      const workedHours = empShifts.reduce((sum, s) => {
+        const [sh, sm] = s.start_time.split(":").map(Number);
+        const [eh, em2] = s.end_time.split(":").map(Number);
+        return sum + Math.max(0, (eh * 60 + em2 - (sh * 60 + sm)) / 60);
+      }, 0);
+      const empRequests = requests.filter((r) => r.employee_id === emp.id);
+      const overtimeHours = empRequests.filter((r) => r.type === "overtime").reduce((s, r) => s + Number(r.hours), 0);
+      const personalLeaveHours = empRequests.filter((r) => r.type === "personal_leave").reduce((s, r) => s + Number(r.hours), 0);
+      const isFullTime = emp.employment_type === "full_time";
+      const hourlyBase = isFullTime ? Number(emp.base_salary) / 240 : Number(emp.hourly_rate);
+      const overtimePay = overtimeHours * hourlyBase * 1.34;
+      const leaveDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0;
+      const basePay = isFullTime ? Number(emp.base_salary) : workedHours * Number(emp.hourly_rate);
+      const total = basePay + Number(emp.bonus) + overtimePay - leaveDeduction;
+      return { emp, workedHours, overtimeHours, personalLeaveHours, basePay, overtimePay, leaveDeduction, total };
+    });
+  }, [roster, shifts, requests]);
+
+  const locked = run?.status === "locked";
+
+  async function toggleLock() {
+    if (locked) {
+      const { error } = await sb.from("payroll_runs").update({ status: "draft", locked_by: null, locked_at: null }).eq("id", run.id);
+      if (error) { toast("解鎖失敗：" + error.message); return; }
+      await logAudit(me.name, "unlock_payroll", `${storeId}:${ym}`);
+      toast("已解鎖");
+    } else {
+      if (!run) {
+        const { data, error } = await sb.from("payroll_runs").insert({ store_id: storeId, year_month: ym, status: "locked", locked_by: me.id, locked_at: new Date().toISOString() }).select().single();
+        if (error) { toast("鎖定失敗：" + error.message); return; }
+      } else {
+        const { error } = await sb.from("payroll_runs").update({ status: "locked", locked_by: me.id, locked_at: new Date().toISOString() }).eq("id", run.id);
+        if (error) { toast("鎖定失敗：" + error.message); return; }
+      }
+      await logAudit(me.name, "lock_payroll", `${storeId}:${ym}`);
+      toast("已鎖定該月薪資");
+    }
+    load();
+  }
+
+  function exportCsv() {
+    const head = ["姓名", "類型", "本薪/工時薪資", "獎金", "加班費", "事假扣款", "應發合計"];
+    const lines = [head.join(",")].concat(rows.map((r) => [r.emp.name, r.emp.employment_type === "full_time" ? "全職" : "兼職", Math.round(r.basePay), Math.round(r.emp.bonus), Math.round(r.overtimePay), Math.round(r.leaveDeduction), Math.round(r.total)].join(",")));
+    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `PHASE_薪資試算_${ym}.csv`;
+    a.click();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <h2 className="ph-serif" style={{ margin: 0 }}>薪資試算</h2>
+        {me.role === "hr" && (
+          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        )}
+        <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+        <button className="ph-btn" onClick={exportCsv}>匯出 CSV</button>
+        {me.role === "hr" && <button className="ph-btn primary" onClick={toggleLock}>{locked ? "解鎖" : "鎖定本月"}</button>}
+        {locked && <Badge tone="brown">已鎖定</Badge>}
+      </div>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: -6 }}>※ 此頁為內部薪資試算，正式發薪前仍須人工複核；加班費／事假扣款皆為估算值。</p>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+        <div className="ph-card" style={{ overflowX: "auto" }}>
+          <table className="ph-table">
+            <thead><tr><th>夥伴</th><th>類型</th><th>本薪/工資</th><th>獎金</th><th>加班</th><th>事假扣款</th><th>應發合計</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.emp.id}>
+                  <td>{r.emp.name}</td>
+                  <td>{r.emp.employment_type === "full_time" ? "全職" : "兼職"}</td>
+                  <td>NT$ {money(r.basePay)}</td>
+                  <td>NT$ {money(r.emp.bonus)}</td>
+                  <td>NT$ {money(r.overtimePay)}</td>
+                  <td>−NT$ {money(r.leaveDeduction)}</td>
+                  <td style={{ fontWeight: 600 }}>NT$ {money(r.total)}</td>
+                </tr>
+              ))}
+              {rows.length === 0 && <tr><td colSpan={7} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────
+   員工管理（hr 全欄位；manager 僅能新增/編輯非薪資欄位，見伺服器 trigger 強制）
+──────────────────────────────────────────── */
+
+function StaffPage({ me, stores, storeId, setStoreId, toast }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+
+  const load = useCallback(async () => {
+    if (!storeId) return;
+    setLoading(true);
+    const { data, error } = await sb.from("employees").select("*").eq("store_id", storeId).order("active", { ascending: false }).order("name");
+    if (error) console.error("staff load", error);
+    setRows(data || []);
+    setLoading(false);
+  }, [storeId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <h2 className="ph-serif" style={{ margin: 0 }}>在職夥伴</h2>
+        {me.role === "hr" && (
+          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        )}
+        <button className="ph-btn primary" onClick={() => setEditing({ isNew: true })}>＋ 新增夥伴</button>
+      </div>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+        <div className="ph-card" style={{ overflowX: "auto" }}>
+          <table className="ph-table">
+            <thead><tr><th>姓名</th><th>職務</th><th>類型</th><th>角色</th><th className="ph-hide-mobile">本薪/時薪</th><th className="ph-hide-mobile">獎金</th><th>在職</th><th>Email</th><th>操作</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.name}</td><td>{r.position}</td>
+                  <td>{r.employment_type === "full_time" ? "全職" : "兼職"}</td>
+                  <td>{ROLE_LABEL[r.role]}</td>
+                  <td className="ph-hide-mobile">{r.employment_type === "full_time" ? `NT$${money(r.base_salary)}` : `NT$${money(r.hourly_rate)}/hr`}</td>
+                  <td className="ph-hide-mobile">NT$ {money(r.bonus)}</td>
+                  <td>{r.active ? <Badge tone="green">在職</Badge> : <Badge tone="sub">停用</Badge>}</td>
+                  <td style={{ fontSize: 12 }}>{r.email || "—"}</td>
+                  <td><button className="ph-btn small" onClick={() => setEditing({ ...r })}>編輯</button></td>
+                </tr>
+              ))}
+              {rows.length === 0 && <tr><td colSpan={9} style={{ color: T.sub, textAlign: "center" }}>此門市尚無夥伴資料</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {editing && (
+        <StaffEditModal me={me} storeId={storeId} editing={editing} onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load(); toast("已儲存"); }} />
+      )}
+    </div>
+  );
+}
+
+function StaffEditModal({ me, storeId, editing, onClose, onSaved }) {
+  const isHr = me.role === "hr";
+  const [name, setName] = useState(editing.name || "");
+  const [position, setPosition] = useState(editing.position || "");
+  const [employmentType, setEmploymentType] = useState(editing.employment_type || "full_time");
+  const [role, setRole] = useState(editing.role || "staff");
+  const [baseSalary, setBaseSalary] = useState(editing.base_salary ?? 0);
+  const [hourlyRate, setHourlyRate] = useState(editing.hourly_rate ?? 0);
+  const [bonus, setBonus] = useState(editing.bonus ?? 0);
+  const [active, setActive] = useState(editing.active ?? true);
+  const [email, setEmail] = useState(editing.email || "");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    if (!name.trim()) { setErr("請輸入姓名"); return; }
+    setErr(""); setBusy(true);
+    const payload = { name: name.trim(), position, employment_type: employmentType, active, store_id: storeId };
+    if (isHr) { payload.role = role; payload.base_salary = Number(baseSalary) || 0; payload.hourly_rate = Number(hourlyRate) || 0; payload.bonus = Number(bonus) || 0; }
+    let error;
+    if (editing.isNew) {
+      ({ error } = await sb.from("employees").insert(payload));
+    } else {
+      ({ error } = await sb.from("employees").update(payload).eq("id", editing.id));
+    }
+    if (error) { setBusy(false); setErr(error.message); return; }
+    await logAudit(me.name, editing.isNew ? "create_employee" : "update_employee", editing.id || name);
+    setBusy(false);
+    onSaved();
+  }
+
+  async function linkAuth() {
+    if (!email.trim()) { setErr("請先輸入 Email"); return; }
+    const { data, error } = await sb.rpc("link_employee_auth", { p_employee_id: editing.id, p_email: email.trim() });
+    if (error) { setErr(error.message); return; }
+    if (!data) { setErr("尚未在 Supabase 後台建立此 Email 的登入帳號"); return; }
+    setErr(""); alert("已綁定登入帳號");
+  }
+
+  return (
+    <Modal title={editing.isNew ? "新增夥伴" : `編輯・${editing.name}`} onClose={onClose}>
+      <Field label="姓名"><input className="ph-input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+      <Field label="職務"><input className="ph-input" value={position} onChange={(e) => setPosition(e.target.value)} /></Field>
+      <Field label="計薪方式">
+        <select className="ph-input" value={employmentType} onChange={(e) => setEmploymentType(e.target.value)}>
+          <option value="full_time">全職（月薪）</option>
+          <option value="part_time">兼職（時薪）</option>
+        </select>
+      </Field>
+      <Field label={"角色" + (isHr ? "" : "（僅人資可調整）")}>
+        <select className="ph-input" value={role} disabled={!isHr} onChange={(e) => setRole(e.target.value)}>
+          <option value="staff">夥伴</option><option value="manager">店長</option><option value="hr">營運／人資</option>
+        </select>
+      </Field>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label={"本薪（全職）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={baseSalary} onChange={(e) => setBaseSalary(e.target.value)} /></Field>
+        <Field label={"時薪（兼職）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} /></Field>
+      </div>
+      <Field label={"獎金" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={bonus} onChange={(e) => setBonus(e.target.value)} /></Field>
+      <Field label="在職狀態">
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> 在職中</label>
+      </Field>
+      {!editing.isNew && (
+        <Field label="登入帳號 Email（先在 Supabase 後台建立同信箱的 Auth 帳號，再按下方綁定）">
+          <div style={{ display: "flex", gap: 8 }}>
+            <input className="ph-input" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <button className="ph-btn small" type="button" onClick={linkAuth}>綁定</button>
+          </div>
+        </Field>
+      )}
+      {err && <div className="ph-err">{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button className="ph-btn" onClick={onClose}>取消</button>
+        <button className="ph-btn primary" disabled={busy} onClick={save}>{busy ? "儲存中…" : "儲存"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ────────────────────────────────────────────
+   備份／匯出匯入（僅 hr）
+──────────────────────────────────────────── */
+
+function BackupPage({ me, toast }) {
+  const [busy, setBusy] = useState(false);
+  async function exportAll() {
+    setBusy(true);
+    const out = { exported_at: new Date().toISOString(), source: "phase-hr", tables: {} };
+    for (const t of BACKUP_TABLES) {
+      const { data, error } = await sb.from(t).select("*");
+      if (error) { toast(`匯出 ${t} 失敗：${error.message}`); setBusy(false); return; }
+      out.tables[t] = data;
+    }
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `phase-hr_備份_${todayStr()}.json`;
+    a.click();
+    await logAudit(me.name, "export_backup", "all");
+    setBusy(false);
+    toast("已匯出");
+  }
+  async function importFile(file) {
+    if (!confirm("匯入只會新增／更新資料，不會刪除既有資料，確定要繼續嗎？")) return;
+    setBusy(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      for (const t of BACKUP_TABLES) {
+        const rows = parsed.tables?.[t];
+        if (!rows || !rows.length) continue;
+        const { error } = await sb.from(t).upsert(rows, { onConflict: "id" });
+        if (error) throw new Error(`${t}: ${error.message}`);
+      }
+      await logAudit(me.name, "import_backup", file.name);
+      toast("匯入完成");
+    } catch (e) {
+      toast("匯入失敗：" + e.message);
+    }
+    setBusy(false);
+  }
+  return (
+    <div>
+      <h2 className="ph-serif">備份／還原</h2>
+      <div className="ph-card" style={{ padding: 16, maxWidth: 480 }}>
+        <p style={{ color: T.sub, fontSize: 13 }}>匯出包含九張業務資料表的完整快照；匯入採非破壞性 upsert（只新增／更新，不刪除）。</p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button className="ph-btn primary" disabled={busy} onClick={exportAll}>匯出全部備份</button>
+          <label className="ph-btn" style={{ cursor: "pointer" }}>
+            匯入還原
+            <input type="file" accept="application/json" style={{ display: "none" }} onChange={(e) => e.target.files[0] && importFile(e.target.files[0])} />
+          </label>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────
+   儀表板
+──────────────────────────────────────────── */
+
+function Dashboard({ me, stores, storeId, setPage }) {
+  const [myShiftToday, setMyShiftToday] = useState(undefined);
+  const [pendingCount, setPendingCount] = useState(0);
+  const canReview = me.role === "manager" || me.role === "hr";
+
+  useEffect(() => {
+    sb.from("shifts").select("*").eq("employee_id", me.id).eq("work_date", todayStr()).maybeSingle()
+      .then(({ data }) => setMyShiftToday(data || null));
+  }, [me.id]);
+
+  useEffect(() => {
+    if (!canReview || !storeId) return;
+    sb.from("requests").select("id", { count: "exact", head: true }).eq("store_id", storeId).eq("status", "pending")
+      .then(({ count }) => setPendingCount(count || 0));
+  }, [canReview, storeId]);
+
+  const storeName = stores.find((s) => s.id === storeId)?.name || "";
+
+  return (
+    <div>
+      <h2 className="ph-serif">哈囉，{me.name}</h2>
+      <p style={{ color: T.sub, marginTop: -8 }}>{ROLE_LABEL[me.role]}{storeName ? `・${storeName}` : "（全門市）"}</p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12, marginTop: 16 }}>
+        <div className="ph-card" style={{ padding: 16 }}>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>今日排班</p>
+          <p className="ph-serif" style={{ fontSize: 22, margin: "6px 0" }}>
+            {myShiftToday === undefined ? "…" : myShiftToday ? (myShiftToday.is_day_off ? "休假" : `${myShiftToday.start_time?.slice(0, 5)}–${myShiftToday.end_time?.slice(0, 5)}`) : "尚未排班"}
+          </p>
+          <button className="ph-btn small" onClick={() => setPage("schedule")}>查看排班表 →</button>
+        </div>
+        {canReview && (
+          <div className="ph-card" style={{ padding: 16 }}>
+            <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>待審核申請</p>
+            <p className="ph-serif" style={{ fontSize: 22, margin: "6px 0" }}>{pendingCount} 件</p>
+            <button className="ph-btn small" onClick={() => setPage("requests")}>前往審核 →</button>
+          </div>
+        )}
+        {canReview && (
+          <div className="ph-card" style={{ padding: 16 }}>
+            <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>電子日總表</p>
+            <p style={{ fontSize: 13, margin: "6px 0", color: T.sub }}>填寫今日 POS 核對與異常紀錄</p>
+            <button className="ph-btn small" onClick={() => setPage("daily_report")}>前往填寫 →</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────
+   App
+──────────────────────────────────────────── */
+
+function AppShell({ session }) {
+  const [me, setMe] = useState(undefined); // undefined=載入中, null=查無員工資料
+  const [stores, setStores] = useState([]);
+  const [storeId, setStoreId] = useState(null);
+  const [page, setPage] = useState(() => new URLSearchParams(location.search).get("page") || "dashboard");
+  const [toastMsg, setToastMsg] = useState("");
+
+  const toast = useCallback((msg) => { setToastMsg(msg); setTimeout(() => setToastMsg(""), 3200); }, []);
+
+  useEffect(() => {
+    (async () => {
+      const [meRes, storesRes] = await Promise.all([
+        sb.from("employees").select("*").eq("auth_user_id", session.user.id).maybeSingle(),
+        sb.from("stores").select("*").eq("active", true).order("sort_order"),
+      ]);
+      setMe(meRes.data || null);
+      setStores(storesRes.data || []);
+      if (meRes.data) setStoreId(meRes.data.store_id || storesRes.data?.[0]?.id || null);
+    })();
+  }, [session.user.id]);
+
+  if (me === undefined) return <div className="ph-root" style={{ padding: 40 }}>載入中…</div>;
+  if (me === null) return (
+    <div className="ph-root" style={{ padding: 40 }}>
+      <p>此帳號尚未綁定員工資料，請聯絡人資協助設定。</p>
+      <button className="ph-btn" onClick={() => sb.auth.signOut()}>登出</button>
+    </div>
+  );
+
+  const navs = [
+    ["dashboard", "儀表板"],
+    ["schedule", "排班表"],
+    ["requests", "請假／加班"],
+    ...(me.role === "manager" || me.role === "hr" ? [["daily_report", "電子日總表"], ["payroll", "薪資試算"], ["staff", "在職夥伴"]] : []),
+    ...(me.role === "hr" ? [["backup", "備份"]] : []),
+  ];
+
+  return (
+    <div className="ph-root" style={{ display: "flex", minHeight: "100vh" }}>
+      <aside style={{ width: 200, borderRight: `1px solid ${T.line}`, padding: 16, flexShrink: 0 }} className="ph-hide-mobile">
+        <div style={{ fontFamily: "'Noto Serif TC',serif", fontWeight: 600, fontSize: 15, marginBottom: 4 }}>PHASE</div>
+        <div style={{ color: T.sub, fontSize: 12, marginBottom: 18 }}>人事排班系統</div>
+        {navs.map(([k, l]) => (
+          <button key={k} className={"ph-nav-item" + (page === k ? " on" : "")} onClick={() => setPage(k)}>{l}</button>
+        ))}
+        <div style={{ marginTop: 24, paddingTop: 14, borderTop: `1px solid ${T.line}` }}>
+          <div style={{ fontSize: 12.5, marginBottom: 8 }}>{me.name}（{ROLE_LABEL[me.role]}）</div>
+          <button className="ph-btn small" onClick={() => sb.auth.signOut()}>登出</button>
+        </div>
+      </aside>
+      <div style={{ padding: "10px 14px", display: "none" }} className="ph-mobile-nav" />
+      <main style={{ flex: 1, padding: 20, maxWidth: 1100 }}>
+        <div className="ph-hide-mobile" style={{ display: "none" }} />
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }} className="ph-mobile-only">
+          {navs.map(([k, l]) => (
+            <button key={k} className={"ph-btn small" + (page === k ? " primary" : "")} onClick={() => setPage(k)}>{l}</button>
+          ))}
+        </div>
+        {page === "dashboard" && <Dashboard me={me} stores={stores} storeId={storeId} setPage={setPage} />}
+        {page === "schedule" && <SchedulePage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
+        {page === "requests" && <RequestsPage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
+        {page === "daily_report" && (me.role === "manager" || me.role === "hr") && <DailyReportPage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
+        {page === "payroll" && (me.role === "manager" || me.role === "hr") && <PayrollPage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
+        {page === "staff" && (me.role === "manager" || me.role === "hr") && <StaffPage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
+        {page === "backup" && me.role === "hr" && <BackupPage me={me} toast={toast} />}
+      </main>
+      {toastMsg && <div className="ph-toast">{toastMsg}</div>}
+    </div>
+  );
+}
+
+function App() {
+  const [session, setSession] = useState(undefined); // undefined=確認中, null=未登入
+  useEffect(() => {
+    sb.auth.getSession().then(({ data }) => setSession(data.session ?? null));
+    const { data: sub } = sb.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+  if (session === undefined) return <div className="ph-root" style={{ padding: 40 }}>載入中…</div>;
+  if (session === null) return <Login />;
+  return <AppShell session={session} />;
+}
+
+// 全域錯誤攔截：本機除錯用（無 DevTools 情境下把錯誤直接顯示在畫面上）
+window.addEventListener("error", (e) => {
+  const el = document.getElementById("debug-box") || document.createElement("div");
+  el.id = "debug-box"; el.className = "ph-debug";
+  el.textContent = "JS Error: " + e.message + "\n" + (e.filename || "") + ":" + (e.lineno || "");
+  document.body.appendChild(el);
+});
+
+ReactDOM.createRoot(document.getElementById("root")).render(<><style>{css}</style><App /></>);
+
+</script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+  }
+</script>
+</body>
+</html>
