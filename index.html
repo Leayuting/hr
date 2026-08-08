@@ -94,6 +94,14 @@ function monthDays(yearMonth) {
 }
 function money(n) { return Math.round(Number(n) || 0).toLocaleString("zh-TW"); }
 function isHalfHourStep(n) { return Number.isFinite(n) && n > 0 && Math.round(n * 2) === n * 2; }
+function shiftHours(startTime, endTime) {
+  if (!startTime || !endTime) return 0;
+  const [sh, sm] = startTime.split(":").map(Number);
+  const [eh, em] = endTime.split(":").map(Number);
+  let mins = (eh * 60 + em) - (sh * 60 + sm);
+  if (mins < 0) mins += 24 * 60; // 跨半夜班次（例如 22:00–02:00）
+  return mins / 60;
+}
 async function logAudit(actorLabel, action, target, detail = "") {
   try {
     await sb.from("audit_logs").insert({ actor_label: actorLabel, action, target, detail });
@@ -291,7 +299,7 @@ function Login() {
   }
   async function forgotPw() {
     if (!email.trim()) { setErr("請先輸入 Email"); return; }
-    await sb.auth.resetPasswordForEmail(email.trim());
+    await sb.auth.resetPasswordForEmail(email.trim(), { redirectTo: location.origin + location.pathname });
     setResetSent(true);
   }
 
@@ -377,10 +385,8 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
   }, [shifts]);
   const totalShiftCount = shifts.filter((s) => !s.is_day_off).length;
   const totalHours = shifts.reduce((sum, s) => {
-    if (s.is_day_off || !s.start_time || !s.end_time) return sum;
-    const [sh, sm] = s.start_time.split(":").map(Number);
-    const [eh, em2] = s.end_time.split(":").map(Number);
-    return sum + Math.max(0, (eh * 60 + em2 - (sh * 60 + sm)) / 60);
+    if (s.is_day_off) return sum;
+    return sum + shiftHours(s.start_time, s.end_time);
   }, 0);
 
   async function saveShift(employeeId, employeeStoreId, date, { startTime, endTime, isDayOff, note }) {
@@ -441,26 +447,33 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
-        <h2 className="ph-serif" style={{ margin: 0 }}>門市排班</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 4 }}>
+        <div>
+          <p className="ph-eyebrow" style={{ margin: 0 }}>{scopeName}</p>
+          <h2 className="ph-serif" style={{ margin: "2px 0 0", fontSize: 26 }}>{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月</h2>
+        </div>
+        {canEdit && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="ph-btn small" disabled={copying} onClick={copyLastMonth}>{copying ? "複製中…" : "複製上月"}</button>
+            <button className="ph-btn small primary" onClick={() => setPublishModal(true)}>發布{Number(ym.slice(5, 7))}月班表</button>
+          </div>
+        )}
+      </div>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
+        整月排班（{ym}-01–{ym}-{pad2(days)}）；各門店分開處理，點擊班次即可修改。
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
         <div style={{ display: "flex", gap: 4 }}>
           <button className="ph-btn small" onClick={() => setYm(prevMonthStr(ym))}>‹ 上個月</button>
           <button className="ph-btn small" onClick={() => setYm(thisMonthStr())}>今天</button>
           <button className="ph-btn small" onClick={() => setYm(nextMonthStr(ym))}>下個月 ›</button>
         </div>
         <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
-        {canEdit && (
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button className="ph-btn small" disabled={copying} onClick={copyLastMonth}>{copying ? "複製中…" : "複製上月"}</button>
-            <button className="ph-btn small primary" onClick={() => setPublishModal(true)}>發布{Number(ym.slice(5, 7))}月班表</button>
-          </div>
-        )}
       </div>
-      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 14 }}>
-        {ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月｜{scopeName}｜整月排班（{ym}-01–{ym}-{pad2(days)}）；點擊班次即可修改。
-      </p>
-
       <div className="ph-schedule-preview-desktop">
+        <div className="ph-card" style={{ padding: "10px 16px", marginBottom: 10, fontSize: 12.5, color: T.sub }}>
+          左右滑動查看當月全部日期，夥伴姓名會固定在左側。
+        </div>
         {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
           <div className="ph-card" style={{ overflowX: "auto" }}>
             <table className="ph-table ph-schedule-preview">
@@ -499,9 +512,12 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
           </div>
         )}
         {!loading && roster.length > 0 && (
-          <div style={{ marginTop: 10, fontSize: 12.5, color: T.sub }}>
-            本月共 <strong style={{ color: T.ink }}>{totalShiftCount}</strong> 個班次
-            <span style={{ marginLeft: 16 }}>預計總工時 <strong style={{ color: T.ink }}>{Math.round(totalHours)}</strong> 小時</span>
+          <div style={{ marginTop: 10, fontSize: 12.5, color: T.sub, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+            <span>
+              本月共 <strong style={{ color: T.ink }}>{totalShiftCount}</strong> 個班次
+              <span style={{ marginLeft: 16 }}>預計工時 <strong style={{ color: T.ink }}>{Math.round(totalHours)}</strong> 小時</span>
+            </span>
+            <span style={{ color: T.green }}>✓ {scopeStoreIds.length > 1 ? "已依門店分開顯示" : `${scopeName}資料獨立`}</span>
           </div>
         )}
       </div>
@@ -554,6 +570,17 @@ function ShiftEditModal({ editing, onClose, onSave }) {
   const [startTime, setStartTime] = useState(ex?.start_time?.slice(0, 5) || "10:00");
   const [endTime, setEndTime] = useState(ex?.end_time?.slice(0, 5) || "19:00");
   const [note, setNote] = useState(ex?.note || "");
+  const [busy, setBusy] = useState(false);
+
+  async function handleSave() {
+    setBusy(true);
+    try {
+      await onSave(editing.employeeId, editing.employeeStoreId, editing.date, { startTime, endTime, isDayOff, note });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <Modal title={`${editing.employeeName}・${editing.date}`} onClose={onClose}>
       <Field label="班次">
@@ -569,8 +596,8 @@ function ShiftEditModal({ editing, onClose, onSave }) {
       </Field>
       <Field label="備註"><input className="ph-input" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-        <button className="ph-btn" onClick={onClose}>取消</button>
-        <button className="ph-btn primary" onClick={() => onSave(editing.employeeId, editing.employeeStoreId, editing.date, { startTime, endTime, isDayOff, note })}>儲存</button>
+        <button className="ph-btn" onClick={onClose} disabled={busy}>取消</button>
+        <button className="ph-btn primary" disabled={busy} onClick={handleSave}>{busy ? "儲存中…" : "儲存"}</button>
       </div>
     </Modal>
   );
@@ -584,6 +611,8 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [decidingId, setDecidingId] = useState(null);
+  const [truncated, setTruncated] = useState(false);
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [monthFilter, setMonthFilter] = useState("");
@@ -599,6 +628,7 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
     const { data, error } = await q;
     if (error) console.error("requests load", error);
     setRows(data || []);
+    setTruncated((data || []).length >= 300);
     setLoading(false);
   }, [scopeStoreIds, canReview, me.id]);
 
@@ -609,10 +639,16 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
   }, [load]);
 
   async function decide(id, decision) {
-    const { error } = await sb.from("requests").update({ status: decision, reviewed_by: me.id, reviewed_at: new Date().toISOString() }).eq("id", id);
-    if (error) { toast("操作失敗：" + error.message); return; }
-    await logAudit(me.name, decision, `request:${id}`);
-    toast(decision === "approved" ? "已核准" : "已拒絕");
+    if (decidingId) return;
+    setDecidingId(id);
+    try {
+      const { error } = await sb.from("requests").update({ status: decision, reviewed_by: me.id, reviewed_at: new Date().toISOString() }).eq("id", id);
+      if (error) { toast("操作失敗：" + error.message); return; }
+      await logAudit(me.name, decision, `request:${id}`);
+      toast(decision === "approved" ? "已核准" : "已拒絕");
+    } finally {
+      setDecidingId(null);
+    }
   }
 
   const filteredRows = rows.filter((r) => {
@@ -646,6 +682,11 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
           {monthFilter && <button className="ph-btn small" onClick={() => setMonthFilter("")}>清除月份</button>}
         </div>
       )}
+      {truncated && (
+        <p style={{ color: T.brown, fontSize: 12.5, marginTop: 0, marginBottom: 10 }}>
+          僅顯示最近 300 筆申請，較舊的紀錄未顯示；可用上方月份篩選查詢特定月份。
+        </p>
+      )}
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div className="ph-card" style={{ overflowX: "auto" }}>
           <table className="ph-table">
@@ -667,8 +708,8 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
                     <td>
                       {r.status === "pending" ? (
                         <div style={{ display: "flex", gap: 6 }}>
-                          <button className="ph-btn small" onClick={() => decide(r.id, "approved")}>核准</button>
-                          <button className="ph-btn small danger" onClick={() => decide(r.id, "rejected")}>拒絕</button>
+                          <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => decide(r.id, "approved")}>{decidingId === r.id ? "處理中…" : "核准"}</button>
+                          <button className="ph-btn small danger" disabled={decidingId === r.id} onClick={() => decide(r.id, "rejected")}>拒絕</button>
                         </div>
                       ) : "—"}
                     </td>
@@ -793,7 +834,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
 
   if (openStoreId) {
     const store = storeById[openStoreId];
-    return <DailyReportDetail me={me} store={store} date={date} toast={toast} onBack={() => setOpenStoreId(null)} />;
+    return <DailyReportDetail me={me} store={store} date={date} onDateChange={setDate} toast={toast} onBack={() => setOpenStoreId(null)} />;
   }
 
   return (
@@ -843,7 +884,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
   );
 }
 
-function DailyReportDetail({ me, store, date, toast, onBack }) {
+function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
   const storeId = store?.id;
   const [roster, setRoster] = useState([]);
   const [report, setReport] = useState(null);
@@ -852,6 +893,7 @@ function DailyReportDetail({ me, store, date, toast, onBack }) {
   const [posVerified, setPosVerified] = useState(false);
   const [loading, setLoading] = useState(true);
   const [attachmentsComplete, setAttachmentsComplete] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -897,51 +939,69 @@ function DailyReportDetail({ me, store, date, toast, onBack }) {
   }
 
   async function submitReport() {
+    if (actionBusy) return;
     if (!posVerified) { toast("請先勾選已完成 POS 出缺勤與加班核對"); return; }
     for (const r of roster) {
       const e = entries[r.id];
       const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
-      if (anomaly && (!e.reason?.trim() || !e.improvement?.trim())) { toast(`${r.name}的異常須填寫原因與改善方式`); return; }
+      if (anomaly && !e.reason?.trim()) { toast(`${r.name}的異常須填寫「其他異常／補充」說明`); return; }
       if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { toast(`${r.name}的加班時數須以 0.5 小時為單位`); return; }
     }
-    let reportId = report?.id;
-    if (!reportId) {
-      const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString() }).select().single();
-      if (error) { toast("送出失敗：" + error.message); return; }
-      reportId = data.id;
-    } else {
-      const { error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), signed_by: null, signed_at: null }).eq("id", reportId);
-      if (error) { toast("送出失敗：" + error.message); return; }
+    setActionBusy(true);
+    try {
+      let reportId = report?.id;
+      if (!reportId) {
+        const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString() }).select().single();
+        if (error) { toast("送出失敗：" + error.message); return; }
+        reportId = data.id;
+      } else {
+        const { error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), signed_by: null, signed_at: null }).eq("id", reportId);
+        if (error) { toast("送出失敗：" + error.message); return; }
+      }
+      for (const r of roster) {
+        const e = entries[r.id];
+        await sb.from("daily_report_entries").upsert({
+          daily_report_id: reportId, store_id: storeId, employee_id: r.id,
+          late: e.late, missed_punch: e.missed_punch, leave: e.leave, overtime: e.overtime,
+          overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
+          reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
+        }, { onConflict: "daily_report_id,employee_id" });
+      }
+      await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
+      toast("已送出，等待領班簽核");
+      load();
+    } finally {
+      setActionBusy(false);
     }
-    for (const r of roster) {
-      const e = entries[r.id];
-      await sb.from("daily_report_entries").upsert({
-        daily_report_id: reportId, store_id: storeId, employee_id: r.id,
-        late: e.late, missed_punch: e.missed_punch, leave: e.leave, overtime: e.overtime,
-        overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
-        reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
-      }, { onConflict: "daily_report_id,employee_id" });
-    }
-    await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
-    toast("已送出，等待領班簽核");
-    load();
   }
 
   async function signReport() {
+    if (actionBusy) return;
     if (hasAnomaly && (!attachments.length || !attachmentsComplete)) { toast("請先上傳所有相關附件並勾選確認"); return; }
-    const { error } = await sb.from("daily_reports").update({ status: "signed", signed_by: me.id, signed_at: new Date().toISOString() }).eq("id", report.id);
-    if (error) { toast("簽核失敗：" + error.message); return; }
-    await logAudit(me.name, "sign_daily_report", report.id);
-    toast("已完成領班簽核");
-    load();
+    setActionBusy(true);
+    try {
+      const { error } = await sb.from("daily_reports").update({ status: "signed", signed_by: me.id, signed_at: new Date().toISOString() }).eq("id", report.id);
+      if (error) { toast("簽核失敗：" + error.message); return; }
+      await logAudit(me.name, "sign_daily_report", report.id);
+      toast("已完成領班簽核");
+      load();
+    } finally {
+      setActionBusy(false);
+    }
   }
 
   async function handoffReport() {
-    const { error } = await sb.from("daily_reports").update({ status: "hr_received", hr_received_by: me.id, hr_received_at: new Date().toISOString() }).eq("id", report.id);
-    if (error) { toast("交接失敗：" + error.message); return; }
-    await logAudit(me.name, "handoff_daily_report", report.id);
-    toast("已完成人資交接");
-    load();
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      const { error } = await sb.from("daily_reports").update({ status: "hr_received", hr_received_by: me.id, hr_received_at: new Date().toISOString() }).eq("id", report.id);
+      if (error) { toast("交接失敗：" + error.message); return; }
+      await logAudit(me.name, "handoff_daily_report", report.id);
+      toast("已完成人資交接");
+      load();
+    } finally {
+      setActionBusy(false);
+    }
   }
 
   async function uploadFile(file) {
@@ -957,71 +1017,147 @@ function DailyReportDetail({ me, store, date, toast, onBack }) {
     load();
   }
 
+  const anomalyCount = roster.filter((r) => {
+    const e = entries[r.id] || {};
+    return e.late || e.missed_punch || e.leave || e.overtime;
+  }).length;
+  const signDone = report?.status === "signed" || report?.status === "hr_received";
+  const handoffDone = report?.status === "hr_received";
+
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-        <button className="ph-btn small" onClick={onBack}>← 返回每日回報</button>
-        <h2 className="ph-serif" style={{ margin: 0 }}>{store?.name}・{date}</h2>
-        {report && <Badge tone={report.status === "hr_received" ? "green" : report.status === "signed" ? "handoff" : report.status === "submitted" ? "yellow" : "sub"}>{REPORT_STATUS_LABEL[report.status]}</Badge>}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 4 }}>
+        <div>
+          <button className="ph-btn small" style={{ marginBottom: 10 }} onClick={onBack}>← 返回每日回報</button>
+          <p className="ph-eyebrow" style={{ margin: 0 }}>DAILY OPERATIONS REPORT</p>
+          <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每日異常回報</h2>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>本頁為正式電子日總表，完整取代紙本；無論有無異常，每間門店每天都要完成。</p>
+        </div>
+        <label style={{ fontSize: 12.5, color: T.sub }}>
+          回報日期<br />
+          <input className="ph-input" style={{ width: 160, marginTop: 4 }} type="date" value={date} onChange={(e) => onDateChange(e.target.value)} />
+        </label>
       </div>
+
+      {!loading && (
+        <div className="ph-card" style={{ padding: "14px 18px", margin: "16px 0", display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12 }}>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>處理門店</p><p style={{ fontWeight: 600, margin: 0 }}>{store?.name}</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>POS 核對</p><p style={{ fontWeight: 600, margin: 0, color: posVerified ? T.green : T.brown }}>{posVerified ? "已確認" : "待確認"}</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>異常人數</p><p style={{ fontWeight: 600, margin: 0 }}>{anomalyCount} 人</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>領班簽核</p><p style={{ fontWeight: 600, margin: 0, color: signDone ? T.green : T.brown }}>{signDone ? "已完成" : "尚未完成"}</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>人資交接</p><p style={{ fontWeight: 600, margin: 0, color: handoffDone ? T.green : T.brown }}>{handoffDone ? "已完成" : "未繳交"}</p></div>
+        </div>
+      )}
+
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <>
-          <div className="ph-card" style={{ padding: 14, marginBottom: 14, overflowX: "auto" }}>
-            <table className="ph-table">
-              <thead><tr><th>夥伴</th><th>遲到</th><th>漏打卡</th><th>請假</th><th>加班</th><th className="ph-hide-mobile">加班時數</th><th className="ph-hide-mobile">原因</th><th className="ph-hide-mobile">改善方式</th></tr></thead>
-              <tbody>
-                {roster.map((r) => {
-                  const e = entries[r.id] || {};
-                  const dis = !canWrite;
-                  return (
-                    <tr key={r.id}>
-                      <td>{r.name}</td>
-                      <td><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} /></td>
-                      <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /></td>
-                      <td><input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} /></td>
-                      <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => updateEntry(r.id, { overtime: ev.target.checked })} /></td>
-                      <td className="ph-hide-mobile">{e.overtime && <input className="ph-input" style={{ width: 70 }} type="number" step="0.5" min="0.5" disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })} />}</td>
-                      <td className="ph-hide-mobile"><input className="ph-input" disabled={dis} value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value })} /></td>
-                      <td className="ph-hide-mobile"><input className="ph-input" disabled={dis} value={e.improvement || ""} onChange={(ev) => updateEntry(r.id, { improvement: ev.target.value })} /></td>
-                    </tr>
-                  );
-                })}
-                {roster.length === 0 && <tr><td colSpan={8} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
-              </tbody>
-            </table>
+          <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+            <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <input type="checkbox" style={{ marginTop: 3 }} disabled={!canWrite} checked={posVerified} onChange={(e) => setPosVerified(e.target.checked)} />
+              <span>
+                <strong>已完成 POS 出缺勤核對</strong>
+                <p style={{ color: T.sub, fontSize: 12.5, margin: "2px 0 0" }}>領班已核對當日所有夥伴的打卡、漏打卡、請假與實際加班紀錄。</p>
+              </span>
+            </label>
           </div>
 
-          <div className="ph-card" style={{ padding: 14, marginBottom: 14 }}>
-            <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
-              <input type="checkbox" disabled={!canWrite} checked={posVerified} onChange={(e) => setPosVerified(e.target.checked)} />
-              已完成 POS 出缺勤與加班核對
-            </label>
-            <div style={{ marginBottom: 10 }}>
-              <strong style={{ fontSize: 13 }}>相關附件</strong>
-              <p style={{ color: T.sub, fontSize: 12, margin: "4px 0" }}>漏打卡／請假／加班須上傳補單或證明，支援 PDF 與圖片，單檔上限 10MB。</p>
-              {attachments.length === 0 && <p style={{ color: T.sub, fontSize: 12.5 }}>{hasAnomaly ? "目前沒有附件，簽核前必須上傳" : "目前沒有附件"}</p>}
-              <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
-                {attachments.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
-              </ul>
-              {canWrite && report?.id && (
-                <input type="file" accept="application/pdf,image/*" onChange={(e) => e.target.files[0] && uploadFile(e.target.files[0])} />
-              )}
-              {hasAnomaly && (
-                <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12.5 }}>
-                  <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || me.role !== "manager" && me.role !== "hr"} />
-                  確認附件已完整上傳
-                </label>
-              )}
+          <div className="ph-card" style={{ padding: 0, marginBottom: 14, overflow: "hidden" }}>
+            <div className="ph-schedule-preview-desktop" style={{ overflowX: "auto" }}>
+              <table className="ph-table">
+                <thead><tr><th>姓名</th><th>遲到</th><th>漏打卡</th><th>請假</th><th>加班</th><th>其他異常／補充</th></tr></thead>
+                <tbody>
+                  {roster.map((r, idx) => {
+                    const e = entries[r.id] || {};
+                    const dis = !canWrite;
+                    const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
+                    return (
+                      <tr key={r.id}>
+                        <td><RosterCell r={r} index={idx} /></td>
+                        <td><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} /></td>
+                        <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /></td>
+                        <td><input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} /></td>
+                        <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => updateEntry(r.id, { overtime: ev.target.checked })} /></td>
+                        <td style={{ minWidth: 240 }}>
+                          {e.overtime && (
+                            <input className="ph-input" style={{ width: 90, marginBottom: 6 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
+                              disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })} />
+                          )}
+                          <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
+                            value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
+                            style={anomaly && !e.reason?.trim() ? { borderColor: T.red } : undefined} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {roster.length === 0 && <tr><td colSpan={6} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+                </tbody>
+              </table>
             </div>
+            <div className="ph-schedule-preview-mobile" style={{ padding: 14 }}>
+              {roster.map((r, idx) => {
+                const e = entries[r.id] || {};
+                const dis = !canWrite;
+                const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
+                return (
+                  <div key={r.id} style={{ padding: "12px 0", borderBottom: `1px solid ${T.line}` }}>
+                    <RosterCell r={r} index={idx} />
+                    <div style={{ display: "flex", gap: 14, margin: "10px 0" }}>
+                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} /> 遲到</label>
+                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /> 漏打卡</label>
+                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} /> 請假</label>
+                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => updateEntry(r.id, { overtime: ev.target.checked })} /> 加班</label>
+                    </div>
+                    {e.overtime && (
+                      <input className="ph-input" style={{ width: 90, marginBottom: 6 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
+                        disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })} />
+                    )}
+                    <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
+                      value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
+                      style={anomaly && !e.reason?.trim() ? { borderColor: T.red } : undefined} />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+            <strong style={{ fontSize: 13 }}>相關附件</strong>
+            <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>漏打卡、請假或加班須上傳相關補單、加班單或證明；支援 PDF 與圖片，單檔上限 10MB。</p>
+            {!report?.id ? (
+              <p style={{ color: T.sub, fontSize: 12.5, background: T.bg, padding: "8px 12px", borderRadius: 6 }}>請先儲存並送出電子日總表，再上傳當日附件。</p>
+            ) : (
+              <>
+                {attachments.length === 0 && <p style={{ color: T.sub, fontSize: 12.5 }}>{hasAnomaly ? "目前沒有附件，簽核前必須上傳" : "目前沒有附件"}</p>}
+                <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
+                  {attachments.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
+                </ul>
+                {canWrite && <input type="file" accept="application/pdf,image/*" onChange={(e) => e.target.files[0] && uploadFile(e.target.files[0])} />}
+                {hasAnomaly && (
+                  <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12.5 }}>
+                    <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || (me.role !== "manager" && me.role !== "hr")} />
+                    確認附件已完整上傳
+                  </label>
+                )}
+              </>
+            )}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+            <p style={{ color: T.brown, fontSize: 12, margin: 0, maxWidth: 480 }}>
+              <strong>正式電子日總表：</strong>完成 POS 核對、異常內容、附件、領班簽核與人資交接後，即完成當日流程，不再另填紙本。
+            </p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {(!report || report.status === "draft" || report.status === "submitted") && canWrite && !hasAnomaly && (
+                <button className="ph-btn" disabled={actionBusy} onClick={submitReport}>今日無異常，直接送出</button>
+              )}
               {(!report || report.status === "draft" || report.status === "submitted") && canWrite && (
-                <button className="ph-btn primary" onClick={submitReport}>{report ? "更新並重新送出" : "送出日總表"}</button>
+                <button className="ph-btn primary" disabled={actionBusy} onClick={submitReport}>{actionBusy ? "處理中…" : "儲存並送出"}</button>
               )}
               {report?.status === "submitted" && canWrite && (
-                <button className="ph-btn primary" onClick={signReport}>領班簽核</button>
+                <button className="ph-btn primary" disabled={actionBusy} onClick={signReport}>{actionBusy ? "處理中…" : "領班簽核"}</button>
               )}
               {report?.status === "signed" && me.role === "hr" && (
-                <button className="ph-btn primary" onClick={handoffReport}>確認人資交接</button>
+                <button className="ph-btn primary" disabled={actionBusy} onClick={handoffReport}>{actionBusy ? "處理中…" : "確認人資交接"}</button>
               )}
               {report?.status === "signed" && me.role !== "hr" && <span style={{ color: T.sub, fontSize: 12.5 }}>✓ 已完成領班簽核，等待人資交接</span>}
               {report?.status === "hr_received" && <span style={{ color: T.green, fontSize: 12.5 }}>✓ 領班與人資流程皆已完成</span>}
@@ -1043,6 +1179,7 @@ function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
   const [shifts, setShifts] = useState([]);
   const [requests, setRequests] = useState([]);
   const [runs, setRuns] = useState([]);
+  const [lockBusy, setLockBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
 
@@ -1076,11 +1213,7 @@ function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
   const rows = useMemo(() => {
     return roster.map((emp) => {
       const empShifts = shifts.filter((s) => s.employee_id === emp.id && !s.is_day_off && s.start_time && s.end_time);
-      const workedHours = empShifts.reduce((sum, s) => {
-        const [sh, sm] = s.start_time.split(":").map(Number);
-        const [eh, em2] = s.end_time.split(":").map(Number);
-        return sum + Math.max(0, (eh * 60 + em2 - (sh * 60 + sm)) / 60);
-      }, 0);
+      const workedHours = empShifts.reduce((sum, s) => sum + shiftHours(s.start_time, s.end_time), 0);
       const empRequests = requests.filter((r) => r.employee_id === emp.id);
       const overtimeHours = empRequests.filter((r) => r.type === "overtime").reduce((s, r) => s + Number(r.hours), 0);
       const personalLeaveHours = empRequests.filter((r) => r.type === "personal_leave").reduce((s, r) => s + Number(r.hours), 0);
@@ -1098,24 +1231,30 @@ function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
   const locked = activeRun?.status === "locked";
 
   async function toggleLock() {
+    if (lockBusy) return;
     if (!activeStoreId) { toast("請先在上方選擇單一門市才能鎖定薪資"); return; }
-    if (locked) {
-      const { error } = await sb.from("payroll_runs").update({ status: "draft", locked_by: null, locked_at: null }).eq("id", activeRun.id);
-      if (error) { toast("解鎖失敗：" + error.message); return; }
-      await logAudit(me.name, "unlock_payroll", `${activeStoreId}:${ym}`);
-      toast("已解鎖");
-    } else {
-      if (!activeRun) {
-        const { error } = await sb.from("payroll_runs").insert({ store_id: activeStoreId, year_month: ym, status: "locked", locked_by: me.id, locked_at: new Date().toISOString() });
-        if (error) { toast("鎖定失敗：" + error.message); return; }
+    setLockBusy(true);
+    try {
+      if (locked) {
+        const { error } = await sb.from("payroll_runs").update({ status: "draft", locked_by: null, locked_at: null }).eq("id", activeRun.id);
+        if (error) { toast("解鎖失敗：" + error.message); return; }
+        await logAudit(me.name, "unlock_payroll", `${activeStoreId}:${ym}`);
+        toast("已解鎖");
       } else {
-        const { error } = await sb.from("payroll_runs").update({ status: "locked", locked_by: me.id, locked_at: new Date().toISOString() }).eq("id", activeRun.id);
-        if (error) { toast("鎖定失敗：" + error.message); return; }
+        if (!activeRun) {
+          const { error } = await sb.from("payroll_runs").insert({ store_id: activeStoreId, year_month: ym, status: "locked", locked_by: me.id, locked_at: new Date().toISOString() });
+          if (error) { toast("鎖定失敗：" + error.message); return; }
+        } else {
+          const { error } = await sb.from("payroll_runs").update({ status: "locked", locked_by: me.id, locked_at: new Date().toISOString() }).eq("id", activeRun.id);
+          if (error) { toast("鎖定失敗：" + error.message); return; }
+        }
+        await logAudit(me.name, "lock_payroll", `${activeStoreId}:${ym}`);
+        toast("已鎖定該月薪資");
       }
-      await logAudit(me.name, "lock_payroll", `${activeStoreId}:${ym}`);
-      toast("已鎖定該月薪資");
+      load();
+    } finally {
+      setLockBusy(false);
     }
-    load();
   }
 
   function exportCsv() {
@@ -1135,8 +1274,8 @@ function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
         <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
         <button className="ph-btn" onClick={exportCsv}>匯出 CSV</button>
         {me.role === "hr" && (
-          <button className="ph-btn primary" disabled={!activeStoreId} onClick={toggleLock} title={!activeStoreId ? "請先在上方選擇單一門市" : undefined}>
-            {locked ? "解鎖" : "鎖定本月"}
+          <button className="ph-btn primary" disabled={!activeStoreId || lockBusy} onClick={toggleLock} title={!activeStoreId ? "請先在上方選擇單一門市" : undefined}>
+            {lockBusy ? "處理中…" : locked ? "解鎖" : "鎖定本月"}
           </button>
         )}
         {locked && <Badge tone="brown">{storeById[activeStoreId]?.name} 已鎖定</Badge>}
@@ -1462,12 +1601,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
   const todayShifts = useMemo(() => monthShifts.filter((s) => s.work_date === today), [monthShifts, today]);
   const scopedMonthShifts = monthShifts.filter((s) => scopedRosterIds.has(s.employee_id) && !s.is_day_off);
   const monthScheduledCount = new Set(scopedMonthShifts.map((s) => s.employee_id)).size;
-  const monthPlannedHours = scopedMonthShifts.reduce((sum, s) => {
-    if (!s.start_time || !s.end_time) return sum;
-    const [sh, sm] = s.start_time.split(":").map(Number);
-    const [eh, em2] = s.end_time.split(":").map(Number);
-    return sum + Math.max(0, (eh * 60 + em2 - (sh * 60 + sm)) / 60);
-  }, 0);
+  const monthPlannedHours = scopedMonthShifts.reduce((sum, s) => sum + shiftHours(s.start_time, s.end_time), 0);
   const scopedPending = pendingReqs.filter((r) => scopeStoreIds.includes(r.store_id));
   const pendingLeave = scopedPending.filter((r) => r.type === "annual_leave" || r.type === "personal_leave").length;
   const pendingOvertime = scopedPending.filter((r) => r.type === "overtime").length;
@@ -1792,14 +1926,63 @@ function AppShell({ session }) {
   );
 }
 
+function SetNewPasswordScreen({ onDone }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (pw.length < 6) { setErr("密碼至少需要 6 個字元"); return; }
+    if (pw !== pw2) { setErr("兩次輸入的密碼不一致"); return; }
+    setErr(""); setBusy(true);
+    try {
+      const { error } = await sb.auth.updateUser({ password: pw });
+      if (error) { setErr("設定失敗：" + error.message); return; }
+      onDone();
+    } catch (e2) {
+      setErr("設定時發生錯誤：" + (e2?.message || String(e2)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="ph-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div className="ph-card" style={{ width: 360, padding: 28 }}>
+        <h1 className="ph-serif" style={{ fontSize: 20, marginTop: 0, marginBottom: 4 }}>設定新密碼</h1>
+        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 20 }}>請輸入你要使用的新密碼</p>
+        <form onSubmit={submit}>
+          <Field label="新密碼">
+            <input className="ph-input" type="password" required autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} />
+          </Field>
+          <Field label="再輸入一次">
+            <input className="ph-input" type="password" required autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+          </Field>
+          {err && <div className="ph-err">{err}</div>}
+          <button className="ph-btn primary" style={{ width: "100%", marginTop: 6 }} disabled={busy} type="submit">
+            {busy ? "設定中…" : "確認設定"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [session, setSession] = useState(undefined); // undefined=確認中, null=未登入
+  const [recovering, setRecovering] = useState(false);
   useEffect(() => {
     sb.auth.getSession().then(({ data }) => setSession(data.session ?? null));
-    const { data: sub } = sb.auth.onAuthStateChange((_event, s) => setSession(s));
+    const { data: sub } = sb.auth.onAuthStateChange((event, s) => {
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
+      setSession(s);
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
   if (session === undefined) return <div className="ph-root" style={{ padding: 40 }}>載入中…</div>;
+  if (recovering) return <SetNewPasswordScreen onDone={() => setRecovering(false)} />;
   if (session === null) return <Login />;
   return <AppShell session={session} />;
 }
