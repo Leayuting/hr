@@ -123,8 +123,10 @@ const css = `
 .ph-daycell:hover { background:${T.brownSoft}; }
 .ph-err { color:${T.red}; font-size:12.5px; margin-top:4px; }
 .ph-debug { position:fixed; bottom:0; left:0; right:0; background:${T.red}; color:#fff; font-size:12px; padding:8px; z-index:999; white-space:pre-wrap; max-height:30vh; overflow:auto; pointer-events:none; }
+.ph-mobile-only { display:none; }
 @media (max-width: 720px) {
   .ph-hide-mobile { display:none; }
+  .ph-mobile-only { display:flex; }
   .ph-table th, .ph-table td { padding:6px 6px; font-size:12px; }
 }
 `;
@@ -1122,9 +1124,7 @@ function AppShell({ session }) {
           <button className="ph-btn small" onClick={() => sb.auth.signOut()}>登出</button>
         </div>
       </aside>
-      <div style={{ padding: "10px 14px", display: "none" }} className="ph-mobile-nav" />
-      <main style={{ flex: 1, padding: 20, maxWidth: 1100 }}>
-        <div className="ph-hide-mobile" style={{ display: "none" }} />
+      <main style={{ flex: 1, padding: 20, minWidth: 0 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }} className="ph-mobile-only">
           {navs.map(([k, l]) => (
             <button key={k} className={"ph-btn small" + (page === k ? " primary" : "")} onClick={() => setPage(k)}>{l}</button>
