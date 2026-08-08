@@ -148,7 +148,10 @@ const css = `
 .ph-sidebar-backdrop { display:none; }
 .ph-stat-card { position:relative; background:${T.card}; border:1px solid ${T.line}; border-radius:11px; padding:16px 18px 16px 20px; box-shadow:0 1px 2px rgba(41,37,32,.05); cursor:pointer; text-align:left; }
 .ph-stat-card::before { content:""; position:absolute; left:0; top:14px; bottom:14px; width:3px; border-radius:2px; background:${T.line}; }
-.ph-stat-card.attention::before { background:${T.brown}; }
+.ph-stat-card.accent-brick::before { background:#A34F2D; }
+.ph-stat-card.accent-olive::before { background:#4B5530; }
+.ph-stat-card.accent-gold::before { background:#C9A24B; }
+.ph-stat-card.accent-maroon::before { background:#2E2018; }
 .ph-stat-card:hover { border-color:${T.brown}55; }
 .ph-schedule-preview th.weekend, .ph-schedule-preview td.weekend-head { color:${T.brown}; }
 .ph-schedule-preview td.cell-off { background:#F6F2EC; color:${T.sub}; }
@@ -1472,14 +1475,14 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
         <h2 className="ph-serif" style={{ marginTop: 4 }}>嗨，{me.name}</h2>
         <p style={{ color: T.sub, marginTop: -8 }}>{ROLE_LABEL[me.role]}・{storeById[storeId]?.name || ""}</p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16, marginTop: 20 }}>
-          <div className="ph-stat-card" onClick={() => setPage("schedule")}>
+          <div className="ph-stat-card accent-brick" onClick={() => setPage("schedule")}>
             <p className="ph-eyebrow" style={{ marginBottom: 8 }}>今日排班</p>
             <p className="ph-serif" style={{ fontSize: 28, margin: "0 0 8px" }}>
               {myShiftToday === undefined ? "…" : myShiftToday ? (myShiftToday.is_day_off ? "休假" : `${myShiftToday.start_time?.slice(0, 5)}–${myShiftToday.end_time?.slice(0, 5)}`) : "尚未排班"}
             </p>
             <span style={{ fontSize: 12.5, color: T.brown }}>查看完整班表 →</span>
           </div>
-          <div className="ph-stat-card" onClick={() => setPage("requests")}>
+          <div className="ph-stat-card accent-olive" onClick={() => setPage("requests")}>
             <p className="ph-eyebrow" style={{ marginBottom: 8 }}>我的申請</p>
             <p className="ph-serif" style={{ fontSize: 28, margin: "0 0 8px" }}>{myPending} 件待審核</p>
             <span style={{ fontSize: 12.5, color: T.brown }}>請假／加班申請 →</span>
@@ -1501,29 +1504,29 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16, marginTop: 22 }}>
-        <div className={"ph-stat-card" + (monthScheduledCount === 0 && scopedRoster.length > 0 ? " attention" : "")} onClick={() => setPage("schedule")}>
+        <div className="ph-stat-card accent-brick" onClick={() => setPage("schedule")}>
           <p className="ph-eyebrow" style={{ marginBottom: 8 }}>本月排班人數</p>
           <p className="ph-serif" style={{ fontSize: 32, margin: "0 0 8px" }}>{loading ? "…" : monthScheduledCount}<span style={{ fontSize: 14, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}> 人</span></p>
           <span style={{ fontSize: 12.5, color: T.brown }}>查看排班表 →</span>
         </div>
-        <div className={"ph-stat-card" + (scopedPending.length > 0 ? " attention" : "")} onClick={() => setPage("requests")}>
+        <div className="ph-stat-card accent-olive" onClick={() => setPage("requests")}>
           <p className="ph-eyebrow" style={{ marginBottom: 8 }}>待審核申請</p>
           <p className="ph-serif" style={{ fontSize: 32, margin: "0 0 8px" }}>{loading ? "…" : scopedPending.length}<span style={{ fontSize: 14, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}> 件</span></p>
           <span style={{ fontSize: 12.5, color: T.brown }}>{scopedPending.length > 0 ? "前往處理 →" : "查看紀錄 →"}</span>
         </div>
-        <div className="ph-stat-card" onClick={() => setPage("schedule")}>
+        <div className="ph-stat-card accent-gold" onClick={() => setPage("schedule")}>
           <p className="ph-eyebrow" style={{ marginBottom: 8 }}>本月預計工時</p>
           <p className="ph-serif" style={{ fontSize: 32, margin: "0 0 8px" }}>{loading ? "…" : Math.round(monthPlannedHours)}<span style={{ fontSize: 14, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}> 小時</span></p>
           <span style={{ fontSize: 12.5, color: T.brown }}>依目前班表自動加總</span>
         </div>
-        <div className={"ph-stat-card" + (!reportAllDone ? " attention" : "")} onClick={() => setPage("daily_report")}>
+        <div className="ph-stat-card accent-maroon" onClick={() => setPage("daily_report")}>
           <p className="ph-eyebrow" style={{ marginBottom: 8 }}>今日每日回報狀態</p>
           <p className="ph-serif" style={{ fontSize: scopeStoreIds.length > 1 ? 32 : 20, margin: "0 0 8px", color: scopeStoreIds.length > 1 ? T.ink : T[REPORT_STATUS_TONE[reportStatusOf(scopeStoreIds[0])]] }}>
             {loading ? "…" : scopeStoreIds.length > 1
               ? <>{reportDoneCount}<span style={{ fontSize: 15, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}>／{scopeStoreIds.length} 店已完成</span></>
               : REPORT_LABEL2[reportStatusOf(scopeStoreIds[0])]}
           </p>
-          <span style={{ fontSize: 12.5, color: T.brown }}>前往填寫／查看 →</span>
+          <span style={{ fontSize: 12.5, color: !reportAllDone ? T.yellow : T.brown }}>{!reportAllDone ? "每日皆須完成繳交 →" : "前往填寫／查看 →"}</span>
         </div>
       </div>
 
