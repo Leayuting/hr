@@ -12,7 +12,7 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
-<meta name="theme-color" content="#7B4326">
+<meta name="theme-color" content="#A34F2D">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -37,12 +37,13 @@ const { createClient } = supabase;
 ──────────────────────────────────────────── */
 
 const T = {
-  bg: "#FAF7F1", card: "#FFFFFF", ink: "#2B2521", sub: "#7A7168",
-  brown: "#7B4326", brownSoft: "#F1E7DD", line: "#E8E0D4",
-  green: "#3F7350", greenBg: "#E9F1EA",
-  yellow: "#A8791A", yellowBg: "#FBF3DC",
-  red: "#AE3B2C", redBg: "#F9E9E6",
-  rose: "#A85C7A", roseBg: "#F5E9EF",
+  bg: "#F3EFE7", card: "#FFFCF7", ink: "#292520", sub: "#8B8984", subBg: "#EDEBE6",
+  brown: "#A34F2D", brownSoft: "#EFE0CF", line: "#D8D0C4",
+  olive: "#667054", oliveBg: "#E7EAE1",
+  green: "#3F6952", greenBg: "#E3ECE6",
+  yellow: "#C77935", yellowBg: "#FBEADA",
+  red: "#A0443E", redBg: "#F5E2E0",
+  handoff: "#78845F", handoffBg: "#E7EAE0",
 };
 
 const SB_URL = "https://msrjtjpanejszhlxuqyd.supabase.co";
@@ -130,11 +131,12 @@ const css = `
 
 function Badge({ children, tone = "sub" }) {
   const map = {
-    sub: { color: T.sub, background: "#EFEAE1" },
+    sub: { color: T.sub, background: T.subBg },
     green: { color: T.green, background: T.greenBg },
     yellow: { color: T.yellow, background: T.yellowBg },
     red: { color: T.red, background: T.redBg },
-    rose: { color: T.rose, background: T.roseBg },
+    olive: { color: T.olive, background: T.oliveBg },
+    handoff: { color: T.handoff, background: T.handoffBg },
     brown: { color: T.brown, background: T.brownSoft },
   };
   return <span className="ph-badge" style={map[tone] || map.sub}>{children}</span>;
@@ -175,7 +177,7 @@ function Login() {
     try {
       const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
       if (error) {
-        sb.rpc("record_failed_login", { p_email: email.trim() }).catch(() => {});
+        try { await sb.rpc("record_failed_login", { p_email: email.trim() }); } catch (e3) { /* 記錄失敗次數失敗不影響登入流程 */ }
         setErr("登入失敗，請確認帳號密碼（" + error.message + "）");
       }
     } catch (e2) {
@@ -615,7 +617,7 @@ function DailyReportPage({ me, stores, storeId, setStoreId, toast }) {
           </select>
         )}
         <input className="ph-input" style={{ width: 150 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-        {report && <Badge tone={report.status === "hr_received" ? "green" : report.status === "signed" ? "brown" : report.status === "submitted" ? "yellow" : "sub"}>{REPORT_STATUS_LABEL[report.status]}</Badge>}
+        {report && <Badge tone={report.status === "hr_received" ? "green" : report.status === "signed" ? "handoff" : report.status === "submitted" ? "yellow" : "sub"}>{REPORT_STATUS_LABEL[report.status]}</Badge>}
       </div>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <>
