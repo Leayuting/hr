@@ -44,6 +44,8 @@ const T = {
   yellow: "#C77935", yellowBg: "#FBEADA",
   red: "#A0443E", redBg: "#F5E2E0",
   handoff: "#78845F", handoffBg: "#E7EAE0",
+  gold: "#C9A24B",
+  sidebar: "#241C16", sidebarInk: "#EDE6DC", sidebarSub: "#B3A899", sidebarLine: "#3A2F26",
 };
 
 const SB_URL = "https://msrjtjpanejszhlxuqyd.supabase.co";
@@ -70,6 +72,21 @@ function fmtTaipei(iso) {
   if (!iso) return "";
   const d = new Date(new Date(iso).getTime() + 8 * 3600 * 1000);
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+}
+const WEEKDAY_ZH = ["日", "一", "二", "三", "四", "五", "六"];
+function weekdayZh(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return WEEKDAY_ZH[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+}
+function addDaysStr(dateStr, n) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d) + n * 86400000);
+  return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
+}
+function weekDatesContaining(dateStr) {
+  const dow = new Date(Date.UTC(...dateStr.split("-").map((v, i) => i === 1 ? Number(v) - 1 : Number(v)))).getUTCDay(); // 0=日..6=六
+  const mondayOffset = dow === 0 ? -6 : 1 - dow;
+  return Array.from({ length: 7 }, (_, i) => addDaysStr(dateStr, mondayOffset + i));
 }
 function monthDays(yearMonth) {
   const [y, m] = yearMonth.split("-").map(Number);
@@ -108,10 +125,34 @@ const css = `
 .ph-table th { text-align:left; padding:8px 10px; font-weight:500; color:${T.sub}; border-bottom:1px solid ${T.line}; font-size:12px; white-space:nowrap; background:#FCFAF6; }
 .ph-table td { padding:8px 10px; border-bottom:1px solid ${T.line}; vertical-align:middle; font-size:13px; }
 .ph-table tr:hover td { background:#FBF8F2; }
-.ph-card { background:${T.card}; border:1px solid ${T.line}; border-radius:10px; }
-.ph-nav-item { display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:8px; cursor:pointer; color:${T.ink}; border:none; background:none; width:100%; text-align:left; }
-.ph-nav-item:hover { background:${T.brownSoft}; }
+.ph-card { background:${T.card}; border:1px solid ${T.line}; border-radius:11px; box-shadow:0 1px 2px rgba(41,37,32,.05); }
+.ph-eyebrow { font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:${T.sub}; margin:0 0 4px; }
+.ph-shell { display:flex; min-height:100vh; }
+.ph-sidebar { width:230px; flex-shrink:0; background:${T.sidebar}; color:${T.sidebarInk}; display:flex; flex-direction:column; padding:22px 14px; }
+.ph-sidebar-brand { padding:0 10px 22px; }
+.ph-sidebar-brand .ph-word { font-family:'Noto Serif TC',serif; font-size:22px; font-weight:700; letter-spacing:.06em; color:#fff; line-height:1; }
+.ph-sidebar-brand .ph-sub { font-size:10.5px; letter-spacing:.18em; color:${T.sidebarSub}; margin-top:6px; }
+.ph-nav-item { position:relative; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:9px; cursor:pointer; color:${T.sidebarInk}; border:none; background:none; width:100%; text-align:left; font-size:13.5px; }
+.ph-nav-item:hover { background:rgba(255,255,255,.06); }
 .ph-nav-item.on { background:${T.brown}; color:#fff; }
+.ph-nav-item.on::before { content:""; position:absolute; left:-14px; top:8px; bottom:8px; width:3px; border-radius:2px; background:${T.gold}; }
+.ph-nav-item .ph-nav-icon { display:flex; flex-shrink:0; opacity:.9; }
+.ph-nav-item .ph-nav-badge { margin-left:auto; background:${T.gold}; color:#241C16; font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px; }
+.ph-sidebar-foot { margin-top:auto; padding-top:14px; border-top:1px solid ${T.sidebarLine}; display:flex; align-items:center; gap:10px; }
+.ph-avatar { width:34px; height:34px; border-radius:999px; background:${T.brown}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:600; flex-shrink:0; }
+.ph-topbar { position:sticky; top:0; z-index:40; display:flex; align-items:center; gap:14px; padding:14px 28px; background:${T.bg}; border-bottom:1px solid ${T.line}; flex-wrap:wrap; }
+.ph-pill { display:inline-flex; align-items:center; padding:4px 12px; border-radius:999px; font-size:12px; font-weight:500; background:${T.brownSoft}; color:${T.brown}; white-space:nowrap; }
+.ph-bell-btn { position:relative; background:none; border:1px solid ${T.line}; border-radius:999px; width:34px; height:34px; display:flex; align-items:center; justify-content:center; cursor:pointer; color:${T.ink}; }
+.ph-bell-btn .ph-nav-badge { position:absolute; top:-4px; right:-4px; background:${T.brown}; color:#fff; font-size:10px; font-weight:700; min-width:16px; height:16px; border-radius:999px; display:flex; align-items:center; justify-content:center; padding:0 3px; }
+.ph-hamburger-btn { display:none; background:none; border:1px solid ${T.line}; border-radius:8px; width:36px; height:36px; align-items:center; justify-content:center; cursor:pointer; color:${T.ink}; }
+.ph-sidebar-backdrop { display:none; }
+.ph-stat-card { position:relative; background:${T.card}; border:1px solid ${T.line}; border-radius:11px; padding:16px 18px 16px 20px; box-shadow:0 1px 2px rgba(41,37,32,.05); cursor:pointer; text-align:left; }
+.ph-stat-card::before { content:""; position:absolute; left:0; top:14px; bottom:14px; width:3px; border-radius:2px; background:${T.line}; }
+.ph-stat-card.attention::before { background:${T.brown}; }
+.ph-stat-card:hover { border-color:${T.brown}55; }
+.ph-schedule-preview th.weekend, .ph-schedule-preview td.weekend-head { color:${T.brown}; }
+.ph-schedule-preview td.cell-off { background:#F6F2EC; color:${T.sub}; }
+.ph-schedule-preview td.cell-work { background:#F1F4EE; }
 .ph-badge { display:inline-flex; align-items:center; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:500; white-space:nowrap; }
 .ph-modal-backdrop { position:fixed; inset:0; background:rgba(43,37,33,.45); display:flex; align-items:center; justify-content:center; z-index:60; padding:16px; }
 .ph-modal { background:#fff; border-radius:12px; max-width:520px; width:100%; max-height:88vh; overflow:auto; padding:20px; }
@@ -123,13 +164,44 @@ const css = `
 .ph-daycell:hover { background:${T.brownSoft}; }
 .ph-err { color:${T.red}; font-size:12.5px; margin-top:4px; }
 .ph-debug { position:fixed; bottom:0; left:0; right:0; background:${T.red}; color:#fff; font-size:12px; padding:8px; z-index:999; white-space:pre-wrap; max-height:30vh; overflow:auto; pointer-events:none; }
-.ph-mobile-only { display:none; }
+@media (max-width: 900px) {
+  .ph-sidebar { position:fixed; top:0; left:0; bottom:0; z-index:70; width:250px; transform:translateX(-100%); transition:transform .22s ease; box-shadow:0 0 28px rgba(20,15,10,.35); }
+  .ph-sidebar.open { transform:translateX(0); }
+  .ph-hamburger-btn { display:flex; }
+  .ph-sidebar-backdrop.open { display:block; position:fixed; inset:0; background:rgba(20,15,10,.4); z-index:65; }
+  .ph-topbar { padding:12px 16px; }
+  .ph-main-pad { padding-left:16px; padding-right:16px; }
+}
 @media (max-width: 720px) {
   .ph-hide-mobile { display:none; }
-  .ph-mobile-only { display:flex; }
   .ph-table th, .ph-table td { padding:6px 6px; font-size:12px; }
+  .ph-schedule-preview-desktop { display:none; }
+}
+@media (min-width: 721px) {
+  .ph-schedule-preview-mobile { display:none; }
 }
 `;
+
+const ICON_PATHS = {
+  dashboard: <><rect x="3" y="3" width="7.5" height="7.5" rx="1.6" /><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6" /><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6" /><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6" /></>,
+  schedule: <><rect x="3" y="4.5" width="18" height="16" rx="2" /><path d="M3 9.5h18M8 2.5v4M16 2.5v4" /></>,
+  daily_report: <><path d="M6 2.5h8l4.5 4.5v14.5H6z" /><path d="M14 2.5v4.5h4.5" /><path d="M9 12.5h6M9 16.5h6M9 8.5h2.5" /></>,
+  requests: <><path d="M9 2.5h6a1 1 0 0 1 1 1v2H8v-2a1 1 0 0 1 1-1z" /><rect x="5" y="4.5" width="14" height="17" rx="2" /><path d="M9 13l2 2 4-4.5" /></>,
+  payroll: <><circle cx="12" cy="12" r="9" /><path d="M12 7v10M9.3 9.4h3.4a1.9 1.9 0 0 1 0 3.8h-1.4a1.9 1.9 0 0 0 0 3.8h3.4" /></>,
+  staff: <><circle cx="9" cy="8" r="3.3" /><path d="M2.3 20a6.7 6.7 0 0 1 13.4 0" /><circle cx="17.7" cy="8.6" r="2.7" /><path d="M15.1 12.4a5.6 5.6 0 0 1 6.6 5.5" /></>,
+  backup: <><path d="M12 3v12.5" /><path d="M6.8 10.3l5.2 5.2 5.2-5.2" /><path d="M4 19.5h16" /></>,
+  bell: <><path d="M6 9.5a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 13.5 6 9.5Z" /><path d="M10 18.5a2 2 0 0 0 4 0" /></>,
+  hamburger: <><path d="M3.5 6.5h17M3.5 12h17M3.5 17.5h17" /></>,
+  close: <><path d="M5 5l14 14M19 5L5 19" /></>,
+  chevron: <><path d="M9 6l6 6-6 6" /></>,
+};
+function Icon({ name, size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      {ICON_PATHS[name]}
+    </svg>
+  );
+}
 
 function Badge({ children, tone = "sub" }) {
   const map = {
@@ -224,38 +296,48 @@ function Login() {
    排班表
 ──────────────────────────────────────────── */
 
-function SchedulePage({ me, stores, storeId, setStoreId, toast }) {
+function prevMonthStr(ym) { const [y, m] = ym.split("-").map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${pad2(m - 1)}`; }
+function nextMonthStr(ym) { const [y, m] = ym.split("-").map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${pad2(m + 1)}`; }
+
+function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
   const [shifts, setShifts] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(null); // {employeeId, employeeName, date}
+  const [editing, setEditing] = useState(null); // {employeeId, employeeName, employeeStoreId, date}
+  const [copying, setCopying] = useState(false);
+  const [publishModal, setPublishModal] = useState(false);
+  const [mobileDayIdx, setMobileDayIdx] = useState(() => {
+    const t = todayStr();
+    return t.slice(0, 7) === ym ? Number(t.slice(8, 10)) - 1 : 0;
+  });
   const canEdit = me.role === "manager" || me.role === "hr";
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
 
   const load = useCallback(async () => {
-    if (!storeId) return;
+    if (!scopeStoreIds.length) return;
     setLoading(true);
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
-    const [rosterRes, shiftRes] = await Promise.all([
-      sb.rpc("store_roster", { p_store_id: storeId }),
-      sb.from("shifts").select("*").eq("store_id", storeId).gte("work_date", from).lte("work_date", to),
+    const [empRes, shiftRes] = await Promise.all([
+      sb.from("employees").select("id,name,position,store_id,employment_type,active").in("store_id", scopeStoreIds).eq("active", true).order("name"),
+      sb.from("shifts").select("*").in("store_id", scopeStoreIds).gte("work_date", from).lte("work_date", to),
     ]);
-    if (rosterRes.error) console.error("store_roster", rosterRes.error);
+    if (empRes.error) console.error("employees", empRes.error);
     if (shiftRes.error) console.error("shifts", shiftRes.error);
-    setRoster((rosterRes.data || []).filter((r) => r.active));
+    setRoster(empRes.data || []);
     setShifts(shiftRes.data || []);
     setLoading(false);
-  }, [storeId, ym]);
+  }, [scopeStoreIds, ym]);
 
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    const ch = sb.channel("schedule_" + storeId)
-      .on("postgres_changes", { event: "*", schema: "public", table: "shifts", filter: `store_id=eq.${storeId}` }, () => load())
+    const ch = sb.channel("schedule_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, () => load())
       .subscribe();
     return () => sb.removeChannel(ch);
-  }, [storeId, load]);
+  }, [load]);
 
   const days = monthDays(ym);
   const dateList = Array.from({ length: days }, (_, i) => `${ym}-${pad2(i + 1)}`);
@@ -264,10 +346,17 @@ function SchedulePage({ me, stores, storeId, setStoreId, toast }) {
     shifts.forEach((s) => { m[`${s.employee_id}_${s.work_date}`] = s; });
     return m;
   }, [shifts]);
+  const totalShiftCount = shifts.filter((s) => !s.is_day_off).length;
+  const totalHours = shifts.reduce((sum, s) => {
+    if (s.is_day_off || !s.start_time || !s.end_time) return sum;
+    const [sh, sm] = s.start_time.split(":").map(Number);
+    const [eh, em2] = s.end_time.split(":").map(Number);
+    return sum + Math.max(0, (eh * 60 + em2 - (sh * 60 + sm)) / 60);
+  }, 0);
 
-  async function saveShift(employeeId, date, { startTime, endTime, isDayOff, note }) {
+  async function saveShift(employeeId, employeeStoreId, date, { startTime, endTime, isDayOff, note }) {
     const payload = {
-      employee_id: employeeId, store_id: storeId, work_date: date,
+      employee_id: employeeId, store_id: employeeStoreId, work_date: date,
       start_time: isDayOff ? null : (startTime || null),
       end_time: isDayOff ? null : (endTime || null),
       is_day_off: isDayOff, note: note || "",
@@ -280,50 +369,155 @@ function SchedulePage({ me, stores, storeId, setStoreId, toast }) {
     load();
   }
 
+  async function copyLastMonth() {
+    setCopying(true);
+    const prevYm = prevMonthStr(ym);
+    const prevDays = monthDays(prevYm);
+    const { data: prevShifts, error } = await sb.from("shifts").select("*").in("store_id", scopeStoreIds)
+      .gte("work_date", `${prevYm}-01`).lte("work_date", `${prevYm}-${pad2(prevDays)}`);
+    if (error) { toast("讀取上月班表失敗：" + error.message); setCopying(false); return; }
+    const rosterIds = new Set(roster.map((r) => r.id));
+    const existingKeys = new Set(shifts.map((s) => `${s.employee_id}_${s.work_date}`));
+    const toInsert = [];
+    (prevShifts || []).forEach((s) => {
+      if (!rosterIds.has(s.employee_id)) return;
+      const dayNum = Number(s.work_date.slice(8, 10));
+      if (dayNum > days) return;
+      const targetDate = `${ym}-${pad2(dayNum)}`;
+      const key = `${s.employee_id}_${targetDate}`;
+      if (existingKeys.has(key)) return;
+      toInsert.push({
+        employee_id: s.employee_id, store_id: s.store_id, work_date: targetDate,
+        start_time: s.start_time, end_time: s.end_time, is_day_off: s.is_day_off, note: "",
+        updated_by: me.id, updated_at: new Date().toISOString(),
+      });
+      existingKeys.add(key);
+    });
+    if (!toInsert.length) { toast("沒有可複製的班次（可能本月已有排班資料）"); setCopying(false); return; }
+    const { error: insErr } = await sb.from("shifts").upsert(toInsert, { onConflict: "employee_id,work_date" });
+    setCopying(false);
+    if (insErr) { toast("複製失敗：" + insErr.message); return; }
+    await logAudit(me.name, "copy_last_month_schedule", ym, `複製 ${toInsert.length} 筆`);
+    toast(`已從 ${prevYm} 複製 ${toInsert.length} 筆班次`);
+    load();
+  }
+
+  async function confirmPublish() {
+    await logAudit(me.name, "publish_schedule", ym, `門市範圍：${scope === "all" ? "全部門市" : storeById[scopeStoreIds[0]]?.name || ""}`);
+    setPublishModal(false);
+    toast(`已確認發布 ${ym} 班表`);
+  }
+
+  const scopeName = scope === "all" ? "全部門市" : (storeById[scopeStoreIds[0]]?.name || "");
+
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-        <h2 className="ph-serif" style={{ margin: 0 }}>排班表</h2>
-        {me.role === "hr" && (
-          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
-            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        )}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+        <h2 className="ph-serif" style={{ margin: 0 }}>門市排班</h2>
+        <div style={{ display: "flex", gap: 4 }}>
+          <button className="ph-btn small" onClick={() => setYm(prevMonthStr(ym))}>‹ 上個月</button>
+          <button className="ph-btn small" onClick={() => setYm(thisMonthStr())}>今天</button>
+          <button className="ph-btn small" onClick={() => setYm(nextMonthStr(ym))}>下個月 ›</button>
+        </div>
         <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+        {canEdit && (
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button className="ph-btn small" disabled={copying} onClick={copyLastMonth}>{copying ? "複製中…" : "複製上月"}</button>
+            <button className="ph-btn small primary" onClick={() => setPublishModal(true)}>發布{Number(ym.slice(5, 7))}月班表</button>
+          </div>
+        )}
       </div>
-      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
-        <div className="ph-card" style={{ overflowX: "auto" }}>
-          <table className="ph-table">
-            <thead>
-              <tr>
-                <th style={{ position: "sticky", left: 0, background: "#FCFAF6" }}>夥伴</th>
-                {dateList.map((d) => <th key={d}>{Number(d.slice(8))}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {roster.map((r) => (
-                <tr key={r.id}>
-                  <td style={{ position: "sticky", left: 0, background: "#fff", fontWeight: 500 }}>{r.name}</td>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 14 }}>
+        {ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月｜{scopeName}｜整月排班（{ym}-01–{ym}-{pad2(days)}）；點擊班次即可修改。
+      </p>
+
+      <div className="ph-schedule-preview-desktop">
+        {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+          <div className="ph-card" style={{ overflowX: "auto" }}>
+            <table className="ph-table ph-schedule-preview">
+              <thead>
+                <tr>
+                  <th style={{ position: "sticky", left: 0, background: "#FCFAF6", zIndex: 1 }}>夥伴</th>
                   {dateList.map((d) => {
-                    const s = shiftMap[`${r.id}_${d}`];
-                    const mine = r.id === me.id;
-                    return (
-                      <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
-                        style={mine ? { background: T.brownSoft } : undefined}
-                        onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, date: d, existing: s })}>
-                        {s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}
-                      </td>
-                    );
+                    const wd = weekdayZh(d);
+                    const isWeekend = wd === "六" || wd === "日";
+                    return <th key={d} className={isWeekend ? "weekend" : ""}>{Number(d.slice(8))}</th>;
                   })}
                 </tr>
-              ))}
-              {roster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      )}
+              </thead>
+              <tbody>
+                {roster.map((r) => (
+                  <tr key={r.id}>
+                    <td style={{ position: "sticky", left: 0, background: "#fff", fontWeight: 500 }}>
+                      {r.name}
+                      {scopeStoreIds.length > 1 && <div style={{ fontSize: 11, color: T.sub, fontWeight: 400 }}>{storeById[r.store_id]?.name}</div>}
+                    </td>
+                    {dateList.map((d) => {
+                      const s = shiftMap[`${r.id}_${d}`];
+                      const mine = r.id === me.id;
+                      return (
+                        <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
+                          style={mine ? { background: T.brownSoft } : undefined}
+                          onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, date: d, existing: s })}>
+                          {s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+                {roster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此範圍尚無在職夥伴</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {!loading && roster.length > 0 && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: T.sub }}>
+            本月共 <strong style={{ color: T.ink }}>{totalShiftCount}</strong> 個班次
+            <span style={{ marginLeft: 16 }}>預計總工時 <strong style={{ color: T.ink }}>{Math.round(totalHours)}</strong> 小時</span>
+          </div>
+        )}
+      </div>
+
+      <div className="ph-schedule-preview-mobile">
+        {loading ? <p style={{ color: T.sub }}>載入中…</p> : roster.length === 0 ? (
+          <p style={{ color: T.sub, fontSize: 13, textAlign: "center", padding: "24px 0" }}>此範圍尚無在職夥伴</p>
+        ) : (
+          <div className="ph-card" style={{ padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <button className="ph-btn small" onClick={() => setMobileDayIdx((i) => Math.max(0, i - 1))} disabled={mobileDayIdx === 0}>‹</button>
+              <span style={{ fontSize: 14, fontWeight: 500 }}>{dateList[mobileDayIdx]}（週{weekdayZh(dateList[mobileDayIdx])}）</span>
+              <button className="ph-btn small" onClick={() => setMobileDayIdx((i) => Math.min(days - 1, i + 1))} disabled={mobileDayIdx === days - 1}>›</button>
+            </div>
+            {roster.map((r) => {
+              const d = dateList[mobileDayIdx];
+              const s = shiftMap[`${r.id}_${d}`];
+              return (
+                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: canEdit ? "pointer" : "default" }}
+                  onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, date: d, existing: s })}>
+                  <div>
+                    <div style={{ fontWeight: 500, fontSize: 13.5 }}>{r.name}</div>
+                    <div style={{ fontSize: 11.5, color: T.sub }}>{storeById[r.store_id]?.name}・{r.position}</div>
+                  </div>
+                  <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {editing && (
         <ShiftEditModal editing={editing} onClose={() => setEditing(null)} onSave={saveShift} />
+      )}
+      {publishModal && (
+        <Modal title="確認發布班表" onClose={() => setPublishModal(false)}>
+          <p style={{ fontSize: 13.5 }}>即將發布 <strong>{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月</strong>（{scopeName}）班表，所有夥伴都能立即在系統上看到目前的排班內容。</p>
+          <p style={{ fontSize: 12.5, color: T.sub }}>※ 系統排班為即改即存，發布為確認留存紀錄，不會另外隱藏未發布的班次。</p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+            <button className="ph-btn" onClick={() => setPublishModal(false)}>取消</button>
+            <button className="ph-btn primary" onClick={confirmPublish}>確認發布</button>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -351,7 +545,7 @@ function ShiftEditModal({ editing, onClose, onSave }) {
       <Field label="備註"><input className="ph-input" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
         <button className="ph-btn" onClick={onClose}>取消</button>
-        <button className="ph-btn primary" onClick={() => onSave(editing.employeeId, editing.date, { startTime, endTime, isDayOff, note })}>儲存</button>
+        <button className="ph-btn primary" onClick={() => onSave(editing.employeeId, editing.employeeStoreId, editing.date, { startTime, endTime, isDayOff, note })}>儲存</button>
       </div>
     </Modal>
   );
@@ -361,22 +555,27 @@ function ShiftEditModal({ editing, onClose, onSave }) {
    請假／加班申請
 ──────────────────────────────────────────── */
 
-function RequestsPage({ me, stores, storeId, setStoreId, toast }) {
+function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [monthFilter, setMonthFilter] = useState("");
   const canReview = me.role === "manager" || me.role === "hr";
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
 
   const load = useCallback(async () => {
+    if (!scopeStoreIds.length) { setRows([]); setLoading(false); return; }
     setLoading(true);
-    let q = sb.from("requests").select("*, employees!requests_employee_id_fkey(name)").order("submitted_at", { ascending: false }).limit(200);
-    if (canReview && storeId) q = q.eq("store_id", storeId);
-    if (!canReview) q = q.eq("employee_id", me.id);
+    let q = sb.from("requests").select("*, employees!requests_employee_id_fkey(name)").order("submitted_at", { ascending: false }).limit(300);
+    if (canReview) q = q.in("store_id", scopeStoreIds);
+    else q = q.eq("employee_id", me.id);
     const { data, error } = await q;
     if (error) console.error("requests load", error);
     setRows(data || []);
     setLoading(false);
-  }, [storeId, canReview, me.id]);
+  }, [scopeStoreIds, canReview, me.id]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -391,27 +590,48 @@ function RequestsPage({ me, stores, storeId, setStoreId, toast }) {
     toast(decision === "approved" ? "已核准" : "已拒絕");
   }
 
+  const filteredRows = rows.filter((r) => {
+    if (typeFilter !== "all" && r.type !== typeFilter) return false;
+    if (statusFilter !== "all" && r.status !== statusFilter) return false;
+    if (monthFilter && !r.start_at?.startsWith(monthFilter)) return false;
+    return true;
+  });
+
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-        <h2 className="ph-serif" style={{ margin: 0 }}>請假／加班</h2>
-        {canReview && me.role === "hr" && (
-          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
-            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        )}
-        <button className="ph-btn primary" onClick={() => setShowForm(true)}>＋ 送出申請</button>
+        <h2 className="ph-serif" style={{ margin: 0 }}>{canReview ? "申請審核" : "請假／加班"}</h2>
+        <button className="ph-btn primary" style={{ marginLeft: canReview ? 0 : "auto" }} onClick={() => setShowForm(true)}>＋ 送出申請</button>
       </div>
+      {canReview && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+          <select className="ph-input" style={{ width: 130 }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <option value="all">全部類型</option>
+            <option value="annual_leave">特休</option>
+            <option value="personal_leave">事假</option>
+            <option value="overtime">加班</option>
+          </select>
+          <select className="ph-input" style={{ width: 130 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <option value="all">全部狀態</option>
+            <option value="pending">待審核</option>
+            <option value="approved">已核准</option>
+            <option value="rejected">已拒絕</option>
+          </select>
+          <input className="ph-input" style={{ width: 150 }} type="month" value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)} />
+          {monthFilter && <button className="ph-btn small" onClick={() => setMonthFilter("")}>清除月份</button>}
+        </div>
+      )}
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div className="ph-card" style={{ overflowX: "auto" }}>
           <table className="ph-table">
             <thead><tr>
-              <th>夥伴</th><th>類型</th><th>起</th><th>迄</th><th>時數</th><th>事由</th><th>狀態</th>{canReview && <th>操作</th>}
+              <th>夥伴</th>{scopeStoreIds.length > 1 && <th>門市</th>}<th>類型</th><th>起</th><th>迄</th><th>時數</th><th>事由</th><th>狀態</th>{canReview && <th>操作</th>}
             </tr></thead>
             <tbody>
-              {rows.map((r) => (
+              {filteredRows.map((r) => (
                 <tr key={r.id}>
                   <td>{r.employees?.name || "—"}</td>
+                  {scopeStoreIds.length > 1 && <td style={{ fontSize: 12, color: T.sub }}>{storeById[r.store_id]?.name}</td>}
                   <td>{REQ_TYPE_LABEL[r.type]}</td>
                   <td>{fmtTaipei(r.start_at)}</td>
                   <td>{fmtTaipei(r.end_at)}</td>
@@ -430,7 +650,7 @@ function RequestsPage({ me, stores, storeId, setStoreId, toast }) {
                   )}
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={canReview ? 8 : 7} style={{ color: T.sub, textAlign: "center" }}>沒有紀錄</td></tr>}
+              {filteredRows.length === 0 && <tr><td colSpan={canReview ? (scopeStoreIds.length > 1 ? 9 : 8) : 7} style={{ color: T.sub, textAlign: "center" }}>沒有符合條件的紀錄</td></tr>}
             </tbody>
           </table>
         </div>
@@ -495,8 +715,111 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
    電子日總表
 ──────────────────────────────────────────── */
 
-function DailyReportPage({ me, stores, storeId, setStoreId, toast }) {
+const DAILY_HUB_LABEL = { missing: "未提交", submitted: "已提交", signed: "已提交", hr_received: "已提交", needs_attach: "需補件" };
+const DAILY_HUB_TONE = { missing: "sub", submitted: "olive", signed: "olive", hr_received: "olive", needs_attach: "red" };
+
+function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
   const [date, setDate] = useState(todayStr());
+  const [reports, setReports] = useState([]);
+  const [anomalyCounts, setAnomalyCounts] = useState({});
+  const [attachCounts, setAttachCounts] = useState({});
+  const [nameById, setNameById] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [openStoreId, setOpenStoreId] = useState(null);
+
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
+  const visibleStores = stores.filter((s) => scopeStoreIds.includes(s.id));
+
+  const load = useCallback(async () => {
+    if (!scopeStoreIds.length) return;
+    setLoading(true);
+    const repRes = await sb.from("daily_reports").select("*").in("store_id", scopeStoreIds).eq("report_date", date);
+    if (repRes.error) console.error("daily_reports", repRes.error);
+    const reps = repRes.data || [];
+    setReports(reps);
+    const reportIds = reps.map((r) => r.id);
+    const empIds = [...new Set(reps.flatMap((r) => [r.submitted_by, r.signed_by, r.hr_received_by]).filter(Boolean))];
+    const [entriesRes, attachRes, empRes] = await Promise.all([
+      reportIds.length ? sb.from("daily_report_entries").select("daily_report_id,late,missed_punch,leave,overtime") .in("daily_report_id", reportIds) : Promise.resolve({ data: [] }),
+      reportIds.length ? sb.from("daily_report_attachments").select("daily_report_id").in("daily_report_id", reportIds) : Promise.resolve({ data: [] }),
+      empIds.length ? sb.from("employees").select("id,name").in("id", empIds) : Promise.resolve({ data: [] }),
+    ]);
+    const aCounts = {};
+    (entriesRes.data || []).forEach((e) => {
+      if (e.late || e.missed_punch || e.leave || e.overtime) aCounts[e.daily_report_id] = (aCounts[e.daily_report_id] || 0) + 1;
+    });
+    const fCounts = {};
+    (attachRes.data || []).forEach((a) => { fCounts[a.daily_report_id] = (fCounts[a.daily_report_id] || 0) + 1; });
+    setAnomalyCounts(aCounts);
+    setAttachCounts(fCounts);
+    setNameById(Object.fromEntries((empRes.data || []).map((e) => [e.id, e.name])));
+    setLoading(false);
+  }, [scopeStoreIds, date]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("daily_report_hub_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_reports" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_report_entries" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_report_attachments" }, load)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
+
+  if (openStoreId) {
+    const store = storeById[openStoreId];
+    return <DailyReportDetail me={me} store={store} date={date} toast={toast} onBack={() => setOpenStoreId(null)} />;
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+        <h2 className="ph-serif" style={{ margin: 0 }}>每日回報</h2>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.sub, marginLeft: "auto" }}>
+          回報日期
+          <input className="ph-input" style={{ width: 150 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        </label>
+      </div>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 18 }}>本頁為正式電子日總表，完整取代紙本；無論有無異常，每間門店每天都要完成。</p>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : visibleStores.length === 0 ? (
+        <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>沒有可查看的門市</p>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
+          {visibleStores.map((s) => {
+            const rep = reports.find((r) => r.store_id === s.id);
+            const anomalyCount = rep ? (anomalyCounts[rep.id] || 0) : 0;
+            const attachCount = rep ? (attachCounts[rep.id] || 0) : 0;
+            const needsAttach = !!rep && anomalyCount > 0 && attachCount === 0;
+            const key = !rep ? "missing" : needsAttach ? "needs_attach" : rep.status;
+            const submitterName = rep?.submitted_by ? nameById[rep.submitted_by] : null;
+            return (
+              <div key={s.id} className="ph-card" style={{ padding: 18, cursor: "pointer" }} onClick={() => setOpenStoreId(s.id)}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <h3 className="ph-serif" style={{ margin: 0, fontSize: 16 }}>{s.name}</h3>
+                  <Badge tone={DAILY_HUB_TONE[key]}>{DAILY_HUB_LABEL[key]}</Badge>
+                </div>
+                <p style={{ fontSize: 13, color: T.sub, margin: "0 0 6px" }}>{anomalyCount} 位夥伴有異常紀錄</p>
+                {rep ? (
+                  <p style={{ fontSize: 12, color: T.sub, margin: "0 0 14px" }}>
+                    提交人：{submitterName || "—"}　提交時間：{rep.submitted_at ? fmtTaipei(rep.submitted_at) : "—"}
+                  </p>
+                ) : (
+                  <p style={{ fontSize: 12, color: T.sub, margin: "0 0 14px" }}>今日尚未送出每日回報</p>
+                )}
+                <button className="ph-btn small primary" onClick={(e) => { e.stopPropagation(); setOpenStoreId(s.id); }}>
+                  {rep ? "查看回報 →" : "前往填寫 →"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DailyReportDetail({ me, store, date, toast, onBack }) {
+  const storeId = store?.id;
   const [roster, setRoster] = useState([]);
   const [report, setReport] = useState(null);
   const [entries, setEntries] = useState({}); // employeeId -> entry draft
@@ -612,13 +935,8 @@ function DailyReportPage({ me, stores, storeId, setStoreId, toast }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-        <h2 className="ph-serif" style={{ margin: 0 }}>電子日總表</h2>
-        {me.role === "hr" && (
-          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
-            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        )}
-        <input className="ph-input" style={{ width: 150 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <button className="ph-btn small" onClick={onBack}>← 返回每日回報</button>
+        <h2 className="ph-serif" style={{ margin: 0 }}>{store?.name}・{date}</h2>
         {report && <Badge tone={report.status === "hr_received" ? "green" : report.status === "signed" ? "handoff" : report.status === "submitted" ? "yellow" : "sub"}>{REPORT_STATUS_LABEL[report.status]}</Badge>}
       </div>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
@@ -694,36 +1012,41 @@ function DailyReportPage({ me, stores, storeId, setStoreId, toast }) {
    薪資試算
 ──────────────────────────────────────────── */
 
-function PayrollPage({ me, stores, storeId, setStoreId, toast }) {
+function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
-  const [employeesFull, setEmployeesFull] = useState([]);
   const [shifts, setShifts] = useState([]);
   const [requests, setRequests] = useState([]);
-  const [run, setRun] = useState(null);
+  const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
 
   const load = useCallback(async () => {
-    if (!storeId) return;
+    if (!scopeStoreIds.length) return;
     setLoading(true);
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
     const [empRes, shiftRes, reqRes, runRes] = await Promise.all([
-      sb.from("employees").select("*").eq("store_id", storeId).eq("active", true),
-      sb.from("shifts").select("*").eq("store_id", storeId).gte("work_date", from).lte("work_date", to),
-      sb.from("requests").select("*").eq("store_id", storeId).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
-      sb.from("payroll_runs").select("*").eq("store_id", storeId).eq("year_month", ym).maybeSingle(),
+      sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("active", true).order("name"),
+      sb.from("shifts").select("*").in("store_id", scopeStoreIds).gte("work_date", from).lte("work_date", to),
+      sb.from("requests").select("*").in("store_id", scopeStoreIds).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
+      sb.from("payroll_runs").select("*").in("store_id", scopeStoreIds).eq("year_month", ym),
     ]);
     [empRes, shiftRes, reqRes, runRes].forEach((r) => { if (r.error) console.error("payroll load", r.error); });
-    setEmployeesFull(empRes.data || []);
     setRoster(empRes.data || []);
     setShifts(shiftRes.data || []);
     setRequests(reqRes.data || []);
-    setRun(runRes.data || null);
+    setRuns(runRes.data || []);
     setLoading(false);
-  }, [storeId, ym]);
+  }, [scopeStoreIds, ym]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("payroll_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "payroll_runs" }, load)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
 
   const rows = useMemo(() => {
     return roster.map((emp) => {
@@ -746,23 +1069,25 @@ function PayrollPage({ me, stores, storeId, setStoreId, toast }) {
     });
   }, [roster, shifts, requests]);
 
-  const locked = run?.status === "locked";
+  const activeRun = activeStoreId ? runs.find((r) => r.store_id === activeStoreId) : null;
+  const locked = activeRun?.status === "locked";
 
   async function toggleLock() {
+    if (!activeStoreId) { toast("請先在上方選擇單一門市才能鎖定薪資"); return; }
     if (locked) {
-      const { error } = await sb.from("payroll_runs").update({ status: "draft", locked_by: null, locked_at: null }).eq("id", run.id);
+      const { error } = await sb.from("payroll_runs").update({ status: "draft", locked_by: null, locked_at: null }).eq("id", activeRun.id);
       if (error) { toast("解鎖失敗：" + error.message); return; }
-      await logAudit(me.name, "unlock_payroll", `${storeId}:${ym}`);
+      await logAudit(me.name, "unlock_payroll", `${activeStoreId}:${ym}`);
       toast("已解鎖");
     } else {
-      if (!run) {
-        const { data, error } = await sb.from("payroll_runs").insert({ store_id: storeId, year_month: ym, status: "locked", locked_by: me.id, locked_at: new Date().toISOString() }).select().single();
+      if (!activeRun) {
+        const { error } = await sb.from("payroll_runs").insert({ store_id: activeStoreId, year_month: ym, status: "locked", locked_by: me.id, locked_at: new Date().toISOString() });
         if (error) { toast("鎖定失敗：" + error.message); return; }
       } else {
-        const { error } = await sb.from("payroll_runs").update({ status: "locked", locked_by: me.id, locked_at: new Date().toISOString() }).eq("id", run.id);
+        const { error } = await sb.from("payroll_runs").update({ status: "locked", locked_by: me.id, locked_at: new Date().toISOString() }).eq("id", activeRun.id);
         if (error) { toast("鎖定失敗：" + error.message); return; }
       }
-      await logAudit(me.name, "lock_payroll", `${storeId}:${ym}`);
+      await logAudit(me.name, "lock_payroll", `${activeStoreId}:${ym}`);
       toast("已鎖定該月薪資");
     }
     load();
@@ -780,27 +1105,30 @@ function PayrollPage({ me, stores, storeId, setStoreId, toast }) {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
         <h2 className="ph-serif" style={{ margin: 0 }}>薪資試算</h2>
-        {me.role === "hr" && (
-          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
-            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        )}
         <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
         <button className="ph-btn" onClick={exportCsv}>匯出 CSV</button>
-        {me.role === "hr" && <button className="ph-btn primary" onClick={toggleLock}>{locked ? "解鎖" : "鎖定本月"}</button>}
-        {locked && <Badge tone="brown">已鎖定</Badge>}
+        {me.role === "hr" && (
+          <button className="ph-btn primary" disabled={!activeStoreId} onClick={toggleLock} title={!activeStoreId ? "請先在上方選擇單一門市" : undefined}>
+            {locked ? "解鎖" : "鎖定本月"}
+          </button>
+        )}
+        {locked && <Badge tone="brown">{storeById[activeStoreId]?.name} 已鎖定</Badge>}
       </div>
-      <p style={{ color: T.sub, fontSize: 12.5, marginTop: -6 }}>※ 此頁為內部薪資試算，正式發薪前仍須人工複核；加班費／事假扣款皆為估算值。</p>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 14 }}>
+        ※ 此頁為內部薪資試算，正式發薪前仍須人工複核；加班費／事假扣款皆為估算值。
+        {!activeStoreId && me.role === "hr" && "　目前為全部門市檢視，鎖定薪資請先在上方選擇單一門市。"}
+      </p>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div className="ph-card" style={{ overflowX: "auto" }}>
           <table className="ph-table">
-            <thead><tr><th>夥伴</th><th>類型</th><th>本薪/工資</th><th>獎金</th><th>加班</th><th>事假扣款</th><th>應發合計</th></tr></thead>
+            <thead><tr><th>夥伴</th>{scopeStoreIds.length > 1 && <th>門市</th>}<th>類型</th><th>本薪/工資</th><th>獎金</th><th>加班</th><th>事假扣款</th><th>應發合計</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.emp.id}>
                   <td>{r.emp.name}</td>
+                  {scopeStoreIds.length > 1 && <td style={{ fontSize: 12, color: T.sub }}>{storeById[r.emp.store_id]?.name}</td>}
                   <td>{r.emp.employment_type === "full_time" ? "全職" : "兼職"}</td>
                   <td>NT$ {money(r.basePay)}</td>
                   <td>NT$ {money(r.emp.bonus)}</td>
@@ -809,7 +1137,7 @@ function PayrollPage({ me, stores, storeId, setStoreId, toast }) {
                   <td style={{ fontWeight: 600 }}>NT$ {money(r.total)}</td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={7} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={scopeStoreIds.length > 1 ? 8 : 7} style={{ color: T.sub, textAlign: "center" }}>此範圍尚無在職夥伴</td></tr>}
             </tbody>
           </table>
         </div>
@@ -822,41 +1150,43 @@ function PayrollPage({ me, stores, storeId, setStoreId, toast }) {
    員工管理（hr 全欄位；manager 僅能新增/編輯非薪資欄位，見伺服器 trigger 強制）
 ──────────────────────────────────────────── */
 
-function StaffPage({ me, stores, storeId, setStoreId, toast }) {
+function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
 
   const load = useCallback(async () => {
-    if (!storeId) return;
+    if (!scopeStoreIds.length) return;
     setLoading(true);
-    const { data, error } = await sb.from("employees").select("*").eq("store_id", storeId).order("active", { ascending: false }).order("name");
+    const { data, error } = await sb.from("employees").select("*").in("store_id", scopeStoreIds).order("active", { ascending: false }).order("name");
     if (error) console.error("staff load", error);
     setRows(data || []);
     setLoading(false);
-  }, [storeId]);
+  }, [scopeStoreIds]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("staff_sync").on("postgres_changes", { event: "*", schema: "public", table: "employees" }, () => load()).subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
 
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-        <h2 className="ph-serif" style={{ margin: 0 }}>在職夥伴</h2>
-        {me.role === "hr" && (
-          <select className="ph-input" style={{ width: 160 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
-            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        )}
-        <button className="ph-btn primary" onClick={() => setEditing({ isNew: true })}>＋ 新增夥伴</button>
+        <h2 className="ph-serif" style={{ margin: 0 }}>人員資料</h2>
+        <button className="ph-btn primary" onClick={() => setEditing({ isNew: true, store_id: activeStoreId || "" })}>＋ 新增夥伴</button>
       </div>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div className="ph-card" style={{ overflowX: "auto" }}>
           <table className="ph-table">
-            <thead><tr><th>姓名</th><th>職務</th><th>類型</th><th>角色</th><th className="ph-hide-mobile">本薪/時薪</th><th className="ph-hide-mobile">獎金</th><th>在職</th><th>Email</th><th>操作</th></tr></thead>
+            <thead><tr><th>姓名</th>{scopeStoreIds.length > 1 && <th>門市</th>}<th>職務</th><th>類型</th><th>角色</th><th className="ph-hide-mobile">本薪/時薪</th><th className="ph-hide-mobile">獎金</th><th>在職</th><th>Email</th><th>操作</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id}>
-                  <td>{r.name}</td><td>{r.position}</td>
+                  <td>{r.name}</td>
+                  {scopeStoreIds.length > 1 && <td style={{ fontSize: 12, color: T.sub }}>{storeById[r.store_id]?.name}</td>}
+                  <td>{r.position}</td>
                   <td>{r.employment_type === "full_time" ? "全職" : "兼職"}</td>
                   <td>{ROLE_LABEL[r.role]}</td>
                   <td className="ph-hide-mobile">{r.employment_type === "full_time" ? `NT$${money(r.base_salary)}` : `NT$${money(r.hourly_rate)}/hr`}</td>
@@ -866,22 +1196,23 @@ function StaffPage({ me, stores, storeId, setStoreId, toast }) {
                   <td><button className="ph-btn small" onClick={() => setEditing({ ...r })}>編輯</button></td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={9} style={{ color: T.sub, textAlign: "center" }}>此門市尚無夥伴資料</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={scopeStoreIds.length > 1 ? 10 : 9} style={{ color: T.sub, textAlign: "center" }}>此範圍尚無夥伴資料</td></tr>}
             </tbody>
           </table>
         </div>
       )}
       {editing && (
-        <StaffEditModal me={me} storeId={storeId} editing={editing} onClose={() => setEditing(null)}
+        <StaffEditModal me={me} stores={stores} editing={editing} onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); toast("已儲存"); }} />
       )}
     </div>
   );
 }
 
-function StaffEditModal({ me, storeId, editing, onClose, onSaved }) {
+function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const isHr = me.role === "hr";
   const [name, setName] = useState(editing.name || "");
+  const [storeIdSel, setStoreIdSel] = useState(editing.store_id || stores[0]?.id || "");
   const [position, setPosition] = useState(editing.position || "");
   const [employmentType, setEmploymentType] = useState(editing.employment_type || "full_time");
   const [role, setRole] = useState(editing.role || "staff");
@@ -895,8 +1226,9 @@ function StaffEditModal({ me, storeId, editing, onClose, onSaved }) {
 
   async function save() {
     if (!name.trim()) { setErr("請輸入姓名"); return; }
+    if (!storeIdSel) { setErr("請選擇所屬門市"); return; }
     setErr(""); setBusy(true);
-    const payload = { name: name.trim(), position, employment_type: employmentType, active, store_id: storeId };
+    const payload = { name: name.trim(), position, employment_type: employmentType, active, store_id: storeIdSel };
     if (isHr) { payload.role = role; payload.base_salary = Number(baseSalary) || 0; payload.hourly_rate = Number(hourlyRate) || 0; payload.bonus = Number(bonus) || 0; }
     let error;
     if (editing.isNew) {
@@ -921,6 +1253,11 @@ function StaffEditModal({ me, storeId, editing, onClose, onSaved }) {
   return (
     <Modal title={editing.isNew ? "新增夥伴" : `編輯・${editing.name}`} onClose={onClose}>
       <Field label="姓名"><input className="ph-input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+      <Field label={"所屬門市" + (isHr || editing.isNew ? "" : "（僅人資可調整）")}>
+        <select className="ph-input" value={storeIdSel} disabled={!isHr && !editing.isNew} onChange={(e) => setStoreIdSel(e.target.value)}>
+          {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      </Field>
       <Field label="職務"><input className="ph-input" value={position} onChange={(e) => setPosition(e.target.value)} /></Field>
       <Field label="計薪方式">
         <select className="ph-input" value={employmentType} onChange={(e) => setEmploymentType(e.target.value)}>
@@ -1021,50 +1358,265 @@ function BackupPage({ me, toast }) {
    儀表板
 ──────────────────────────────────────────── */
 
-function Dashboard({ me, stores, storeId, setPage }) {
-  const [myShiftToday, setMyShiftToday] = useState(undefined);
-  const [pendingCount, setPendingCount] = useState(0);
+function TodoRow({ label, count, unit = "件", onClick }) {
+  if (!count) return null;
+  return (
+    <div onClick={onClick} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: "pointer" }}>
+      <span style={{ fontSize: 13.5 }}>{label}</span>
+      <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <Badge tone="brown">{count} {unit}</Badge>
+        <span style={{ color: T.sub, display: "flex" }}><Icon name="chevron" size={14} /></span>
+      </span>
+    </div>
+  );
+}
+
+const REPORT_STATUS_TONE = { draft: "sub", submitted: "yellow", signed: "handoff", hr_received: "green", missing: "sub" };
+
+function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
   const canReview = me.role === "manager" || me.role === "hr";
+  const today = todayStr();
 
+  // ---- 一般夥伴：簡化版（自己的班表／申請） ----
+  const [myShiftToday, setMyShiftToday] = useState(undefined);
+  const [myPending, setMyPending] = useState(0);
   useEffect(() => {
-    sb.from("shifts").select("*").eq("employee_id", me.id).eq("work_date", todayStr()).maybeSingle()
+    if (canReview) return;
+    sb.from("shifts").select("*").eq("employee_id", me.id).eq("work_date", today).maybeSingle()
       .then(({ data }) => setMyShiftToday(data || null));
-  }, [me.id]);
+    sb.from("requests").select("id", { count: "exact", head: true }).eq("employee_id", me.id).eq("status", "pending")
+      .then(({ count }) => setMyPending(count || 0));
+  }, [canReview, me.id, today]);
 
+  // ---- 店長／人資：完整營運總覽 ----
+  const allStoreIds = useMemo(() => stores.map((s) => s.id), [stores]);
+  const weekDates = useMemo(() => weekDatesContaining(today), [today]);
+  const ym = thisMonthStr();
+  const monthRange = useMemo(() => [`${ym}-01`, `${ym}-${pad2(monthDays(ym))}`], [ym]);
+  const [roster, setRoster] = useState([]);
+  const [monthShifts, setMonthShifts] = useState([]);
+  const [pendingReqs, setPendingReqs] = useState([]);
+  const [todayReports, setTodayReports] = useState([]);
+  const [payrollRuns, setPayrollRuns] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [mobileDayIdx, setMobileDayIdx] = useState(() => Math.max(0, weekDates.indexOf(today)));
+
+  const load = useCallback(async () => {
+    if (!canReview || !allStoreIds.length) return;
+    setLoading(true);
+    const [empRes, shiftRes, reqRes, repRes, payRes] = await Promise.all([
+      sb.from("employees").select("id,name,position,store_id,employment_type,active").in("store_id", allStoreIds).eq("active", true).order("name"),
+      sb.from("shifts").select("*").in("store_id", allStoreIds).gte("work_date", monthRange[0]).lte("work_date", monthRange[1]),
+      sb.from("requests").select("id,type,store_id").in("store_id", allStoreIds).eq("status", "pending"),
+      sb.from("daily_reports").select("*").in("store_id", allStoreIds).eq("report_date", today),
+      sb.from("payroll_runs").select("*").in("store_id", allStoreIds).eq("year_month", ym),
+    ]);
+    setRoster(empRes.data || []);
+    setMonthShifts(shiftRes.data || []);
+    setPendingReqs(reqRes.data || []);
+    setTodayReports(repRes.data || []);
+    setPayrollRuns(payRes.data || []);
+    setLoading(false);
+  }, [canReview, allStoreIds, monthRange, today, ym]);
+
+  useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    if (!canReview || !storeId) return;
-    sb.from("requests").select("id", { count: "exact", head: true }).eq("store_id", storeId).eq("status", "pending")
-      .then(({ count }) => setPendingCount(count || 0));
-  }, [canReview, storeId]);
+    if (!canReview) return;
+    const ch = sb.channel("dashboard_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_reports" }, load)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [canReview, load]);
 
-  const storeName = stores.find((s) => s.id === storeId)?.name || "";
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
+  const scopedRoster = useMemo(() => roster.filter((r) => scopeStoreIds.includes(r.store_id)), [roster, scopeStoreIds]);
+  const scopedRosterIds = useMemo(() => new Set(scopedRoster.map((r) => r.id)), [scopedRoster]);
+  const weekShifts = useMemo(() => monthShifts.filter((s) => weekDates.includes(s.work_date)), [monthShifts, weekDates]);
+  const todayShifts = useMemo(() => monthShifts.filter((s) => s.work_date === today), [monthShifts, today]);
+  const scopedMonthShifts = monthShifts.filter((s) => scopedRosterIds.has(s.employee_id) && !s.is_day_off);
+  const monthScheduledCount = new Set(scopedMonthShifts.map((s) => s.employee_id)).size;
+  const monthPlannedHours = scopedMonthShifts.reduce((sum, s) => {
+    if (!s.start_time || !s.end_time) return sum;
+    const [sh, sm] = s.start_time.split(":").map(Number);
+    const [eh, em2] = s.end_time.split(":").map(Number);
+    return sum + Math.max(0, (eh * 60 + em2 - (sh * 60 + sm)) / 60);
+  }, 0);
+  const scopedPending = pendingReqs.filter((r) => scopeStoreIds.includes(r.store_id));
+  const pendingLeave = scopedPending.filter((r) => r.type === "annual_leave" || r.type === "personal_leave").length;
+  const pendingOvertime = scopedPending.filter((r) => r.type === "overtime").length;
+  const scopedTodayReports = todayReports.filter((r) => scopeStoreIds.includes(r.store_id));
+  const reportDoneCount = scopedTodayReports.filter((r) => r.status === "hr_received").length;
+  const reportAllDone = scopeStoreIds.length > 0 && reportDoneCount === scopeStoreIds.length;
+  function reportStatusOf(sid) {
+    const row = todayReports.find((r) => r.store_id === sid);
+    return row ? row.status : "missing";
+  }
+  const REPORT_LABEL2 = { ...REPORT_STATUS_LABEL, missing: "未填寫" };
+
+  const scopeLabel = (scope === "all" || scopeStoreIds.length > 1) ? "三間門市營運總覽" : (storeById[scopeStoreIds[0]]?.name || "");
+  const monthLabel = `${today.slice(0, 4)}年${Number(today.slice(5, 7))}月`;
+  const todayLabel = `${monthLabel}${Number(today.slice(8, 10))}日（週${weekdayZh(today)}）`;
+
+  const dayOfMonth = Number(today.slice(8, 10));
+  const monthDaysTotal = monthDays(thisMonthStr());
+  const nearMonthEnd = dayOfMonth >= monthDaysTotal - 6;
+  const unlockedPayrollStores = scopeStoreIds.filter((sid) => !payrollRuns.find((p) => p.store_id === sid && p.status === "locked"));
+  const noTodo = pendingLeave === 0 && pendingOvertime === 0 && reportAllDone && !(nearMonthEnd && unlockedPayrollStores.length > 0);
+
+  if (!canReview) {
+    return (
+      <div>
+        <p className="ph-eyebrow">{todayLabel}</p>
+        <h2 className="ph-serif" style={{ marginTop: 4 }}>嗨，{me.name}</h2>
+        <p style={{ color: T.sub, marginTop: -8 }}>{ROLE_LABEL[me.role]}・{storeById[storeId]?.name || ""}</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16, marginTop: 20 }}>
+          <div className="ph-stat-card" onClick={() => setPage("schedule")}>
+            <p className="ph-eyebrow" style={{ marginBottom: 8 }}>今日排班</p>
+            <p className="ph-serif" style={{ fontSize: 28, margin: "0 0 8px" }}>
+              {myShiftToday === undefined ? "…" : myShiftToday ? (myShiftToday.is_day_off ? "休假" : `${myShiftToday.start_time?.slice(0, 5)}–${myShiftToday.end_time?.slice(0, 5)}`) : "尚未排班"}
+            </p>
+            <span style={{ fontSize: 12.5, color: T.brown }}>查看完整班表 →</span>
+          </div>
+          <div className="ph-stat-card" onClick={() => setPage("requests")}>
+            <p className="ph-eyebrow" style={{ marginBottom: 8 }}>我的申請</p>
+            <p className="ph-serif" style={{ fontSize: 28, margin: "0 0 8px" }}>{myPending} 件待審核</p>
+            <span style={{ fontSize: 12.5, color: T.brown }}>請假／加班申請 →</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
-      <h2 className="ph-serif">哈囉，{me.name}</h2>
-      <p style={{ color: T.sub, marginTop: -8 }}>{ROLE_LABEL[me.role]}{storeName ? `・${storeName}` : "（全門市）"}</p>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12, marginTop: 16 }}>
-        <div className="ph-card" style={{ padding: 16 }}>
-          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>今日排班</p>
-          <p className="ph-serif" style={{ fontSize: 22, margin: "6px 0" }}>
-            {myShiftToday === undefined ? "…" : myShiftToday ? (myShiftToday.is_day_off ? "休假" : `${myShiftToday.start_time?.slice(0, 5)}–${myShiftToday.end_time?.slice(0, 5)}`) : "尚未排班"}
-          </p>
-          <button className="ph-btn small" onClick={() => setPage("schedule")}>查看排班表 →</button>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <p className="ph-eyebrow" style={{ marginBottom: 6 }}>{todayLabel}</p>
+          <h2 className="ph-serif" style={{ margin: "0 0 4px" }}>嗨，{me.name}</h2>
+          <p style={{ color: T.sub, margin: 0, fontSize: 13 }}>{monthLabel}｜目前查看範圍：{scopeLabel}</p>
         </div>
-        {canReview && (
-          <div className="ph-card" style={{ padding: 16 }}>
-            <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>待審核申請</p>
-            <p className="ph-serif" style={{ fontSize: 22, margin: "6px 0" }}>{pendingCount} 件</p>
-            <button className="ph-btn small" onClick={() => setPage("requests")}>前往審核 →</button>
+        <button className="ph-btn primary" onClick={() => setPage("schedule")}>＋ 新增／編輯班表</button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16, marginTop: 22 }}>
+        <div className={"ph-stat-card" + (monthScheduledCount === 0 && scopedRoster.length > 0 ? " attention" : "")} onClick={() => setPage("schedule")}>
+          <p className="ph-eyebrow" style={{ marginBottom: 8 }}>本月排班人數</p>
+          <p className="ph-serif" style={{ fontSize: 32, margin: "0 0 8px" }}>{loading ? "…" : monthScheduledCount}<span style={{ fontSize: 14, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}> 人</span></p>
+          <span style={{ fontSize: 12.5, color: T.brown }}>查看排班表 →</span>
+        </div>
+        <div className={"ph-stat-card" + (scopedPending.length > 0 ? " attention" : "")} onClick={() => setPage("requests")}>
+          <p className="ph-eyebrow" style={{ marginBottom: 8 }}>待審核申請</p>
+          <p className="ph-serif" style={{ fontSize: 32, margin: "0 0 8px" }}>{loading ? "…" : scopedPending.length}<span style={{ fontSize: 14, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}> 件</span></p>
+          <span style={{ fontSize: 12.5, color: T.brown }}>{scopedPending.length > 0 ? "前往處理 →" : "查看紀錄 →"}</span>
+        </div>
+        <div className="ph-stat-card" onClick={() => setPage("schedule")}>
+          <p className="ph-eyebrow" style={{ marginBottom: 8 }}>本月預計工時</p>
+          <p className="ph-serif" style={{ fontSize: 32, margin: "0 0 8px" }}>{loading ? "…" : Math.round(monthPlannedHours)}<span style={{ fontSize: 14, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}> 小時</span></p>
+          <span style={{ fontSize: 12.5, color: T.brown }}>依目前班表自動加總</span>
+        </div>
+        <div className={"ph-stat-card" + (!reportAllDone ? " attention" : "")} onClick={() => setPage("daily_report")}>
+          <p className="ph-eyebrow" style={{ marginBottom: 8 }}>今日每日回報狀態</p>
+          <p className="ph-serif" style={{ fontSize: scopeStoreIds.length > 1 ? 32 : 20, margin: "0 0 8px", color: scopeStoreIds.length > 1 ? T.ink : T[REPORT_STATUS_TONE[reportStatusOf(scopeStoreIds[0])]] }}>
+            {loading ? "…" : scopeStoreIds.length > 1
+              ? <>{reportDoneCount}<span style={{ fontSize: 15, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}>／{scopeStoreIds.length} 店已完成</span></>
+              : REPORT_LABEL2[reportStatusOf(scopeStoreIds[0])]}
+          </p>
+          <span style={{ fontSize: 12.5, color: T.brown }}>前往填寫／查看 →</span>
+        </div>
+      </div>
+
+      <div className="ph-card" style={{ marginTop: 22, padding: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+          <div>
+            <p className="ph-eyebrow" style={{ margin: 0 }}>THIS WEEK</p>
+            <h3 className="ph-serif" style={{ margin: "2px 0 0", fontSize: 17 }}>本週班表預覽</h3>
+          </div>
+          <span style={{ fontSize: 12.5, color: T.brown, cursor: "pointer" }} onClick={() => setPage("schedule")}>查看完整班表 →</span>
+        </div>
+        {loading ? <p style={{ color: T.sub }}>載入中…</p> : scopedRoster.length === 0 ? (
+          <p style={{ color: T.sub, fontSize: 13, textAlign: "center", padding: "24px 0" }}>此範圍尚無在職夥伴</p>
+        ) : (
+          <>
+            <div className="ph-schedule-preview-desktop" style={{ overflowX: "auto" }}>
+              <table className="ph-table ph-schedule-preview">
+                <thead>
+                  <tr>
+                    <th>夥伴</th>
+                    {weekDates.map((d) => {
+                      const wd = weekdayZh(d);
+                      const isWeekend = wd === "六" || wd === "日";
+                      return <th key={d} className={isWeekend ? "weekend" : ""}>週{wd}<br /><span style={{ fontWeight: 400 }}>{d.slice(5)}</span></th>;
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {scopedRoster.map((r) => (
+                    <tr key={r.id}>
+                      <td><div style={{ fontWeight: 500 }}>{r.name}</div><div style={{ fontSize: 11.5, color: T.sub }}>{storeById[r.store_id]?.name}</div></td>
+                      {weekDates.map((d) => {
+                        const s = weekShifts.find((sh) => sh.employee_id === r.id && sh.work_date === d);
+                        const cls = s ? (s.is_day_off ? "cell-off" : "cell-work") : "";
+                        return <td key={d} className={cls} style={{ textAlign: "center" }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "–"}</td>;
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="ph-schedule-preview-mobile">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <button className="ph-btn small" onClick={() => setMobileDayIdx((i) => Math.max(0, i - 1))} disabled={mobileDayIdx === 0}>‹ 前一天</button>
+                <span style={{ fontSize: 13.5, fontWeight: 500 }}>{weekDates[mobileDayIdx]}（週{weekdayZh(weekDates[mobileDayIdx])}）</span>
+                <button className="ph-btn small" onClick={() => setMobileDayIdx((i) => Math.min(6, i + 1))} disabled={mobileDayIdx === 6}>後一天 ›</button>
+              </div>
+              {scopedRoster.map((r) => {
+                const d = weekDates[mobileDayIdx];
+                const s = weekShifts.find((sh) => sh.employee_id === r.id && sh.work_date === d);
+                return (
+                  <div key={r.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
+                    <div><div style={{ fontWeight: 500, fontSize: 13.5 }}>{r.name}</div><div style={{ fontSize: 11.5, color: T.sub }}>{storeById[r.store_id]?.name}</div></div>
+                    <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "–"}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: me.role === "hr" ? "2fr 1fr" : "1fr", gap: 16, marginTop: 22 }}>
+        {me.role === "hr" && (
+          <div className="ph-card" style={{ padding: 18 }}>
+            <p className="ph-eyebrow" style={{ margin: "0 0 4px" }}>TODAY</p>
+            <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>今日各店人力</h3>
+            {loading ? <p style={{ color: T.sub }}>載入中…</p> : stores.map((s) => {
+              const storeRoster = roster.filter((r) => r.store_id === s.id);
+              const storeTodayShifts = todayShifts.filter((sh) => storeRoster.some((r) => r.id === sh.employee_id));
+              const workingCount = storeTodayShifts.filter((sh) => !sh.is_day_off).length;
+              const ratio = storeRoster.length ? workingCount / storeRoster.length : 0;
+              const label = storeRoster.length === 0 ? "尚無夥伴" : ratio >= 0.8 ? "人力充足" : ratio >= 0.5 ? "人力吃緊" : "人力不足";
+              const tone = storeRoster.length === 0 ? "sub" : ratio >= 0.8 ? "green" : ratio >= 0.5 ? "yellow" : "red";
+              return (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.line}` }}>
+                  <span style={{ fontSize: 13.5, fontWeight: 500 }}>{s.name}</span>
+                  <span style={{ fontSize: 13, color: T.sub }}>{workingCount}／{storeRoster.length} 人</span>
+                  <Badge tone={tone}>{label}</Badge>
+                </div>
+              );
+            })}
           </div>
         )}
-        {canReview && (
-          <div className="ph-card" style={{ padding: 16 }}>
-            <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>電子日總表</p>
-            <p style={{ fontSize: 13, margin: "6px 0", color: T.sub }}>填寫今日 POS 核對與異常紀錄</p>
-            <button className="ph-btn small" onClick={() => setPage("daily_report")}>前往填寫 →</button>
-          </div>
-        )}
+        <div className="ph-card" style={{ padding: 18 }}>
+          <p className="ph-eyebrow" style={{ margin: "0 0 4px" }}>REMINDER</p>
+          <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>待辦與月結提醒</h3>
+          <TodoRow label="請假申請待審核" count={pendingLeave} onClick={() => setPage("requests")} />
+          <TodoRow label="加班申請待審核" count={pendingOvertime} onClick={() => setPage("requests")} />
+          <TodoRow label="電子日總表待處理" count={scopeStoreIds.length - reportDoneCount} unit="間門市" onClick={() => setPage("daily_report")} />
+          {nearMonthEnd && <TodoRow label={`${thisMonthStr()} 薪資資料確認`} count={unlockedPayrollStores.length} unit="間門市未鎖定" onClick={() => setPage("payroll")} />}
+          {!loading && noTodo && <p style={{ color: T.sub, fontSize: 13, textAlign: "center", padding: "16px 0" }}>目前沒有待辦事項</p>}
+        </div>
       </div>
     </div>
   );
@@ -1074,12 +1626,20 @@ function Dashboard({ me, stores, storeId, setPage }) {
    App
 ──────────────────────────────────────────── */
 
+const PAGE_TITLE = {
+  dashboard: "營運總覽", schedule: "門市排班", daily_report: "每日回報", requests: "申請審核",
+  payroll: "薪資試算", staff: "人員資料", backup: "備份",
+};
+
 function AppShell({ session }) {
   const [me, setMe] = useState(undefined); // undefined=載入中, null=查無員工資料
   const [stores, setStores] = useState([]);
   const [storeId, setStoreId] = useState(null);
+  const [scope, setScope] = useState("all"); // 全站共用門市篩選：'all' 或某個 store id，僅 hr 可切換
   const [page, setPage] = useState(() => new URLSearchParams(location.search).get("page") || "dashboard");
   const [toastMsg, setToastMsg] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
 
   const toast = useCallback((msg) => { setToastMsg(msg); setTimeout(() => setToastMsg(""), 3200); }, []);
 
@@ -1095,6 +1655,29 @@ function AppShell({ session }) {
     })();
   }, [session.user.id]);
 
+  const canReview = me?.role === "manager" || me?.role === "hr";
+  const scopeStoreIds = useMemo(() => {
+    if (!me) return [];
+    if (me.role === "hr") return scope === "all" ? stores.map((s) => s.id) : [scope];
+    return storeId ? [storeId] : [];
+  }, [me, scope, stores, storeId]);
+  // 需要單一門市才能寫入的頁面（排班/每日回報/薪資/人員）用這個：hr 選「全部門市」時為 null，要求先選定一間店
+  const activeStoreId = me?.role === "hr" ? (scope === "all" ? null : scope) : storeId;
+
+  const loadPendingCount = useCallback(() => {
+    if (!canReview || !scopeStoreIds.length) { setPendingCount(0); return; }
+    sb.from("requests").select("id", { count: "exact", head: true }).in("store_id", scopeStoreIds).eq("status", "pending")
+      .then(({ count }) => setPendingCount(count || 0));
+  }, [canReview, scopeStoreIds]);
+
+  useEffect(() => { loadPendingCount(); }, [loadPendingCount]);
+  useEffect(() => {
+    const ch = sb.channel("appshell_requests_badge").on("postgres_changes", { event: "*", schema: "public", table: "requests" }, () => loadPendingCount()).subscribe();
+    return () => sb.removeChannel(ch);
+  }, [loadPendingCount]);
+
+  useEffect(() => { setSidebarOpen(false); }, [page]);
+
   if (me === undefined) return <div className="ph-root" style={{ padding: 40 }}>載入中…</div>;
   if (me === null) return (
     <div className="ph-root" style={{ padding: 40 }}>
@@ -1104,40 +1687,81 @@ function AppShell({ session }) {
   );
 
   const navs = [
-    ["dashboard", "儀表板"],
-    ["schedule", "排班表"],
-    ["requests", "請假／加班"],
-    ...(me.role === "manager" || me.role === "hr" ? [["daily_report", "電子日總表"], ["payroll", "薪資試算"], ["staff", "在職夥伴"]] : []),
-    ...(me.role === "hr" ? [["backup", "備份"]] : []),
+    ["dashboard", "營運總覽", "dashboard"],
+    ["schedule", "門市排班", "schedule"],
+    ...(canReview ? [["daily_report", "每日回報", "daily_report"]] : []),
+    ["requests", canReview ? "申請審核" : "請假／加班", "requests"],
+    ...(canReview ? [["payroll", "薪資試算", "payroll"], ["staff", "人員資料", "staff"]] : []),
+    ...(me.role === "hr" ? [["backup", "備份", "backup"]] : []),
   ];
 
   return (
-    <div className="ph-root" style={{ display: "flex", minHeight: "100vh" }}>
-      <aside style={{ width: 200, borderRight: `1px solid ${T.line}`, padding: 16, flexShrink: 0 }} className="ph-hide-mobile">
-        <div style={{ fontFamily: "'Noto Serif TC',serif", fontWeight: 600, fontSize: 15, marginBottom: 4 }}>PHASE</div>
-        <div style={{ color: T.sub, fontSize: 12, marginBottom: 18 }}>人事排班系統</div>
-        {navs.map(([k, l]) => (
-          <button key={k} className={"ph-nav-item" + (page === k ? " on" : "")} onClick={() => setPage(k)}>{l}</button>
-        ))}
-        <div style={{ marginTop: 24, paddingTop: 14, borderTop: `1px solid ${T.line}` }}>
-          <div style={{ fontSize: 12.5, marginBottom: 8 }}>{me.name}（{ROLE_LABEL[me.role]}）</div>
-          <button className="ph-btn small" onClick={() => sb.auth.signOut()}>登出</button>
+    <div className="ph-root ph-shell">
+      <div className={"ph-sidebar-backdrop" + (sidebarOpen ? " open" : "")} onClick={() => setSidebarOpen(false)} />
+      <aside className={"ph-sidebar" + (sidebarOpen ? " open" : "")}>
+        <div className="ph-sidebar-brand">
+          <div className="ph-word">PHASE</div>
+          <div className="ph-sub">PEOPLE &amp; SHIFT</div>
         </div>
-      </aside>
-      <main style={{ flex: 1, padding: 20, minWidth: 0 }}>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }} className="ph-mobile-only">
-          {navs.map(([k, l]) => (
-            <button key={k} className={"ph-btn small" + (page === k ? " primary" : "")} onClick={() => setPage(k)}>{l}</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {navs.map(([k, l, icon]) => (
+            <button key={k} className={"ph-nav-item" + (page === k ? " on" : "")} onClick={() => setPage(k)}>
+              <span className="ph-nav-icon"><Icon name={icon} /></span>
+              <span>{l}</span>
+              {k === "requests" && canReview && pendingCount > 0 && <span className="ph-nav-badge">{pendingCount}</span>}
+            </button>
           ))}
         </div>
-        {page === "dashboard" && <Dashboard me={me} stores={stores} storeId={storeId} setPage={setPage} />}
-        {page === "schedule" && <SchedulePage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
-        {page === "requests" && <RequestsPage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
-        {page === "daily_report" && (me.role === "manager" || me.role === "hr") && <DailyReportPage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
-        {page === "payroll" && (me.role === "manager" || me.role === "hr") && <PayrollPage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
-        {page === "staff" && (me.role === "manager" || me.role === "hr") && <StaffPage me={me} stores={stores} storeId={storeId} setStoreId={setStoreId} toast={toast} />}
-        {page === "backup" && me.role === "hr" && <BackupPage me={me} toast={toast} />}
-      </main>
+        <div className="ph-sidebar-foot">
+          <div className="ph-avatar">{me.name.slice(0, 1)}</div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{me.name}</div>
+            <div style={{ fontSize: 11.5, color: T.sidebarSub }}>{ROLE_LABEL[me.role]}</div>
+          </div>
+          <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => sb.auth.signOut()}>登出</button>
+        </div>
+      </aside>
+
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <div className="ph-topbar">
+          <button className="ph-hamburger-btn" onClick={() => setSidebarOpen(true)} aria-label="開啟選單"><Icon name="hamburger" /></button>
+          <div style={{ minWidth: 0 }}>
+            <p className="ph-eyebrow" style={{ margin: 0 }}>PHASE COFFEE ROASTERS</p>
+            <h1 className="ph-serif" style={{ fontSize: 19, margin: 0 }}>{PAGE_TITLE[page]}</h1>
+          </div>
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span className="ph-pill">{ROLE_LABEL[me.role]}</span>
+            {me.role === "hr" ? (
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.sub }}>
+                處理門市
+                <select className="ph-input" style={{ width: 150 }} value={scope} onChange={(e) => setScope(e.target.value)}>
+                  <option value="all">全部門市（營運）</option>
+                  {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+            ) : (
+              <span style={{ fontSize: 12.5, color: T.sub }}>{stores.find((s) => s.id === storeId)?.name || ""}</span>
+            )}
+            {canReview && (
+              <button className="ph-bell-btn" onClick={() => setPage("requests")} aria-label="待審核申請通知">
+                <Icon name="bell" size={16} />
+                {pendingCount > 0 && <span className="ph-nav-badge">{pendingCount}</span>}
+              </button>
+            )}
+          </div>
+        </div>
+        <main className="ph-main-pad" style={{ flex: 1, padding: "24px 40px", minWidth: 0 }}>
+          <div style={{ maxWidth: 1460, margin: "0 auto" }}>
+            {page === "dashboard" && <Dashboard me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setPage={setPage} />}
+            {page === "schedule" && <SchedulePage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />}
+            {page === "requests" && <RequestsPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setScope={setScope} toast={toast} />}
+            {page === "daily_report" && canReview && <DailyReportPage me={me} stores={stores} storeId={storeId} scopeStoreIds={scopeStoreIds} toast={toast} />}
+            {page === "payroll" && canReview && <PayrollPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />}
+            {page === "staff" && canReview && <StaffPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />}
+            {page === "backup" && me.role === "hr" && <BackupPage me={me} toast={toast} />}
+          </div>
+        </main>
+      </div>
       {toastMsg && <div className="ph-toast">{toastMsg}</div>}
     </div>
   );
