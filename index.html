@@ -461,7 +461,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
         )}
       </div>
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
-        整月排班（{ym}-01–{ym}-{pad2(days)}）；各門店分開處理，點擊班次即可修改。
+        整月排班（{Number(ym.slice(5, 7))}/1–{Number(ym.slice(5, 7))}/{days}）；各門店分開處理，點擊班次即可修改。
       </p>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
         <div style={{ display: "flex", gap: 4 }}>
@@ -480,18 +480,18 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
             <table className="ph-table ph-schedule-preview">
               <thead>
                 <tr>
-                  <th style={{ position: "sticky", left: 0, background: "#FCFAF6", zIndex: 1 }}>夥伴</th>
+                  <th style={{ position: "sticky", left: 0, background: "#FCFAF6", zIndex: 1, minWidth: 140 }}>夥伴</th>
                   {dateList.map((d) => {
                     const wd = weekdayZh(d);
                     const isWeekend = wd === "六" || wd === "日";
-                    return <th key={d} className={isWeekend ? "weekend" : ""}>{Number(d.slice(8))}</th>;
+                    return <th key={d} className={isWeekend ? "weekend" : ""} style={{ whiteSpace: "nowrap" }}>週{wd}<br /><span style={{ fontWeight: 400 }}>{d.slice(5)}</span></th>;
                   })}
                 </tr>
               </thead>
               <tbody>
                 {roster.map((r, idx) => (
                   <tr key={r.id}>
-                    <td style={{ position: "sticky", left: 0, background: "#fff" }}>
+                    <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
                       <RosterCell r={r} index={idx} showStore={scopeStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
                     </td>
                     {dateList.map((d) => {
