@@ -74,6 +74,7 @@ function fmtTaipei(iso) {
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
 }
 const WEEKDAY_ZH = ["日", "一", "二", "三", "四", "五", "六"];
+const MONTH_EN = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 function weekdayZh(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   return WEEKDAY_ZH[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
@@ -1748,32 +1749,52 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
       <div style={{ display: "grid", gridTemplateColumns: me.role === "hr" ? "2fr 1fr" : "1fr", gap: 16, marginTop: 22 }}>
         {me.role === "hr" && (
           <div className="ph-card" style={{ padding: 18 }}>
-            <p className="ph-eyebrow" style={{ margin: "0 0 4px" }}>TODAY</p>
-            <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>今日各店人力</h3>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <p className="ph-eyebrow" style={{ margin: "0 0 4px", color: T.brown }}>TODAY</p>
+                <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>今日各店人力</h3>
+              </div>
+              <span className="ph-pill">{Number(today.slice(8, 10))}/{Number(today.slice(5, 7))}　週{weekdayZh(today)}</span>
+            </div>
             {loading ? <p style={{ color: T.sub }}>載入中…</p> : stores.map((s) => {
               const storeRoster = roster.filter((r) => r.store_id === s.id);
               const storeTodayShifts = todayShifts.filter((sh) => storeRoster.some((r) => r.id === sh.employee_id));
               const workingCount = storeTodayShifts.filter((sh) => !sh.is_day_off).length;
               const ratio = storeRoster.length ? workingCount / storeRoster.length : 0;
               const label = storeRoster.length === 0 ? "尚無夥伴" : ratio >= 0.8 ? "人力充足" : ratio >= 0.5 ? "人力吃緊" : "人力不足";
-              const tone = storeRoster.length === 0 ? "sub" : ratio >= 0.8 ? "green" : ratio >= 0.5 ? "yellow" : "red";
+              const dotColor = storeRoster.length === 0 ? T.sub : ratio >= 0.8 ? T.green : ratio >= 0.5 ? T.yellow : T.red;
               return (
                 <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.line}` }}>
-                  <span style={{ fontSize: 13.5, fontWeight: 500 }}>{s.name}</span>
+                  <span style={{ fontSize: 13.5, fontWeight: 500, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "999px", background: dotColor, flexShrink: 0 }} />
+                    {s.name}
+                  </span>
                   <span style={{ fontSize: 13, color: T.sub }}>{workingCount}／{storeRoster.length} 人</span>
-                  <Badge tone={tone}>{label}</Badge>
+                  <span style={{ fontSize: 12.5, color: dotColor }}>{label}</span>
                 </div>
               );
             })}
           </div>
         )}
         <div className="ph-card" style={{ padding: 18 }}>
-          <p className="ph-eyebrow" style={{ margin: "0 0 4px" }}>REMINDER</p>
+          <p className="ph-eyebrow" style={{ margin: "0 0 4px", color: T.brown }}>REMINDER</p>
           <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>待辦與月結提醒</h3>
+          {nearMonthEnd && unlockedPayrollStores.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: "pointer" }} onClick={() => setPage("payroll")}>
+              <div style={{ width: 52, textAlign: "center", background: T.brownSoft, borderRadius: 8, padding: "6px 0", flexShrink: 0 }}>
+                <div className="ph-serif" style={{ fontSize: 20, fontWeight: 700, color: T.brown, lineHeight: 1 }}>{monthDaysTotal - 6}</div>
+                <div style={{ fontSize: 9.5, color: T.brown, letterSpacing: ".08em" }}>{MONTH_EN[Number(today.slice(5, 7)) - 1]}</div>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 500, fontSize: 13.5 }}>{monthLabel}薪資資料確認</div>
+                <div style={{ fontSize: 12, color: T.sub }}>請於 {monthDaysTotal - 6} 日前完成請假、加班與異動確認。</div>
+              </div>
+              <span style={{ fontSize: 12.5, color: T.brown, whiteSpace: "nowrap" }}>前往薪資試算 →</span>
+            </div>
+          )}
           <TodoRow label="請假申請待審核" count={pendingLeave} onClick={() => setPage("requests")} />
           <TodoRow label="加班申請待審核" count={pendingOvertime} onClick={() => setPage("requests")} />
           <TodoRow label="電子日總表待處理" count={scopeStoreIds.length - reportDoneCount} unit="間門市" onClick={() => setPage("daily_report")} />
-          {nearMonthEnd && <TodoRow label={`${thisMonthStr()} 薪資資料確認`} count={unlockedPayrollStores.length} unit="間門市未鎖定" onClick={() => setPage("payroll")} />}
           {!loading && noTodo && <p style={{ color: T.sub, fontSize: 13, textAlign: "center", padding: "16px 0" }}>目前沒有待辦事項</p>}
         </div>
       </div>
