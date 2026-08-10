@@ -782,7 +782,7 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
    電子日總表
 ──────────────────────────────────────────── */
 
-const DAILY_HUB_LABEL = { missing: "未提交", submitted: "已提交", signed: "已提交", hr_received: "已提交", needs_attach: "需補件" };
+const DAILY_HUB_LABEL = { missing: "未繳交", submitted: "已提交", signed: "已提交", hr_received: "已提交", needs_attach: "需補件" };
 const DAILY_HUB_TONE = { missing: "sub", submitted: "olive", signed: "olive", hr_received: "olive", needs_attach: "red" };
 
 function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
@@ -840,14 +840,18 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
-        <h2 className="ph-serif" style={{ margin: 0 }}>每日回報</h2>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.sub, marginLeft: "auto" }}>
-          回報日期
-          <input className="ph-input" style={{ width: 150 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>DAILY OPERATIONS REPORT</p>
+          <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每日異常回報</h2>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>本頁為正式電子日總表，完整取代紙本；無論有無異常，每間門店每天都要完成。</p>
+        </div>
+        <label style={{ fontSize: 12.5, color: T.sub }}>
+          回報日期<br />
+          <input className="ph-input" style={{ width: 160, marginTop: 4 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         </label>
       </div>
-      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 18 }}>本頁為正式電子日總表，完整取代紙本；無論有無異常，每間門店每天都要完成。</p>
+      <div style={{ marginTop: 18 }} />
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : visibleStores.length === 0 ? (
         <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>沒有可查看的門市</p>
       ) : (
@@ -862,7 +866,10 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
             return (
               <div key={s.id} className="ph-card" style={{ padding: 18, cursor: "pointer" }} onClick={() => setOpenStoreId(s.id)}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                  <h3 className="ph-serif" style={{ margin: 0, fontSize: 16 }}>{s.name}</h3>
+                  <h3 className="ph-serif" style={{ margin: 0, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "999px", background: T[DAILY_HUB_TONE[key]], flexShrink: 0 }} />
+                    {s.name}
+                  </h3>
                   <Badge tone={DAILY_HUB_TONE[key]}>{DAILY_HUB_LABEL[key]}</Badge>
                 </div>
                 <p style={{ fontSize: 13, color: T.sub, margin: "0 0 6px" }}>{anomalyCount} 位夥伴有異常紀錄</p>
