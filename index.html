@@ -208,6 +208,19 @@ const css = `
 @media (min-width: 721px) {
   .ph-schedule-preview-mobile { display:none; }
 }
+.ph-payslip { background:#fff; color:#1a1512; padding:32px; max-width:720px; margin:0 auto; font-size:13px; }
+.ph-payslip h1 { text-align:center; font-size:18px; margin:0 0 4px; }
+.ph-payslip h2 { text-align:center; font-size:15px; margin:0 0 18px; font-weight:500; }
+.ph-payslip table { width:100%; border-collapse:collapse; margin-top:14px; }
+.ph-payslip th, .ph-payslip td { border:1px solid #ccc; padding:8px 10px; text-align:left; }
+.ph-payslip th { background:#F5F1EA; font-weight:600; white-space:nowrap; }
+.ph-payslip .num { text-align:right; font-variant-numeric:tabular-nums; }
+@media print {
+  body * { visibility:hidden; }
+  .ph-payslip, .ph-payslip * { visibility:visible; }
+  .ph-payslip { position:absolute; top:0; left:0; width:100%; max-width:none; box-shadow:none; }
+  .ph-payslip-noprint { display:none !important; }
+}
 `;
 
 const ICON_PATHS = {
@@ -1207,6 +1220,75 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
    薪資試算
 ──────────────────────────────────────────── */
 
+const COMPANY_NAME = "耿將食品有限公司";
+
+function PayslipRow({ label, value, strong }) {
+  return (
+    <tr>
+      <td>{label}</td>
+      <td className="num" style={strong ? { fontWeight: 700, fontSize: 15 } : undefined}>NT$ {money(value)}</td>
+    </tr>
+  );
+}
+function PayslipSection({ title }) {
+  return <tr><td colSpan={2} style={{ background: "#F5F1EA", fontWeight: 600 }}>{title}</td></tr>;
+}
+
+function PayslipModal({ store, ym, periodLabel, row, onClose }) {
+  const [payDate, setPayDate] = useState(todayStr());
+  return (
+    <div className="ph-modal-backdrop" onMouseDown={() => onClose()}>
+      <div className="ph-modal" style={{ maxWidth: 760, padding: 0 }} onMouseDown={(e) => e.stopPropagation()}>
+        <div className="ph-payslip-noprint" style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: 16, borderBottom: `1px solid ${T.line}` }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.sub, marginRight: "auto" }}>
+            薪資發放日期
+            <input className="ph-input" style={{ width: 150 }} type="date" value={payDate} onChange={(e) => setPayDate(e.target.value)} />
+          </label>
+          <button className="ph-btn small" onClick={onClose}>關閉</button>
+          <button className="ph-btn small primary" onClick={() => window.print()}>列印／匯出 PDF</button>
+        </div>
+        <div className="ph-payslip">
+          <h1>{COMPANY_NAME}</h1>
+          <h2>員工薪資明細表</h2>
+          <table>
+            <tbody>
+              <tr><th>薪資發放名稱</th><td>{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月份月薪</td></tr>
+              <tr><th>門市</th><td>{store?.name}</td></tr>
+              <tr><th>員工姓名</th><td>{row.emp.name}</td></tr>
+              <tr><th>到職日</th><td>{row.emp.hire_date || "—"}</td></tr>
+              <tr><th>計薪方式</th><td>{row.emp.employment_type === "full_time" ? "月薪" : "時薪"}</td></tr>
+              <tr><th>薪資計算區間</th><td>{periodLabel}</td></tr>
+              <tr><th>薪資發放日期</th><td>{payDate}</td></tr>
+            </tbody>
+          </table>
+          <table>
+            <tbody>
+              <PayslipSection title="薪資結構" />
+              <PayslipRow label="基本薪資" value={row.basePay} />
+              <PayslipRow label="伙食費" value={row.mealAllowance} />
+              <PayslipRow label="職務津貼" value={row.positionAllowance} />
+              <PayslipSection title="薪資科目加項" />
+              <PayslipRow label="加班費" value={row.overtimePay} />
+              <PayslipRow label="全勤獎金" value={row.fullAttendanceBonus} />
+              <PayslipSection title="薪資科目扣項" />
+              <PayslipRow label="遲到／請假／曠職" value={row.attendanceDeduction} />
+              <PayslipRow label="勞保費" value={row.laborInsuranceFee} />
+              <PayslipRow label="健保費" value={row.healthInsuranceFee} />
+              <PayslipRow label="所得稅" value={row.incomeTax} />
+              <PayslipSection title="薪資總計" />
+              <PayslipRow label="應稅所得" value={row.taxableIncome} />
+              <PayslipRow label="應發總額" value={row.grossPay} />
+              <PayslipRow label="應減總額" value={row.totalDeduction} />
+              <PayslipRow label="實發金額" value={row.total} strong />
+            </tbody>
+          </table>
+          <p style={{ fontSize: 11, color: "#888", marginTop: 16 }}>※ 本表為系統試算結果，正式金額仍以實際發薪紀錄為準。</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope, toast }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
@@ -1214,6 +1296,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   const [requests, setRequests] = useState([]);
   const [runs, setRuns] = useState([]);
   const [lockBusy, setLockBusy] = useState(false);
+  const [payslipRow, setPayslipRow] = useState(null);
   const [loading, setLoading] = useState(true);
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
 
@@ -1405,6 +1488,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                 <th>加班費</th><th>全勤獎金</th>
                 <th>遲到/請假/曠職</th><th>勞保費</th><th>健保費</th><th>所得稅</th>
                 <th>應稅所得</th><th>應發總額</th><th>應減總額</th><th>實發金額</th>
+                <th rowSpan={2}>個人明細</th>
               </tr>
             </thead>
             <tbody>
@@ -1426,12 +1510,16 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                   <td>{money(r.grossPay)}</td>
                   <td>{money(r.totalDeduction)}</td>
                   <td style={{ fontWeight: 600 }}>NT$ {money(r.total)}</td>
+                  <td><button className="ph-btn small" onClick={() => setPayslipRow(r)}>薪資明細 →</button></td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={16} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={17} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
             </tbody>
           </table>
         </div>
+      )}
+      {payslipRow && (
+        <PayslipModal store={storeById[activeStoreId]} ym={ym} periodLabel={periodLabel} row={payslipRow} onClose={() => setPayslipRow(null)} />
       )}
     </div>
   );
