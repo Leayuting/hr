@@ -1280,7 +1280,14 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
    薪資試算
 ──────────────────────────────────────────── */
 
-const COMPANY_NAME = "耿將食品有限公司";
+const COMPANY_NAME_BY_STORE = {
+  "中山店": "耿將食品有限公司",
+  "水湳店": "森揚餐坊股份有限公司",
+  "勤美店": "宏楷餐飲有限公司",
+};
+function companyNameForStore(storeName) {
+  return COMPANY_NAME_BY_STORE[storeName] || "耿將食品有限公司";
+}
 
 function PayslipRow({ label, value, strong }) {
   return (
@@ -1404,7 +1411,7 @@ function PayslipModal({ store, ym, periodLabel, row, onClose }) {
           <button className="ph-btn small primary" onClick={() => window.print()}>列印／匯出 PDF</button>
         </div>
         <div className="ph-payslip">
-          <h1>{COMPANY_NAME}</h1>
+          <h1>{companyNameForStore(store?.name)}</h1>
           <h2>員工薪資明細表</h2>
           <table>
             <tbody>
