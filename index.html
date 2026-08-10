@@ -1207,7 +1207,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
    薪資試算
 ──────────────────────────────────────────── */
 
-function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
+function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope, toast }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
   const [shifts, setShifts] = useState([]);
@@ -1301,6 +1301,52 @@ function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
     a.click();
   }
 
+  const isHub = scopeStoreIds.length > 1;
+  const monthLabel = `${MONTH_EN[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
+
+  if (isHub) {
+    return (
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>{monthLabel}</p>
+            <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>各門店薪資月結</h2>
+            <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>薪資資料依門店分開確認、匯出及鎖定，不進行整批月結。</p>
+          </div>
+          <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+        </div>
+        {loading ? <p style={{ color: T.sub, marginTop: 18 }}>載入中…</p> : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 16, marginTop: 20 }}>
+            {stores.map((s) => {
+              const storeRows = rows.filter((r) => r.emp.store_id === s.id);
+              const storeTotal = storeRows.reduce((sum, r) => sum + r.total, 0);
+              const run = runs.find((rr) => rr.store_id === s.id);
+              const storeLocked = run?.status === "locked";
+              return (
+                <div key={s.id} className="ph-card" style={{ padding: 18 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                    <h3 className="ph-serif" style={{ margin: 0, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: "999px", background: storeLocked ? T.olive : T.brown, flexShrink: 0 }} />
+                      {s.name}
+                    </h3>
+                    <Badge tone={storeLocked ? "olive" : "brown"}>{storeLocked ? "已鎖定" : "待確認"}</Badge>
+                  </div>
+                  <p style={{ fontSize: 12.5, color: T.sub, margin: "0 0 4px" }}>本月應發試算</p>
+                  <p className="ph-serif" style={{ fontSize: 26, fontWeight: 700, margin: "0 0 14px" }}>NT$ {money(storeTotal)}</p>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.sub, paddingTop: 12, borderTop: `1px solid ${T.line}`, marginBottom: 14 }}>
+                    <span>{storeRows.length} 位夥伴</span>
+                    <span>獨立薪資明細</span>
+                  </div>
+                  <button className="ph-btn small primary" style={{ width: "100%" }} onClick={() => setScope(s.id)}>進入{s.name} →</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
@@ -1316,17 +1362,15 @@ function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
       </div>
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 14 }}>
         ※ 此頁為內部薪資試算，正式發薪前仍須人工複核；加班費／事假扣款皆為估算值。
-        {!activeStoreId && me.role === "hr" && "　目前為全部門市檢視，鎖定薪資請先在上方選擇單一門市。"}
       </p>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div className="ph-card" style={{ overflowX: "auto" }}>
           <table className="ph-table">
-            <thead><tr><th>夥伴</th>{scopeStoreIds.length > 1 && <th>門市</th>}<th>類型</th><th>本薪/工資</th><th>獎金</th><th>加班</th><th>事假扣款</th><th>應發合計</th></tr></thead>
+            <thead><tr><th>夥伴</th><th>類型</th><th>本薪/工資</th><th>獎金</th><th>加班</th><th>事假扣款</th><th>應發合計</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.emp.id}>
                   <td>{r.emp.name}</td>
-                  {scopeStoreIds.length > 1 && <td style={{ fontSize: 12, color: T.sub }}>{storeById[r.emp.store_id]?.name}</td>}
                   <td>{r.emp.employment_type === "full_time" ? "全職" : "兼職"}</td>
                   <td>NT$ {money(r.basePay)}</td>
                   <td>NT$ {money(r.emp.bonus)}</td>
@@ -1335,7 +1379,7 @@ function PayrollPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
                   <td style={{ fontWeight: 600 }}>NT$ {money(r.total)}</td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={scopeStoreIds.length > 1 ? 8 : 7} style={{ color: T.sub, textAlign: "center" }}>此範圍尚無在職夥伴</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={7} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
             </tbody>
           </table>
         </div>
