@@ -1234,6 +1234,75 @@ function PayslipSection({ title }) {
   return <tr><td colSpan={2} style={{ background: "#F5F1EA", fontWeight: 600 }}>{title}</td></tr>;
 }
 
+function AdjustmentsModal({ me, emp, storeId, ym, items, locked, onClose, toast }) {
+  const [label, setLabel] = useState("");
+  const [amount, setAmount] = useState("");
+  const [taxable, setTaxable] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  async function addItem() {
+    if (!label.trim()) { toast("請輸入項目名稱"); return; }
+    if (!amount || Number.isNaN(Number(amount)) || Number(amount) === 0) { toast("請輸入金額"); return; }
+    setBusy(true);
+    try {
+      const { error } = await sb.from("payroll_adjustments").insert({
+        employee_id: emp.id, store_id: storeId, year_month: ym, label: label.trim(), amount: Number(amount), taxable,
+      });
+      if (error) { toast("新增失敗：" + (error.message.includes("row-level security") ? "此月份薪資已鎖定" : error.message)); return; }
+      await logAudit(me.name, "add_payroll_adjustment", `${emp.id}:${ym}`, `${label.trim()} ${amount}`);
+      setLabel(""); setAmount(""); setTaxable(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeItem(id) {
+    const { error } = await sb.from("payroll_adjustments").delete().eq("id", id);
+    if (error) { toast("刪除失敗：" + error.message); return; }
+    await logAudit(me.name, "remove_payroll_adjustment", id);
+  }
+
+  return (
+    <Modal title={`本月調整項・${emp.name}`} onClose={onClose}>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: -6, marginBottom: 12 }}>
+        用於三節獎金、年終獎金等單月才有的加項（也可填負數作為單月扣款）。金額會計入本月「應發總額」，預設計入應稅所得，非應稅項目可取消勾選。
+      </p>
+      {items.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          {items.map((a) => (
+            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
+              <div>
+                <div style={{ fontSize: 13.5 }}>{a.label}{!a.taxable && <span style={{ color: T.sub, fontSize: 11.5 }}>（免稅）</span>}</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontWeight: 600 }}>NT$ {money(a.amount)}</span>
+                {!locked && <button className="ph-btn small danger" onClick={() => removeItem(a.id)}>刪除</button>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!locked ? (
+        <>
+          <Field label="項目名稱"><input className="ph-input" placeholder="例：端午禮金" value={label} onChange={(e) => setLabel(e.target.value)} /></Field>
+          <Field label="金額（負數可作為單月扣款）"><input className="ph-input" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+          <Field label="">
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+              <input type="checkbox" checked={taxable} onChange={(e) => setTaxable(e.target.checked)} /> 計入應稅所得
+            </label>
+          </Field>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button className="ph-btn" onClick={onClose}>關閉</button>
+            <button className="ph-btn primary" disabled={busy} onClick={addItem}>{busy ? "新增中…" : "＋ 新增項目"}</button>
+          </div>
+        </>
+      ) : (
+        <p style={{ color: T.sub, fontSize: 12.5 }}>此月份薪資已鎖定，無法新增或刪除調整項。</p>
+      )}
+    </Modal>
+  );
+}
+
 function PayslipModal({ store, ym, periodLabel, row, onClose }) {
   const [payDate, setPayDate] = useState(todayStr());
   return (
@@ -1270,7 +1339,13 @@ function PayslipModal({ store, ym, periodLabel, row, onClose }) {
               <PayslipSection title="薪資科目加項" />
               <PayslipRow label="加班費" value={row.overtimePay} />
               <PayslipRow label="全勤獎金" value={row.fullAttendanceBonus} />
+              {row.empAdjustments.filter((a) => Number(a.amount) > 0).map((a) => (
+                <PayslipRow key={a.id} label={a.label + (a.taxable ? "" : "（免稅）")} value={a.amount} />
+              ))}
               <PayslipSection title="薪資科目扣項" />
+              {row.empAdjustments.filter((a) => Number(a.amount) < 0).map((a) => (
+                <PayslipRow key={a.id} label={a.label} value={-a.amount} />
+              ))}
               <PayslipRow label="遲到／請假／曠職" value={row.attendanceDeduction} />
               <PayslipRow label="勞保費" value={row.laborInsuranceFee} />
               <PayslipRow label="健保費" value={row.healthInsuranceFee} />
@@ -1295,8 +1370,10 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   const [shifts, setShifts] = useState([]);
   const [requests, setRequests] = useState([]);
   const [runs, setRuns] = useState([]);
+  const [adjustments, setAdjustments] = useState([]);
   const [lockBusy, setLockBusy] = useState(false);
   const [payslipRow, setPayslipRow] = useState(null);
+  const [adjustingEmp, setAdjustingEmp] = useState(null);
   const [loading, setLoading] = useState(true);
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
 
@@ -1305,17 +1382,19 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
     setLoading(true);
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
-    const [empRes, shiftRes, reqRes, runRes] = await Promise.all([
+    const [empRes, shiftRes, reqRes, runRes, adjRes] = await Promise.all([
       sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("active", true).order("name"),
       sb.from("shifts").select("*").in("store_id", scopeStoreIds).gte("work_date", from).lte("work_date", to),
       sb.from("requests").select("*").in("store_id", scopeStoreIds).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
       sb.from("payroll_runs").select("*").in("store_id", scopeStoreIds).eq("year_month", ym),
+      sb.from("payroll_adjustments").select("*").in("store_id", scopeStoreIds).eq("year_month", ym),
     ]);
-    [empRes, shiftRes, reqRes, runRes].forEach((r) => { if (r.error) console.error("payroll load", r.error); });
+    [empRes, shiftRes, reqRes, runRes, adjRes].forEach((r) => { if (r.error) console.error("payroll load", r.error); });
     setRoster(empRes.data || []);
     setShifts(shiftRes.data || []);
     setRequests(reqRes.data || []);
     setRuns(runRes.data || []);
+    setAdjustments(adjRes.data || []);
     setLoading(false);
   }, [scopeStoreIds, ym]);
 
@@ -1323,6 +1402,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   useEffect(() => {
     const ch = sb.channel("payroll_sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "payroll_runs" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "payroll_adjustments" }, load)
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
@@ -1345,17 +1425,20 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
       const laborInsuranceFee = Number(emp.labor_insurance_fee) || 0;
       const healthInsuranceFee = Number(emp.health_insurance_fee) || 0;
       const incomeTax = Number(emp.income_tax) || 0;
-      const grossPay = basePay + mealAllowance + positionAllowance + overtimePay + fullAttendanceBonus;
-      const taxableIncome = grossPay - mealAllowance; // 伙食費屬免稅項目（現行每月上限 NT$3,000）
+      const empAdjustments = adjustments.filter((a) => a.employee_id === emp.id);
+      const adjustmentsTotal = empAdjustments.reduce((sum, a) => sum + Number(a.amount), 0);
+      const taxableAdjustments = empAdjustments.filter((a) => a.taxable).reduce((sum, a) => sum + Number(a.amount), 0);
+      const grossPay = basePay + mealAllowance + positionAllowance + overtimePay + fullAttendanceBonus + adjustmentsTotal;
+      const taxableIncome = grossPay - mealAllowance - (adjustmentsTotal - taxableAdjustments); // 伙食費及標記為免稅的本月調整項不計入應稅所得
       const totalDeduction = attendanceDeduction + laborInsuranceFee + healthInsuranceFee + incomeTax;
       const total = grossPay - totalDeduction;
       return {
         emp, workedHours, overtimeHours, personalLeaveHours, basePay, mealAllowance, positionAllowance,
         overtimePay, fullAttendanceBonus, attendanceDeduction, laborInsuranceFee, healthInsuranceFee, incomeTax,
-        grossPay, taxableIncome, totalDeduction, total,
+        empAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
       };
     });
-  }, [roster, shifts, requests]);
+  }, [roster, shifts, requests, adjustments]);
 
   const activeRun = activeStoreId ? runs.find((r) => r.store_id === activeStoreId) : null;
   const locked = activeRun?.status === "locked";
@@ -1388,10 +1471,12 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   }
 
   function exportCsv() {
-    const head = ["姓名", "到職日", "計薪方式", "基本薪資", "伙食費", "職務津貼", "加班費", "全勤獎金", "應發總額", "遲到/請假/曠職扣款", "勞保費", "健保費", "所得稅", "應稅所得", "應減總額", "實發金額"];
+    const head = ["姓名", "到職日", "計薪方式", "基本薪資", "伙食費", "職務津貼", "加班費", "全勤獎金", "本月調整項", "應發總額", "遲到/請假/曠職扣款", "勞保費", "健保費", "所得稅", "應稅所得", "應減總額", "實發金額"];
     const lines = [head.join(",")].concat(rows.map((r) => [
       r.emp.name, r.emp.hire_date || "", r.emp.employment_type === "full_time" ? "全職" : "兼職",
-      Math.round(r.basePay), Math.round(r.mealAllowance), Math.round(r.positionAllowance), Math.round(r.overtimePay), Math.round(r.fullAttendanceBonus), Math.round(r.grossPay),
+      Math.round(r.basePay), Math.round(r.mealAllowance), Math.round(r.positionAllowance), Math.round(r.overtimePay), Math.round(r.fullAttendanceBonus),
+      `"${Math.round(r.adjustmentsTotal)}${r.empAdjustments.length ? ` (${r.empAdjustments.map((a) => a.label).join("／")})` : ""}"`,
+      Math.round(r.grossPay),
       Math.round(r.attendanceDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.taxableIncome), Math.round(r.totalDeduction),
       Math.round(r.total),
     ].join(",")));
@@ -1479,14 +1564,14 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                 <th rowSpan={2} className="ph-hide-mobile">到職日</th>
                 <th rowSpan={2} className="ph-hide-mobile">計薪方式</th>
                 <th colSpan={3} style={{ textAlign: "center" }}>薪資結構</th>
-                <th colSpan={2} style={{ textAlign: "center" }}>薪資科目加項</th>
+                <th colSpan={3} style={{ textAlign: "center" }}>薪資科目加項</th>
                 <th colSpan={4} style={{ textAlign: "center" }}>薪資科目扣項</th>
                 <th colSpan={4} style={{ textAlign: "center" }}>薪資總計</th>
                 <th rowSpan={2}>個人明細</th>
               </tr>
               <tr>
                 <th>基本薪資</th><th>伙食費</th><th>職務津貼</th>
-                <th>加班費</th><th>全勤獎金</th>
+                <th>加班費</th><th>全勤獎金</th><th>本月調整</th>
                 <th>遲到/請假/曠職</th><th>勞保費</th><th>健保費</th><th>所得稅</th>
                 <th>應稅所得</th><th>應發總額</th><th>應減總額</th><th>實發金額</th>
               </tr>
@@ -1502,6 +1587,11 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                   <td>{money(r.positionAllowance)}</td>
                   <td>{money(r.overtimePay)}</td>
                   <td>{money(r.fullAttendanceBonus)}</td>
+                  <td>
+                    <button className="ph-btn small" style={r.adjustmentsTotal !== 0 ? { borderColor: T.brown, color: T.brown } : undefined} onClick={() => setAdjustingEmp(r.emp)}>
+                      {r.adjustmentsTotal !== 0 ? `${r.adjustmentsTotal > 0 ? "+" : ""}${money(r.adjustmentsTotal)}` : "＋ 調整"}
+                    </button>
+                  </td>
                   <td>{money(r.attendanceDeduction)}</td>
                   <td>{money(r.laborInsuranceFee)}</td>
                   <td>{money(r.healthInsuranceFee)}</td>
@@ -1513,13 +1603,18 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                   <td><button className="ph-btn small" onClick={() => setPayslipRow(r)}>薪資明細 →</button></td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={17} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={18} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
             </tbody>
           </table>
         </div>
       )}
       {payslipRow && (
         <PayslipModal store={storeById[activeStoreId]} ym={ym} periodLabel={periodLabel} row={payslipRow} onClose={() => setPayslipRow(null)} />
+      )}
+      {adjustingEmp && (
+        <AdjustmentsModal me={me} emp={adjustingEmp} storeId={adjustingEmp.store_id} ym={ym} locked={locked}
+          items={adjustments.filter((a) => a.employee_id === adjustingEmp.id)}
+          onClose={() => setAdjustingEmp(null)} toast={toast} />
       )}
     </div>
   );
