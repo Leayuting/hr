@@ -426,6 +426,10 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
   });
   const canEdit = me.role === "manager" || me.role === "hr";
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
+  const hqStore = useMemo(() => stores.find((s) => s.name === "總部"), [stores]);
+  const showHqSection = !!hqStore && !scopeStoreIds.includes(hqStore.id);
+  const [hqRoster, setHqRoster] = useState([]);
+  const [hqShifts, setHqShifts] = useState([]);
 
   const load = useCallback(async () => {
     if (!scopeStoreIds.length) return;
@@ -451,6 +455,30 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
+
+  const loadHq = useCallback(async () => {
+    if (!showHqSection) { setHqRoster([]); setHqShifts([]); return; }
+    const days = monthDays(ym);
+    const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
+    const [rosterRes, shiftRes] = await Promise.all([
+      sb.rpc("store_roster", { p_store_id: hqStore.id }),
+      sb.from("shifts").select("*").eq("store_id", hqStore.id).gte("work_date", from).lte("work_date", to),
+    ]);
+    if (rosterRes.error) console.error("hq store_roster", rosterRes.error);
+    if (shiftRes.error) console.error("hq shifts", shiftRes.error);
+    setHqRoster((rosterRes.data || []).filter((r) => r.active));
+    setHqShifts(shiftRes.data || []);
+  }, [showHqSection, hqStore, ym]);
+
+  useEffect(() => { loadHq(); }, [loadHq]);
+
+  useEffect(() => {
+    if (!showHqSection) return;
+    const ch = sb.channel("schedule_hq_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, () => loadHq())
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [showHqSection, loadHq]);
 
   const days = monthDays(ym);
   const dateList = Array.from({ length: days }, (_, i) => `${ym}-${pad2(i + 1)}`);
@@ -622,6 +650,31 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
           </div>
         )}
       </div>
+
+      {showHqSection && (
+        <div className="ph-card" style={{ padding: 16, marginTop: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+            <strong style={{ fontSize: 13.5 }}>總部人員排休</strong>
+            <span style={{ fontSize: 11.5, color: T.sub }}>僅供檢視，如需異動請洽總部</span>
+          </div>
+          {hqRoster.length === 0 ? (
+            <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>總部目前尚無在職人員資料</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {hqRoster.map((r, idx) => {
+                const offDates = hqShifts.filter((s) => s.employee_id === r.id && s.is_day_off).map((s) => Number(s.work_date.slice(8, 10))).sort((a, b) => a - b);
+                return (
+                  <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, flexWrap: "wrap" }}>
+                    <RosterAvatar name={r.name} index={idx} />
+                    <span style={{ fontWeight: 500, minWidth: 70 }}>{r.name}</span>
+                    <span style={{ color: T.sub }}>{offDates.length ? `本月排休：${offDates.map((d) => `${d}日`).join("、")}` : "本月尚無排休登記"}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {editing && (
         <ShiftEditModal editing={editing} onClose={() => setEditing(null)} onSave={saveShift} />
