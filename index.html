@@ -1552,33 +1552,41 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-        <h2 className="ph-serif" style={{ margin: 0 }}>人員資料</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+        <div>
+          <h2 className="ph-serif" style={{ margin: "0 0 4px" }}>在職夥伴</h2>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>管理歸屬門市、職務與計薪方式。</p>
+        </div>
         <button className="ph-btn primary" onClick={() => setEditing({ isNew: true, store_id: activeStoreId || "" })}>＋ 新增夥伴</button>
       </div>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
-        <div className="ph-card" style={{ overflowX: "auto" }}>
-          <table className="ph-table">
-            <thead><tr><th>姓名</th>{scopeStoreIds.length > 1 && <th>門市</th>}<th>職務</th><th>類型</th><th>角色</th><th className="ph-hide-mobile">到職日</th><th className="ph-hide-mobile">本薪/時薪</th><th className="ph-hide-mobile">全勤獎金</th><th>在職</th><th>Email</th><th>操作</th></tr></thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.name}</td>
-                  {scopeStoreIds.length > 1 && <td style={{ fontSize: 12, color: T.sub }}>{storeById[r.store_id]?.name}</td>}
-                  <td>{r.position}</td>
-                  <td>{r.employment_type === "full_time" ? "全職" : "兼職"}</td>
-                  <td>{ROLE_LABEL[r.role]}</td>
-                  <td className="ph-hide-mobile">{r.hire_date || "—"}</td>
-                  <td className="ph-hide-mobile">{r.employment_type === "full_time" ? `NT$${money(r.base_salary)}` : `NT$${money(r.hourly_rate)}/hr`}</td>
-                  <td className="ph-hide-mobile">NT$ {money(r.bonus)}</td>
-                  <td>{r.active ? <Badge tone="green">在職</Badge> : <Badge tone="sub">停用</Badge>}</td>
-                  <td style={{ fontSize: 12 }}>{r.email || "—"}</td>
-                  <td><button className="ph-btn small" onClick={() => setEditing({ ...r })}>編輯</button></td>
-                </tr>
-              ))}
-              {rows.length === 0 && <tr><td colSpan={scopeStoreIds.length > 1 ? 10 : 9} style={{ color: T.sub, textAlign: "center" }}>此範圍尚無夥伴資料</td></tr>}
-            </tbody>
-          </table>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
+          {rows.map((r, idx) => (
+            <div key={r.id} className="ph-card" style={{ padding: 18 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <RosterAvatar name={r.name} index={idx} />
+                  <div>
+                    <div style={{ fontWeight: 500 }}>{r.name}</div>
+                    <div style={{ fontSize: 11.5, color: T.sub }}>{r.position}</div>
+                  </div>
+                </div>
+                <span className="ph-pill">{storeById[r.store_id]?.name}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, paddingTop: 12, borderTop: `1px solid ${T.line}`, marginBottom: 14 }}>
+                <div>
+                  <div style={{ color: T.sub, marginBottom: 4 }}>計薪方式</div>
+                  <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "月薪制" : "時薪制"}</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ color: T.sub, marginBottom: 4 }}>狀態</div>
+                  <div style={{ fontWeight: 600, color: r.active ? T.green : T.sub }}>{r.active ? "在職" : "停用"}</div>
+                </div>
+              </div>
+              <button className="ph-btn small" style={{ width: "100%" }} onClick={() => setEditing({ ...r })}>查看資料</button>
+            </div>
+          ))}
+          {rows.length === 0 && <div className="ph-card" style={{ padding: 24, color: T.sub, textAlign: "center" }}>此範圍尚無夥伴資料</div>}
         </div>
       )}
       {editing && (
