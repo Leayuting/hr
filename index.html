@@ -52,7 +52,37 @@ const SB_URL = "https://msrjtjpanejszhlxuqyd.supabase.co";
 const SB_KEY = "sb_publishable_1clgZF2darBDVaoPyC1zdQ_ez_4OiWb";
 const sb = createClient(SB_URL, SB_KEY);
 
-const ROLE_LABEL = { staff: "夥伴", manager: "店長", hr: "營運／人資" };
+const TIER_LABEL = {
+  super_admin: "最高管理員",
+  ops_admin: "營運管理員",
+  dept_manager: "部門／門市主管",
+  admin_specialist: "行政專責",
+  staff: "一般夥伴",
+};
+const FEATURE_LABEL = {
+  dashboard: "營運總覽", schedule: "門市排班", daily_report: "每日回報", requests: "申請審核",
+  payroll: "薪資試算", staff: "人員資料", backup: "備份", permission_admin: "權限管理",
+};
+const FEATURE_LEVEL_LABEL = {
+  dashboard: { none: "不顯示", view: "僅查看", edit: "編輯" },
+  schedule: { self: "查看自己", unit: "查看所屬單位", edit: "排班編輯" },
+  daily_report: { none: "不開放", fill: "填寫", unit: "查看所屬單位", all: "查看全部" },
+  requests: { submit: "提出申請", first_review: "初審", second_review: "複審", full_review: "全部審核" },
+  payroll: { self: "查看自己", unit: "試算所屬單位", all: "查看全部", edit: "編輯" },
+  staff: { self: "查看自己", basic: "查看基本資料", full: "查看完整資料", edit: "編輯" },
+  backup: { none: "不開放", download: "下載備份", manage: "建立及還原備份" },
+  permission_admin: { none: "不開放", manage: "僅最高管理員" },
+};
+const FEATURE_LEVEL_OPTIONS = {
+  dashboard: ["none", "view", "edit"],
+  schedule: ["self", "unit", "edit"],
+  daily_report: ["none", "fill", "unit", "all"],
+  requests: ["submit", "first_review", "second_review", "full_review"],
+  payroll: ["self", "unit", "all", "edit"],
+  staff: ["self", "basic", "full", "edit"],
+  backup: ["none", "download", "manage"],
+  permission_admin: ["none", "manage"],
+};
 const REQ_TYPE_LABEL = { annual_leave: "特休", personal_leave: "事假", overtime: "加班" };
 const REQ_TYPE_PILL = {
   annual_leave: { bg: "#E7EAE1", fg: "#4B5530" },
@@ -61,7 +91,7 @@ const REQ_TYPE_PILL = {
 };
 const REQ_STATUS_LABEL = { pending: "待審核", approved: "已核准", rejected: "已拒絕" };
 const REPORT_STATUS_LABEL = { draft: "未送出", submitted: "待簽核", signed: "待人資交接", hr_received: "已完成" };
-const BACKUP_TABLES = ["stores", "employees", "shifts", "requests", "payroll_runs", "daily_reports", "daily_report_entries", "daily_report_attachments", "audit_logs"];
+const BACKUP_TABLES = ["stores", "employees", "shifts", "requests", "payroll_runs", "payroll_adjustments", "daily_reports", "daily_report_entries", "daily_report_attachments", "feature_permissions", "audit_logs"];
 
 /* ────────────────────────────────────────────
    共用工具
@@ -138,6 +168,35 @@ function overtimePayForRequest(hourlyBase, hours, overtimeType) {
   const t1 = Math.min(h, 2);
   const t2 = Math.max(h - 2, 0);
   return hourlyBase * ((4 / 3) * t1 + (5 / 3) * t2);
+}
+// 單一員工單月薪資試算，PayrollPage（全店）與 MyProfilePage（自己）共用
+function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
+  const workedHours = empShifts.filter((s) => !s.is_day_off && s.start_time && s.end_time).reduce((sum, s) => sum + shiftHours(s.start_time, s.end_time), 0);
+  const overtimeRequests = empRequests.filter((r) => r.type === "overtime");
+  const overtimeHours = overtimeRequests.reduce((s, r) => s + Number(r.hours), 0);
+  const personalLeaveHours = empRequests.filter((r) => r.type === "personal_leave").reduce((s, r) => s + Number(r.hours), 0);
+  const isFullTime = emp.employment_type === "full_time";
+  const hourlyBase = isFullTime ? Number(emp.base_salary) / 240 : Number(emp.hourly_rate);
+  const overtimePay = overtimeRequests.reduce((sum, r) => sum + overtimePayForRequest(hourlyBase, r.hours, r.overtime_type || "workday"), 0);
+  const attendanceDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0;
+  const basePay = isFullTime ? Number(emp.base_salary) : workedHours * Number(emp.hourly_rate);
+  const mealAllowance = Number(emp.meal_allowance) || 0;
+  const positionAllowance = Number(emp.position_allowance) || 0;
+  const fullAttendanceBonus = Number(emp.bonus) || 0;
+  const laborInsuranceFee = Number(emp.labor_insurance_fee) || 0;
+  const healthInsuranceFee = Number(emp.health_insurance_fee) || 0;
+  const incomeTax = Number(emp.income_tax) || 0;
+  const adjustmentsTotal = empAdjustments.reduce((sum, a) => sum + Number(a.amount), 0);
+  const taxableAdjustments = empAdjustments.filter((a) => a.taxable).reduce((sum, a) => sum + Number(a.amount), 0);
+  const grossPay = basePay + mealAllowance + positionAllowance + overtimePay + fullAttendanceBonus + adjustmentsTotal;
+  const taxableIncome = grossPay - mealAllowance - (adjustmentsTotal - taxableAdjustments);
+  const totalDeduction = attendanceDeduction + laborInsuranceFee + healthInsuranceFee + incomeTax;
+  const total = grossPay - totalDeduction;
+  return {
+    emp, workedHours, overtimeHours, personalLeaveHours, basePay, mealAllowance, positionAllowance,
+    overtimePay, fullAttendanceBonus, attendanceDeduction, laborInsuranceFee, healthInsuranceFee, incomeTax,
+    empAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
+  };
 }
 async function logAudit(actorLabel, action, target, detail = "") {
   try {
@@ -277,6 +336,7 @@ const ICON_PATHS = {
   payroll: <><circle cx="12" cy="12" r="9" /><path d="M12 7v10M9.3 9.4h3.4a1.9 1.9 0 0 1 0 3.8h-1.4a1.9 1.9 0 0 0 0 3.8h3.4" /></>,
   staff: <><circle cx="9" cy="8" r="3.3" /><path d="M2.3 20a6.7 6.7 0 0 1 13.4 0" /><circle cx="17.7" cy="8.6" r="2.7" /><path d="M15.1 12.4a5.6 5.6 0 0 1 6.6 5.5" /></>,
   backup: <><path d="M12 3v12.5" /><path d="M6.8 10.3l5.2 5.2 5.2-5.2" /><path d="M4 19.5h16" /></>,
+  permissions: <><path d="M12 2.5l7.5 3.4v5.6c0 5-3.2 8.4-7.5 10-4.3-1.6-7.5-5-7.5-10V5.9z" /><path d="M9.3 12l1.9 1.9 3.7-3.9" /></>,
   bell: <><path d="M6 9.5a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 13.5 6 9.5Z" /><path d="M10 18.5a2 2 0 0 0 4 0" /></>,
   hamburger: <><path d="M3.5 6.5h17M3.5 12h17M3.5 17.5h17" /></>,
   close: <><path d="M5 5l14 14M19 5L5 19" /></>,
@@ -424,7 +484,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
     const t = todayStr();
     return t.slice(0, 7) === ym ? Number(t.slice(8, 10)) - 1 : 0;
   });
-  const canEdit = me.role === "manager" || me.role === "hr";
+  const canEdit = me.permissions?.schedule === "edit";
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const hqStore = useMemo(() => stores.find((s) => s.name === "總部"), [stores]);
   const showHqSection = !!hqStore && !scopeStoreIds.includes(hqStore.id);
@@ -436,11 +496,12 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
     setLoading(true);
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
-    const [empRes, shiftRes] = await Promise.all([
-      sb.from("employees").select("id,name,position,store_id,employment_type,active").in("store_id", scopeStoreIds).eq("active", true).order("name"),
+    const [empResList, shiftRes] = await Promise.all([
+      Promise.all(scopeStoreIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid }).then((r) => ({ ...r, data: (r.data || []).map((row) => ({ ...row, store_id: sid })) })))),
       sb.from("shifts").select("*").in("store_id", scopeStoreIds).gte("work_date", from).lte("work_date", to),
     ]);
-    if (empRes.error) console.error("employees", empRes.error);
+    empResList.forEach((r) => { if (r.error) console.error("employees", r.error); });
+    const empRes = { data: empResList.flatMap((r) => r.data || []).filter((r) => r.active) };
     if (shiftRes.error) console.error("shifts", shiftRes.error);
     setRoster(empRes.data || []);
     setShifts(shiftRes.data || []);
@@ -779,21 +840,28 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [monthFilter, setMonthFilter] = useState("");
-  const canReview = me.role === "manager" || me.role === "hr";
+  const canReview = me.permissions?.requests && me.permissions.requests !== "submit";
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
+  const [nameById, setNameById] = useState({});
 
   const load = useCallback(async () => {
     if (!scopeStoreIds.length) { setRows([]); setLoading(false); return; }
     setLoading(true);
-    let q = sb.from("requests").select("*, employees!requests_employee_id_fkey(name)").order("submitted_at", { ascending: false }).limit(300);
+    let q = sb.from("requests").select("*").order("submitted_at", { ascending: false }).limit(300);
     if (canReview) q = q.in("store_id", scopeStoreIds);
     else q = q.eq("employee_id", me.id);
-    const { data, error } = await q;
+    const [{ data, error }, rosterResList] = await Promise.all([
+      q,
+      canReview ? Promise.all(scopeStoreIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid }))) : Promise.resolve([]),
+    ]);
     if (error) console.error("requests load", error);
     setRows(data || []);
+    setNameById(canReview
+      ? Object.fromEntries(rosterResList.flatMap((r) => r.data || []).map((e) => [e.id, e.name]))
+      : { [me.id]: me.name });
     setTruncated((data || []).length >= 300);
     setLoading(false);
-  }, [scopeStoreIds, canReview, me.id]);
+  }, [scopeStoreIds, canReview, me.id, me.name]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -860,9 +928,9 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
             return (
               <div key={r.id} className="ph-card" style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 190, flex: 1 }}>
-                  <RosterAvatar name={r.employees?.name} index={idx} />
+                  <RosterAvatar name={nameById[r.employee_id]} index={idx} />
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 500 }}>{r.employees?.name || "—"}</div>
+                    <div style={{ fontWeight: 500 }}>{nameById[r.employee_id] || "—"}</div>
                     <div style={{ fontSize: 11.5, color: T.sub }}>{storeById[r.store_id]?.name}・{fmtDateTimeShort(r.submitted_at)} 提交</div>
                   </div>
                 </div>
@@ -996,11 +1064,10 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
     const reps = repRes.data || [];
     setReports(reps);
     const reportIds = reps.map((r) => r.id);
-    const empIds = [...new Set(reps.flatMap((r) => [r.submitted_by, r.signed_by, r.hr_received_by]).filter(Boolean))];
-    const [entriesRes, attachRes, empRes] = await Promise.all([
+    const [entriesRes, attachRes, rosterResList] = await Promise.all([
       reportIds.length ? sb.from("daily_report_entries").select("daily_report_id,late,missed_punch,leave,overtime") .in("daily_report_id", reportIds) : Promise.resolve({ data: [] }),
       reportIds.length ? sb.from("daily_report_attachments").select("daily_report_id").in("daily_report_id", reportIds) : Promise.resolve({ data: [] }),
-      empIds.length ? sb.from("employees").select("id,name").in("id", empIds) : Promise.resolve({ data: [] }),
+      Promise.all(scopeStoreIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid }))),
     ]);
     const aCounts = {};
     (entriesRes.data || []).forEach((e) => {
@@ -1010,7 +1077,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
     (attachRes.data || []).forEach((a) => { fCounts[a.daily_report_id] = (fCounts[a.daily_report_id] || 0) + 1; });
     setAnomalyCounts(aCounts);
     setAttachCounts(fCounts);
-    setNameById(Object.fromEntries((empRes.data || []).map((e) => [e.id, e.name])));
+    setNameById(Object.fromEntries(rosterResList.flatMap((r) => r.data || []).map((e) => [e.id, e.name])));
     setLoading(false);
   }, [scopeStoreIds, date]);
 
@@ -1131,7 +1198,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
   useEffect(() => { load(); }, [load]);
 
   const hasAnomaly = Object.values(entries).some((e) => e.late || e.missed_punch || e.leave || e.overtime);
-  const canWrite = (me.role === "manager" || me.role === "hr") && (!report || report.status === "draft" || report.status === "submitted");
+  const canWrite = me.permissions?.daily_report === "fill" && (!report || report.status === "draft" || report.status === "submitted");
 
   function updateEntry(employeeId, patch) {
     setEntries((prev) => ({ ...prev, [employeeId]: { ...prev[employeeId], ...patch } }));
@@ -1338,7 +1405,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
                 {canWrite && <input type="file" accept="application/pdf,image/*" onChange={(e) => e.target.files[0] && uploadFile(e.target.files[0])} />}
                 {hasAnomaly && (
                   <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12.5 }}>
-                    <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || (me.role !== "manager" && me.role !== "hr")} />
+                    <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || me.permissions?.daily_report !== "fill"} />
                     確認附件已完整上傳
                   </label>
                 )}
@@ -1360,10 +1427,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
               {report?.status === "submitted" && canWrite && (
                 <button className="ph-btn primary" disabled={actionBusy} onClick={signReport}>{actionBusy ? "處理中…" : "領班簽核"}</button>
               )}
-              {report?.status === "signed" && me.role === "hr" && (
+              {report?.status === "signed" && (me.access_tier === "super_admin" || me.permissions?.daily_report === "fill") && (
                 <button className="ph-btn primary" disabled={actionBusy} onClick={handoffReport}>{actionBusy ? "處理中…" : "確認人資交接"}</button>
               )}
-              {report?.status === "signed" && me.role !== "hr" && <span style={{ color: T.sub, fontSize: 12.5 }}>✓ 已完成領班簽核，等待人資交接</span>}
+              {report?.status === "signed" && !(me.access_tier === "super_admin" || me.permissions?.daily_report === "fill") && <span style={{ color: T.sub, fontSize: 12.5 }}>✓ 已完成領班簽核，等待人資交接</span>}
               {report?.status === "hr_received" && <span style={{ color: T.green, fontSize: 12.5 }}>✓ 領班與人資流程皆已完成</span>}
             </div>
           </div>
@@ -1598,38 +1665,12 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   }, [load]);
 
   const rows = useMemo(() => {
-    return roster.map((emp) => {
-      const empShifts = shifts.filter((s) => s.employee_id === emp.id && !s.is_day_off && s.start_time && s.end_time);
-      const workedHours = empShifts.reduce((sum, s) => sum + shiftHours(s.start_time, s.end_time), 0);
-      const empRequests = requests.filter((r) => r.employee_id === emp.id);
-      const overtimeRequests = empRequests.filter((r) => r.type === "overtime");
-      const overtimeHours = overtimeRequests.reduce((s, r) => s + Number(r.hours), 0);
-      const personalLeaveHours = empRequests.filter((r) => r.type === "personal_leave").reduce((s, r) => s + Number(r.hours), 0);
-      const isFullTime = emp.employment_type === "full_time";
-      const hourlyBase = isFullTime ? Number(emp.base_salary) / 240 : Number(emp.hourly_rate);
-      // 加班費逐筆依勞基法分級計算（每筆加班申請以送出當天為一個計算單位，各自從第1小時起算級距）
-      const overtimePay = overtimeRequests.reduce((sum, r) => sum + overtimePayForRequest(hourlyBase, r.hours, r.overtime_type || "workday"), 0);
-      const attendanceDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0; // 遲到／請假／曠職扣款
-      const basePay = isFullTime ? Number(emp.base_salary) : workedHours * Number(emp.hourly_rate);
-      const mealAllowance = Number(emp.meal_allowance) || 0;
-      const positionAllowance = Number(emp.position_allowance) || 0;
-      const fullAttendanceBonus = Number(emp.bonus) || 0;
-      const laborInsuranceFee = Number(emp.labor_insurance_fee) || 0;
-      const healthInsuranceFee = Number(emp.health_insurance_fee) || 0;
-      const incomeTax = Number(emp.income_tax) || 0;
-      const empAdjustments = adjustments.filter((a) => a.employee_id === emp.id);
-      const adjustmentsTotal = empAdjustments.reduce((sum, a) => sum + Number(a.amount), 0);
-      const taxableAdjustments = empAdjustments.filter((a) => a.taxable).reduce((sum, a) => sum + Number(a.amount), 0);
-      const grossPay = basePay + mealAllowance + positionAllowance + overtimePay + fullAttendanceBonus + adjustmentsTotal;
-      const taxableIncome = grossPay - mealAllowance - (adjustmentsTotal - taxableAdjustments); // 伙食費及標記為免稅的本月調整項不計入應稅所得
-      const totalDeduction = attendanceDeduction + laborInsuranceFee + healthInsuranceFee + incomeTax;
-      const total = grossPay - totalDeduction;
-      return {
-        emp, workedHours, overtimeHours, personalLeaveHours, basePay, mealAllowance, positionAllowance,
-        overtimePay, fullAttendanceBonus, attendanceDeduction, laborInsuranceFee, healthInsuranceFee, incomeTax,
-        empAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
-      };
-    });
+    return roster.map((emp) => computePayrollRow(
+      emp,
+      shifts.filter((s) => s.employee_id === emp.id),
+      requests.filter((r) => r.employee_id === emp.id),
+      adjustments.filter((a) => a.employee_id === emp.id)
+    ));
   }, [roster, shifts, requests, adjustments]);
 
   const activeRun = activeStoreId ? runs.find((r) => r.store_id === activeStoreId) : null;
@@ -1734,7 +1775,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
         <h2 className="ph-serif" style={{ margin: 0 }}>薪資試算</h2>
         <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
         <button className="ph-btn" onClick={exportCsv}>匯出 CSV</button>
-        {me.role === "hr" && (
+        {me.access_tier === "super_admin" && (
           <button className="ph-btn primary" disabled={!activeStoreId || lockBusy} onClick={toggleLock} title={!activeStoreId ? "請先在上方選擇單一門市" : undefined}>
             {lockBusy ? "處理中…" : locked ? "解鎖" : "鎖定本月"}
           </button>
@@ -1780,9 +1821,13 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                   <td>{money(r.overtimePay)}</td>
                   <td>{money(r.fullAttendanceBonus)}</td>
                   <td>
-                    <button className="ph-btn small" style={r.adjustmentsTotal !== 0 ? { borderColor: T.brown, color: T.brown } : undefined} onClick={() => setAdjustingEmp(r.emp)}>
-                      {r.adjustmentsTotal !== 0 ? `${r.adjustmentsTotal > 0 ? "+" : ""}${money(r.adjustmentsTotal)}` : "＋ 調整"}
-                    </button>
+                    {me.permissions?.payroll === "edit" ? (
+                      <button className="ph-btn small" style={r.adjustmentsTotal !== 0 ? { borderColor: T.brown, color: T.brown } : undefined} onClick={() => setAdjustingEmp(r.emp)}>
+                        {r.adjustmentsTotal !== 0 ? `${r.adjustmentsTotal > 0 ? "+" : ""}${money(r.adjustmentsTotal)}` : "＋ 調整"}
+                      </button>
+                    ) : (
+                      r.adjustmentsTotal !== 0 ? `${r.adjustmentsTotal > 0 ? "+" : ""}${money(r.adjustmentsTotal)}` : "—"
+                    )}
                   </td>
                   <td>{money(r.attendanceDeduction)}</td>
                   <td>{money(r.laborInsuranceFee)}</td>
@@ -1821,15 +1866,22 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
+  const canSeeSensitive = me.permissions?.staff === "full" || me.permissions?.staff === "edit";
 
   const load = useCallback(async () => {
     if (!scopeStoreIds.length) return;
     setLoading(true);
-    const { data, error } = await sb.from("employees").select("*").in("store_id", scopeStoreIds).order("active", { ascending: false }).order("name");
-    if (error) console.error("staff load", error);
-    setRows(data || []);
+    if (canSeeSensitive) {
+      const { data, error } = await sb.from("employees").select("*").in("store_id", scopeStoreIds).order("active", { ascending: false }).order("name");
+      if (error) console.error("staff load", error);
+      setRows(data || []);
+    } else {
+      const results = await Promise.all(scopeStoreIds.map((sid) => sb.rpc("employees_basic", { p_store_id: sid })));
+      results.forEach((r) => { if (r.error) console.error("staff load basic", r.error); });
+      setRows(results.flatMap((r) => r.data || []).sort((a, b) => (b.active - a.active) || a.name.localeCompare(b.name)));
+    }
     setLoading(false);
-  }, [scopeStoreIds]);
+  }, [scopeStoreIds, canSeeSensitive]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -1844,7 +1896,9 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
           <h2 className="ph-serif" style={{ margin: "0 0 4px" }}>在職夥伴</h2>
           <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>管理歸屬門市、職務與計薪方式。</p>
         </div>
-        <button className="ph-btn primary" onClick={() => setEditing({ isNew: true, store_id: activeStoreId || "" })}>＋ 新增夥伴</button>
+        {me.permissions?.staff === "edit" && (
+          <button className="ph-btn primary" onClick={() => setEditing({ isNew: true, store_id: activeStoreId || "" })}>＋ 新增夥伴</button>
+        )}
       </div>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
@@ -1875,7 +1929,9 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
                   <div style={{ fontWeight: 600, color: r.active ? T.green : T.sub }}>{r.active ? "在職" : "停用"}</div>
                 </div>
               </div>
-              <button className="ph-btn small" style={{ width: "100%" }} onClick={() => setEditing({ ...r })}>查看資料</button>
+              {me.permissions?.staff === "edit" && (
+                <button className="ph-btn small" style={{ width: "100%" }} onClick={() => setEditing({ ...r })}>查看資料</button>
+              )}
             </div>
           ))}
           {rows.length === 0 && <div className="ph-card" style={{ padding: 24, color: T.sub, textAlign: "center" }}>此範圍尚無夥伴資料</div>}
@@ -1892,12 +1948,12 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
 const POSITION_OPTIONS = ["負責人", "股東", "營運", "店長", "儲備幹部", "烘豆師", "咖啡師", "甜點師", "甜點助理", "內場夥伴", "外場夥伴", "後勤人員", "人資／採購", "財務／美編"];
 
 function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
-  const isHr = me.role === "hr";
+  const isHr = me.access_tier === "super_admin";
   const [name, setName] = useState(editing.name || "");
   const [storeIdSel, setStoreIdSel] = useState(editing.store_id || stores[0]?.id || "");
   const [position, setPosition] = useState(editing.position || "");
   const [employmentType, setEmploymentType] = useState(editing.employment_type || "full_time");
-  const [role, setRole] = useState(editing.role || "staff");
+  const [accessTier, setAccessTier] = useState(editing.access_tier || "staff");
   const [baseSalary, setBaseSalary] = useState(editing.base_salary ?? 0);
   const [hourlyRate, setHourlyRate] = useState(editing.hourly_rate ?? 0);
   const [bonus, setBonus] = useState(editing.bonus ?? 0);
@@ -1918,7 +1974,7 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
     setErr(""); setBusy(true);
     const payload = { name: name.trim(), position, employment_type: employmentType, active, store_id: storeIdSel, hire_date: hireDate || null };
     if (isHr) {
-      payload.role = role;
+      payload.access_tier = accessTier;
       payload.base_salary = Number(baseSalary) || 0;
       payload.hourly_rate = Number(hourlyRate) || 0;
       payload.bonus = Number(bonus) || 0;
@@ -1928,13 +1984,18 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
       payload.health_insurance_fee = Number(healthInsuranceFee) || 0;
       payload.income_tax = Number(incomeTax) || 0;
     }
-    let error;
+    let error, newId = editing.id;
     if (editing.isNew) {
-      ({ error } = await sb.from("employees").insert(payload));
+      const res = await sb.from("employees").insert(payload).select().single();
+      error = res.error;
+      newId = res.data?.id;
     } else {
       ({ error } = await sb.from("employees").update(payload).eq("id", editing.id));
     }
     if (error) { setBusy(false); setErr(error.message); return; }
+    if (isHr && newId) {
+      await sb.rpc("seed_default_permissions", { p_employee_id: newId });
+    }
     await logAudit(me.name, editing.isNew ? "create_employee" : "update_employee", editing.id || name);
     setBusy(false);
     onSaved();
@@ -1951,7 +2012,7 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   return (
     <Modal title={editing.isNew ? "新增夥伴" : `編輯・${editing.name}`} onClose={onClose}>
       <Field label="姓名"><input className="ph-input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
-      <Field label={"所屬門市" + (isHr || editing.isNew ? "" : "（僅人資可調整）")}>
+      <Field label={"所屬門市" + (isHr || editing.isNew ? "" : "（僅最高管理員可調整）")}>
         <select className="ph-input" value={storeIdSel} disabled={!isHr && !editing.isNew} onChange={(e) => setStoreIdSel(e.target.value)}>
           {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
@@ -1969,26 +2030,31 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
           <option value="part_time">兼職（時薪）</option>
         </select>
       </Field>
-      <Field label={"系統權限" + (isHr ? "" : "（僅人資可調整）")}>
-        <select className="ph-input" value={role} disabled={!isHr} onChange={(e) => setRole(e.target.value)}>
-          <option value="staff">夥伴</option><option value="manager">店長</option><option value="hr">營運／人資</option>
+      <Field label={"權限層級" + (isHr ? "" : "（僅最高管理員可調整）")}>
+        <select className="ph-input" value={accessTier} disabled={!isHr} onChange={(e) => setAccessTier(e.target.value)}>
+          {Object.entries(TIER_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
+        {isHr && (
+          <p style={{ color: T.sub, fontSize: 11.5, margin: "6px 0 0" }}>
+            這裡只設定層級標籤；實際各項功能權限請到「權限管理」頁調整（新增夥伴會自動帶入該層級的預設權限）。
+          </p>
+        )}
       </Field>
       <div style={{ display: "flex", gap: 8 }}>
-        <Field label={"本薪（全職）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={baseSalary} onChange={(e) => setBaseSalary(e.target.value)} /></Field>
-        <Field label={"時薪（兼職）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} /></Field>
+        <Field label={"本薪（全職）" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={baseSalary} onChange={(e) => setBaseSalary(e.target.value)} /></Field>
+        <Field label={"時薪（兼職）" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} /></Field>
       </div>
       <Field label="到職日"><input className="ph-input" type="date" value={hireDate} onChange={(e) => setHireDate(e.target.value)} /></Field>
       <div style={{ display: "flex", gap: 8 }}>
-        <Field label={"伙食費" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={mealAllowance} onChange={(e) => setMealAllowance(e.target.value)} /></Field>
-        <Field label={"職務津貼" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={positionAllowance} onChange={(e) => setPositionAllowance(e.target.value)} /></Field>
+        <Field label={"伙食費" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={mealAllowance} onChange={(e) => setMealAllowance(e.target.value)} /></Field>
+        <Field label={"職務津貼" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={positionAllowance} onChange={(e) => setPositionAllowance(e.target.value)} /></Field>
       </div>
-      <Field label={"全勤獎金" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={bonus} onChange={(e) => setBonus(e.target.value)} /></Field>
+      <Field label={"全勤獎金" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={bonus} onChange={(e) => setBonus(e.target.value)} /></Field>
       <div style={{ display: "flex", gap: 8 }}>
-        <Field label={"勞保費（自付額）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={laborInsuranceFee} onChange={(e) => setLaborInsuranceFee(e.target.value)} /></Field>
-        <Field label={"健保費（自付額）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={healthInsuranceFee} onChange={(e) => setHealthInsuranceFee(e.target.value)} /></Field>
+        <Field label={"勞保費（自付額）" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={laborInsuranceFee} onChange={(e) => setLaborInsuranceFee(e.target.value)} /></Field>
+        <Field label={"健保費（自付額）" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={healthInsuranceFee} onChange={(e) => setHealthInsuranceFee(e.target.value)} /></Field>
       </div>
-      <Field label={"所得稅代扣" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={incomeTax} onChange={(e) => setIncomeTax(e.target.value)} /></Field>
+      <Field label={"所得稅代扣" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={incomeTax} onChange={(e) => setIncomeTax(e.target.value)} /></Field>
       <Field label="在職狀態">
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> 在職中</label>
       </Field>
@@ -2010,7 +2076,135 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
 }
 
 /* ────────────────────────────────────────────
-   備份／匯出匯入（僅 hr）
+   我的班表／我的資料（schedule=self／staff=self 的人使用）
+──────────────────────────────────────────── */
+
+function MySchedulePage({ me }) {
+  const [ym, setYm] = useState(thisMonthStr());
+  const [shifts, setShifts] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const days = monthDays(ym);
+    const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
+    const { data, error } = await sb.from("shifts").select("*").eq("employee_id", me.id).gte("work_date", from).lte("work_date", to).order("work_date");
+    if (error) console.error("my shifts", error);
+    setShifts(data || []);
+    setLoading(false);
+  }, [me.id, ym]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("my_schedule_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "shifts", filter: `employee_id=eq.${me.id}` }, () => load())
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load, me.id]);
+
+  const days = monthDays(ym);
+  const dateList = Array.from({ length: days }, (_, i) => `${ym}-${pad2(i + 1)}`);
+  const shiftMap = useMemo(() => Object.fromEntries(shifts.map((s) => [s.work_date, s])), [shifts]);
+  const totalHours = shifts.reduce((sum, s) => (s.is_day_off ? sum : sum + shiftHours(s.start_time, s.end_time)), 0);
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 4 }}>
+        <div>
+          <p className="ph-eyebrow" style={{ margin: 0 }}>我的班表</p>
+          <h2 className="ph-serif" style={{ margin: "2px 0 0", fontSize: 26 }}>{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月</h2>
+        </div>
+      </div>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>僅顯示自己的排班；如需查看同事班表請洽店長。</p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <div style={{ display: "flex", gap: 4 }}>
+          <button className="ph-btn small" onClick={() => setYm(prevMonthStr(ym))}>‹ 上個月</button>
+          <button className="ph-btn small" onClick={() => setYm(thisMonthStr())}>今天</button>
+          <button className="ph-btn small" onClick={() => setYm(nextMonthStr(ym))}>下個月 ›</button>
+        </div>
+        <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+      </div>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+        <div className="ph-card" style={{ padding: 0, overflow: "hidden" }}>
+          {dateList.map((d) => {
+            const s = shiftMap[d];
+            return (
+              <div key={d} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", borderBottom: `1px solid ${T.line}` }}>
+                <span style={{ fontSize: 13.5 }}>{d.slice(5)}（週{weekdayZh(d)}）</span>
+                <span style={{ fontSize: 13.5, color: s?.is_day_off ? T.sub : T.ink, fontWeight: s ? 600 : 400 }}>
+                  {s ? (s.is_day_off ? "休假" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "—"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!loading && <p style={{ color: T.sub, fontSize: 12.5, marginTop: 10 }}>本月預計工時 <strong style={{ color: T.ink }}>{Math.round(totalHours)}</strong> 小時</p>}
+    </div>
+  );
+}
+
+function MyProfilePage({ me, stores }) {
+  const [ym, setYm] = useState(thisMonthStr());
+  const [shifts, setShifts] = useState([]);
+  const [requests, setRequests] = useState([]);
+  const [adjustments, setAdjustments] = useState([]);
+  const [showPayslip, setShowPayslip] = useState(false);
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
+  const hasPayrollAccess = !!me.permissions?.payroll;
+
+  useEffect(() => {
+    if (!hasPayrollAccess) return;
+    const days = monthDays(ym);
+    const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
+    Promise.all([
+      sb.from("shifts").select("*").eq("employee_id", me.id).gte("work_date", from).lte("work_date", to),
+      sb.from("requests").select("*").eq("employee_id", me.id).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
+      sb.from("payroll_adjustments").select("*").eq("employee_id", me.id).eq("year_month", ym),
+    ]).then(([s, r, a]) => {
+      setShifts(s.data || []);
+      setRequests(r.data || []);
+      setAdjustments(a.data || []);
+    });
+  }, [me.id, ym, hasPayrollAccess]);
+
+  const payslipRow = useMemo(() => computePayrollRow(me, shifts, requests, adjustments), [me, shifts, requests, adjustments]);
+  const days = monthDays(ym);
+  const periodLabel = `${ym}-01 ~ ${ym}-${pad2(days)}`;
+
+  return (
+    <div>
+      <p className="ph-eyebrow" style={{ margin: 0 }}>我的資料</p>
+      <h2 className="ph-serif" style={{ margin: "2px 0 16px", fontSize: 26 }}>{me.name}</h2>
+      <div className="ph-card" style={{ padding: 18, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 14, columnGap: 12, fontSize: 13 }}>
+          <div><div style={{ color: T.sub, fontSize: 11.5, marginBottom: 4 }}>所屬門市</div><div style={{ fontWeight: 600 }}>{storeById[me.store_id]?.name || "—"}</div></div>
+          <div><div style={{ color: T.sub, fontSize: 11.5, marginBottom: 4 }}>職務</div><div style={{ fontWeight: 600 }}>{me.position || "—"}</div></div>
+          <div><div style={{ color: T.sub, fontSize: 11.5, marginBottom: 4 }}>聘僱類型</div><div style={{ fontWeight: 600 }}>{me.employment_type === "full_time" ? "正職（月薪）" : "兼職（時薪）"}</div></div>
+          <div><div style={{ color: T.sub, fontSize: 11.5, marginBottom: 4 }}>到職日</div><div style={{ fontWeight: 600 }}>{me.hire_date || "—"}</div></div>
+        </div>
+      </div>
+      {hasPayrollAccess && (
+        <div className="ph-card" style={{ padding: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+            <h3 className="ph-serif" style={{ margin: 0, fontSize: 16 }}>我的薪資試算</h3>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+              <button className="ph-btn small" onClick={() => setShowPayslip(true)}>薪資明細 →</button>
+            </div>
+          </div>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>實發金額：<strong style={{ color: T.ink }}>NT$ {money(payslipRow.total)}</strong></p>
+        </div>
+      )}
+      {showPayslip && (
+        <PayslipModal store={storeById[me.store_id]} ym={ym} periodLabel={periodLabel} row={payslipRow} onClose={() => setShowPayslip(false)} />
+      )}
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────
+   備份／匯出匯入（僅最高管理員）
 ──────────────────────────────────────────── */
 
 function BackupPage({ me, toast }) {
@@ -2041,7 +2235,8 @@ function BackupPage({ me, toast }) {
       for (const t of BACKUP_TABLES) {
         const rows = parsed.tables?.[t];
         if (!rows || !rows.length) continue;
-        const { error } = await sb.from(t).upsert(rows, { onConflict: "id" });
+        const onConflict = t === "feature_permissions" ? "employee_id,feature" : "id";
+        const { error } = await sb.from(t).upsert(rows, { onConflict });
         if (error) throw new Error(`${t}: ${error.message}`);
       }
       await logAudit(me.name, "import_backup", file.name);
@@ -2055,7 +2250,7 @@ function BackupPage({ me, toast }) {
     <div>
       <h2 className="ph-serif">備份／還原</h2>
       <div className="ph-card" style={{ padding: 16, maxWidth: 480 }}>
-        <p style={{ color: T.sub, fontSize: 13 }}>匯出包含九張業務資料表的完整快照；匯入採非破壞性 upsert（只新增／更新，不刪除）。</p>
+        <p style={{ color: T.sub, fontSize: 13 }}>匯出包含全部業務資料表的完整快照；匯入採非破壞性 upsert（只新增／更新，不刪除）。</p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button className="ph-btn primary" disabled={busy} onClick={exportAll}>匯出全部備份</button>
           <label className="ph-btn" style={{ cursor: "pointer" }}>
@@ -2064,6 +2259,122 @@ function BackupPage({ me, toast }) {
           </label>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────
+   權限管理（僅 permission_admin=manage，實務上就是最高管理員）
+──────────────────────────────────────────── */
+
+function PermissionsPage({ me, stores, toast }) {
+  const [rows, setRows] = useState([]);
+  const [permMap, setPermMap] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [busyKey, setBusyKey] = useState("");
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const [empRes, permRes] = await Promise.all([
+      sb.from("employees").select("id,name,access_tier,store_id,active").order("active", { ascending: false }).order("access_tier").order("name"),
+      sb.from("feature_permissions").select("*"),
+    ]);
+    if (empRes.error) console.error("permissions employees", empRes.error);
+    if (permRes.error) console.error("permissions load", permRes.error);
+    setRows(empRes.data || []);
+    const map = {};
+    (permRes.data || []).forEach((p) => { map[`${p.employee_id}_${p.feature}`] = p.level; });
+    setPermMap(map);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("permissions_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "feature_permissions" }, () => load())
+      .on("postgres_changes", { event: "*", schema: "public", table: "employees" }, () => load())
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
+
+  async function updateLevel(employeeId, feature, level) {
+    setBusyKey(`${employeeId}_${feature}`);
+    const { error } = await sb.from("feature_permissions").upsert(
+      { employee_id: employeeId, feature, level },
+      { onConflict: "employee_id,feature" }
+    );
+    if (error) { toast("更新失敗：" + error.message); setBusyKey(""); return; }
+    await logAudit(me.name, "update_feature_permission", `${employeeId}:${feature}`, level);
+    setBusyKey("");
+  }
+
+  async function applyTierDefaults(employeeId, employeeName) {
+    setBusyKey(`reset_${employeeId}`);
+    const { error } = await sb.rpc("reset_to_tier_defaults", { p_employee_id: employeeId });
+    if (error) { toast("套用失敗：" + error.message); setBusyKey(""); return; }
+    await logAudit(me.name, "reset_permissions_to_tier", employeeId, employeeName);
+    toast(`已套用「${TIER_LABEL[rows.find((r) => r.id === employeeId)?.access_tier]}」預設權限`);
+    setBusyKey("");
+  }
+
+  const FEATURES = ["dashboard", "schedule", "daily_report", "requests", "payroll", "staff", "backup", "permission_admin"];
+
+  return (
+    <div>
+      <p className="ph-eyebrow" style={{ margin: 0 }}>PERMISSIONS</p>
+      <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>權限管理</h2>
+      <p style={{ color: T.sub, fontSize: 12.5, margin: "0 0 16px" }}>
+        逐人逐功能設定存取深度；「套用層級預設」會依該員工目前的權限層級重新套用預設值（會覆蓋這一列目前的設定）。
+      </p>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+        <div className="ph-card" style={{ overflowX: "auto", padding: 0 }}>
+          <table className="ph-table">
+            <thead>
+              <tr>
+                <th style={{ position: "sticky", left: 0, background: "#FCFAF6", zIndex: 1, minWidth: 160 }}>員工</th>
+                <th>層級</th>
+                {FEATURES.map((f) => <th key={f}>{FEATURE_LABEL[f]}</th>)}
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} style={!r.active ? { opacity: 0.5 } : undefined}>
+                  <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 160 }}>
+                    {r.name}
+                    <div style={{ fontSize: 11, color: T.sub }}>{storeById[r.store_id]?.name}{!r.active ? "・停用" : ""}</div>
+                  </td>
+                  <td style={{ fontSize: 12, color: T.sub, whiteSpace: "nowrap" }}>{TIER_LABEL[r.access_tier]}</td>
+                  {FEATURES.map((f) => {
+                    const key = `${r.id}_${f}`;
+                    const level = permMap[key] || FEATURE_LEVEL_OPTIONS[f][0];
+                    return (
+                      <td key={f}>
+                        <select
+                          className="ph-input"
+                          style={{ fontSize: 12, padding: "4px 6px", minWidth: 110 }}
+                          value={level}
+                          disabled={busyKey === key}
+                          onChange={(e) => updateLevel(r.id, f, e.target.value)}
+                        >
+                          {FEATURE_LEVEL_OPTIONS[f].map((lv) => <option key={lv} value={lv}>{FEATURE_LEVEL_LABEL[f][lv]}</option>)}
+                        </select>
+                      </td>
+                    );
+                  })}
+                  <td>
+                    <button className="ph-btn small" disabled={busyKey === `reset_${r.id}`} onClick={() => applyTierDefaults(r.id, r.name)}>
+                      {busyKey === `reset_${r.id}` ? "套用中…" : "套用層級預設"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {rows.length === 0 && <tr><td colSpan={FEATURES.length + 3} style={{ color: T.sub, textAlign: "center" }}>尚無員工資料</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -2088,7 +2399,7 @@ function TodoRow({ label, count, unit = "件", onClick }) {
 const REPORT_STATUS_TONE = { draft: "sub", submitted: "yellow", signed: "handoff", hr_received: "green", missing: "sub" };
 
 function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
-  const canReview = me.role === "manager" || me.role === "hr";
+  const canReview = me.access_tier !== "staff";
   const today = todayStr();
 
   // ---- 一般夥伴：簡化版（自己的班表／申請） ----
@@ -2116,22 +2427,22 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
   const [mobileDayIdx, setMobileDayIdx] = useState(() => Math.max(0, weekDates.indexOf(today)));
 
   const load = useCallback(async () => {
-    if (!canReview || !allStoreIds.length) return;
+    if (!canReview || !scopeStoreIds.length) return;
     setLoading(true);
-    const [empRes, shiftRes, reqRes, repRes, payRes] = await Promise.all([
-      sb.from("employees").select("id,name,position,store_id,employment_type,active").in("store_id", allStoreIds).eq("active", true).order("name"),
+    const [empResList, shiftRes, reqRes, repRes, payRes] = await Promise.all([
+      Promise.all(scopeStoreIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid }).then((r) => ({ ...r, data: (r.data || []).map((row) => ({ ...row, store_id: sid })) })))),
       sb.from("shifts").select("*").in("store_id", allStoreIds).gte("work_date", monthRange[0]).lte("work_date", monthRange[1]),
       sb.from("requests").select("id,type,store_id").in("store_id", allStoreIds).eq("status", "pending"),
       sb.from("daily_reports").select("*").in("store_id", allStoreIds).eq("report_date", today),
       sb.from("payroll_runs").select("*").in("store_id", allStoreIds).eq("year_month", ym),
     ]);
-    setRoster(empRes.data || []);
+    setRoster(empResList.flatMap((r) => r.data || []).filter((r) => r.active));
     setMonthShifts(shiftRes.data || []);
     setPendingReqs(reqRes.data || []);
     setTodayReports(repRes.data || []);
     setPayrollRuns(payRes.data || []);
     setLoading(false);
-  }, [canReview, allStoreIds, monthRange, today, ym]);
+  }, [canReview, allStoreIds, scopeStoreIds, monthRange, today, ym]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -2179,7 +2490,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
       <div>
         <p className="ph-eyebrow">{todayLabel}</p>
         <h2 className="ph-serif" style={{ marginTop: 4 }}>嗨，{me.name}</h2>
-        <p style={{ color: T.sub, marginTop: -8 }}>{ROLE_LABEL[me.role]}・{storeById[storeId]?.name || ""}</p>
+        <p style={{ color: T.sub, marginTop: -8 }}>{TIER_LABEL[me.access_tier]}・{storeById[storeId]?.name || ""}</p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16, marginTop: 20 }}>
           <div className="ph-stat-card accent-brick" onClick={() => setPage("schedule")}>
             <p className="ph-eyebrow" style={{ marginBottom: 8 }}>今日排班</p>
@@ -2295,8 +2606,8 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
         )}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: me.role === "hr" ? "2fr 1fr" : "1fr", gap: 16, marginTop: 22 }}>
-        {me.role === "hr" && (
+      <div style={{ display: "grid", gridTemplateColumns: me.isGlobalScope ? "2fr 1fr" : "1fr", gap: 16, marginTop: 22 }}>
+        {me.isGlobalScope && (
           <div className="ph-card" style={{ padding: 18 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
@@ -2357,7 +2668,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
 
 const PAGE_TITLE = {
   dashboard: "營運總覽", schedule: "門市排班", daily_report: "每日回報", requests: "申請審核",
-  payroll: "薪資試算", staff: "人員資料", backup: "備份",
+  payroll: "薪資試算", staff: "人員資料", backup: "備份", permissions: "權限管理",
 };
 
 function AppShell({ session }) {
@@ -2386,20 +2697,26 @@ function AppShell({ session }) {
         sb.from("employees").select("*").eq("auth_user_id", session.user.id).maybeSingle(),
         sb.from("stores").select("*").eq("active", true).order("sort_order"),
       ]);
-      setMe(meRes.data || null);
+      let meRow = meRes.data || null;
+      if (meRow) {
+        const permRes = await sb.from("feature_permissions").select("feature,level").eq("employee_id", meRow.id);
+        const permissions = Object.fromEntries((permRes.data || []).map((p) => [p.feature, p.level]));
+        meRow = { ...meRow, permissions, isGlobalScope: meRow.access_tier === "super_admin" || meRow.access_tier === "ops_admin" };
+      }
+      setMe(meRow);
       setStores(storesRes.data || []);
-      if (meRes.data) setStoreId(meRes.data.store_id || storesRes.data?.[0]?.id || null);
+      if (meRow) setStoreId(meRow.store_id || storesRes.data?.[0]?.id || null);
     })();
   }, [session.user.id]);
 
-  const canReview = me?.role === "manager" || me?.role === "hr";
+  const canReview = !!me && me.permissions?.requests && me.permissions.requests !== "submit";
   const scopeStoreIds = useMemo(() => {
     if (!me) return [];
-    if (me.role === "hr") return scope === "all" ? stores.map((s) => s.id) : [scope];
+    if (me.isGlobalScope) return scope === "all" ? stores.map((s) => s.id) : [scope];
     return storeId ? [storeId] : [];
   }, [me, scope, stores, storeId]);
-  // 需要單一門市才能寫入的頁面（排班/每日回報/薪資/人員）用這個：hr 選「全部門市」時為 null，要求先選定一間店
-  const activeStoreId = me?.role === "hr" ? (scope === "all" ? null : scope) : storeId;
+  // 需要單一門市才能寫入的頁面（排班/每日回報/薪資/人員）用這個：跨店範圍的人選「全部門市」時為 null，要求先選定一間店
+  const activeStoreId = me?.isGlobalScope ? (scope === "all" ? null : scope) : storeId;
 
   const loadPendingCount = useCallback(() => {
     if (!canReview || !scopeStoreIds.length) { setPendingCount(0); return; }
@@ -2423,13 +2740,16 @@ function AppShell({ session }) {
     </div>
   );
 
+  const perm = me.permissions || {};
   const navs = [
-    ["dashboard", "營運總覽", "dashboard"],
+    ...(perm.dashboard !== "none" ? [["dashboard", "營運總覽", "dashboard"]] : []),
     ["schedule", "門市排班", "schedule"],
-    ...(canReview ? [["daily_report", "每日回報", "daily_report"]] : []),
+    ...(perm.daily_report !== "none" ? [["daily_report", "每日回報", "daily_report"]] : []),
     ["requests", canReview ? "申請審核" : "請假／加班", "requests"],
-    ...(canReview ? [["payroll", "薪資試算", "payroll"], ["staff", "人員資料", "staff"]] : []),
-    ...(me.role === "hr" ? [["backup", "備份", "backup"]] : []),
+    ...(perm.payroll && perm.payroll !== "self" ? [["payroll", "薪資試算", "payroll"]] : []),
+    ["staff", perm.staff && perm.staff !== "self" ? "人員資料" : "我的資料", "staff"],
+    ...(perm.backup && perm.backup !== "none" ? [["backup", "備份", "backup"]] : []),
+    ...(perm.permission_admin === "manage" ? [["permissions", "權限管理", "permissions"]] : []),
   ];
 
   return (
@@ -2453,7 +2773,7 @@ function AppShell({ session }) {
           <div className="ph-avatar">{me.name.slice(0, 1)}</div>
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{me.name}</div>
-            <div style={{ fontSize: 11.5, color: T.sidebarSub }}>{ROLE_LABEL[me.role]}</div>
+            <div style={{ fontSize: 11.5, color: T.sidebarSub }}>{TIER_LABEL[me.access_tier]}</div>
           </div>
           <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => sb.auth.signOut()}>登出</button>
         </div>
@@ -2467,8 +2787,8 @@ function AppShell({ session }) {
             <h1 className="ph-serif" style={{ fontSize: 19, margin: 0 }}>{PAGE_TITLE[page]}</h1>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <span className="ph-pill">{ROLE_LABEL[me.role]}</span>
-            {me.role === "hr" ? (
+            <span className="ph-pill">{TIER_LABEL[me.access_tier]}</span>
+            {me.isGlobalScope ? (
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.sub }}>
                 處理門市
                 <select className="ph-input" style={{ width: 150 }} value={scope} onChange={(e) => setScope(e.target.value)}>
@@ -2490,12 +2810,17 @@ function AppShell({ session }) {
         <main className="ph-main-pad" style={{ flex: 1, padding: "24px 40px", minWidth: 0 }}>
           <div style={{ maxWidth: 1460, margin: "0 auto" }}>
             {page === "dashboard" && <Dashboard me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setPage={setPage} />}
-            {page === "schedule" && <SchedulePage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />}
+            {page === "schedule" && (perm.schedule === "self"
+              ? <MySchedulePage me={me} />
+              : <SchedulePage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />)}
             {page === "requests" && <RequestsPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setScope={setScope} toast={toast} />}
-            {page === "daily_report" && canReview && <DailyReportPage me={me} stores={stores} storeId={storeId} scopeStoreIds={scopeStoreIds} toast={toast} />}
-            {page === "payroll" && canReview && <PayrollPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />}
-            {page === "staff" && canReview && <StaffPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />}
-            {page === "backup" && me.role === "hr" && <BackupPage me={me} toast={toast} />}
+            {page === "daily_report" && perm.daily_report !== "none" && <DailyReportPage me={me} stores={stores} storeId={storeId} scopeStoreIds={scopeStoreIds} toast={toast} />}
+            {page === "payroll" && perm.payroll && perm.payroll !== "self" && <PayrollPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />}
+            {page === "staff" && (perm.staff && perm.staff !== "self"
+              ? <StaffPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />
+              : <MyProfilePage me={me} stores={stores} />)}
+            {page === "backup" && perm.backup && perm.backup !== "none" && <BackupPage me={me} toast={toast} />}
+            {page === "permissions" && perm.permission_admin === "manage" && <PermissionsPage me={me} stores={stores} toast={toast} />}
           </div>
         </main>
       </div>
