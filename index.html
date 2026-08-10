@@ -1151,13 +1151,18 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
   }
 
   async function uploadFile(file) {
-    if (!report?.id) { toast("請先送出日總表後再上傳附件"); return; }
     if (file.size > 10 * 1024 * 1024) { toast("單檔上限 10MB"); return; }
-    const path = `${report.id}/${Date.now()}_${file.name}`;
+    let reportId = report?.id;
+    if (!reportId) {
+      const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "draft" }).select().single();
+      if (error) { toast("建立日總表失敗：" + error.message); return; }
+      reportId = data.id;
+    }
+    const path = `${reportId}/${Date.now()}_${file.name}`;
     const { error: upErr } = await sb.storage.from("daily-report-attachments").upload(path, file);
     if (upErr) { toast("上傳失敗：" + upErr.message); return; }
     const { error } = await sb.from("daily_report_attachments").insert({
-      daily_report_id: report.id, store_id: storeId, storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "application/octet-stream", uploaded_by: me.id,
+      daily_report_id: reportId, store_id: storeId, storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "application/octet-stream", uploaded_by: me.id,
     });
     if (error) { toast("附件登錄失敗：" + error.message); return; }
     load();
@@ -1269,8 +1274,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
           <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
             <strong style={{ fontSize: 13 }}>相關附件</strong>
             <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>漏打卡、請假或加班須上傳相關補單、加班單或證明；支援 PDF 與圖片，單檔上限 10MB。</p>
-            {!report?.id ? (
-              <p style={{ color: T.sub, fontSize: 12.5, background: T.bg, padding: "8px 12px", borderRadius: 6 }}>請先儲存並送出電子日總表，再上傳當日附件。</p>
+            {!report?.id && !canWrite ? (
+              <p style={{ color: T.sub, fontSize: 12.5, background: T.bg, padding: "8px 12px", borderRadius: 6 }}>目前尚無日總表資料。</p>
             ) : (
               <>
                 {attachments.length === 0 && <p style={{ color: T.sub, fontSize: 12.5 }}>{hasAnomaly ? "目前沒有附件，簽核前必須上傳" : "目前沒有附件"}</p>}
