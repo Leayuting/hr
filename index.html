@@ -1890,6 +1890,12 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
 }
 
 const POSITION_OPTIONS = ["負責人", "股東", "營運", "店長", "儲備幹部", "烘豆師", "咖啡師", "甜點師", "甜點助理", "內場夥伴", "外場夥伴", "後勤人員", "人資／採購", "財務／美編"];
+const HR_POSITIONS = ["負責人", "股東", "營運", "人資／採購", "財務／美編"];
+function roleForPosition(position) {
+  if (position === "店長") return "manager";
+  if (HR_POSITIONS.includes(position)) return "hr";
+  return "staff";
+}
 
 function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const isHr = me.role === "hr";
@@ -1898,6 +1904,13 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const [position, setPosition] = useState(editing.position || "");
   const [employmentType, setEmploymentType] = useState(editing.employment_type || "full_time");
   const [role, setRole] = useState(editing.role || "staff");
+  const [roleTouched, setRoleTouched] = useState(false);
+  const [showRoleAdvanced, setShowRoleAdvanced] = useState(() => !!editing.role && editing.role !== roleForPosition(editing.position || ""));
+
+  function handlePositionChange(p) {
+    setPosition(p);
+    if (!roleTouched) setRole(roleForPosition(p));
+  }
   const [baseSalary, setBaseSalary] = useState(editing.base_salary ?? 0);
   const [hourlyRate, setHourlyRate] = useState(editing.hourly_rate ?? 0);
   const [bonus, setBonus] = useState(editing.bonus ?? 0);
@@ -1957,7 +1970,7 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
         </select>
       </Field>
       <Field label="職務">
-        <select className="ph-input" value={position} onChange={(e) => setPosition(e.target.value)}>
+        <select className="ph-input" value={position} onChange={(e) => handlePositionChange(e.target.value)}>
           <option value="">請選擇職務</option>
           {position && !POSITION_OPTIONS.includes(position) && <option value={position}>{position}（原資料）</option>}
           {POSITION_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -1969,11 +1982,19 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
           <option value="part_time">兼職（時薪）</option>
         </select>
       </Field>
-      <Field label={"角色" + (isHr ? "" : "（僅人資可調整）")}>
-        <select className="ph-input" value={role} disabled={!isHr} onChange={(e) => setRole(e.target.value)}>
-          <option value="staff">夥伴</option><option value="manager">店長</option><option value="hr">營運／人資</option>
-        </select>
-      </Field>
+      {isHr && (
+        showRoleAdvanced ? (
+          <Field label="系統權限（依職務自動設定，如需手動覆寫可在此調整）">
+            <select className="ph-input" value={role} onChange={(e) => { setRole(e.target.value); setRoleTouched(true); }}>
+              <option value="staff">夥伴</option><option value="manager">店長</option><option value="hr">營運／人資</option>
+            </select>
+          </Field>
+        ) : (
+          <button type="button" className="ph-btn small" style={{ marginBottom: 14, border: "none", background: "none", color: T.sub, padding: 0 }} onClick={() => setShowRoleAdvanced(true)}>
+            進階：手動調整系統權限
+          </button>
+        )
+      )}
       <div style={{ display: "flex", gap: 8 }}>
         <Field label={"本薪（全職）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={baseSalary} onChange={(e) => setBaseSalary(e.target.value)} /></Field>
         <Field label={"時薪（兼職）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} /></Field>
