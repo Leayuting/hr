@@ -1892,6 +1892,8 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
   );
 }
 
+const POSITION_OPTIONS = ["負責人", "股東", "店長", "營運", "烘豆師", "內場夥伴", "人資／採購", "財務／美編"];
+
 function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const isHr = me.role === "hr";
   const [name, setName] = useState(editing.name || "");
@@ -1957,7 +1959,13 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
           {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
       </Field>
-      <Field label="職務"><input className="ph-input" value={position} onChange={(e) => setPosition(e.target.value)} /></Field>
+      <Field label="職務">
+        <select className="ph-input" value={position} onChange={(e) => setPosition(e.target.value)}>
+          <option value="">請選擇職務</option>
+          {position && !POSITION_OPTIONS.includes(position) && <option value={position}>{position}（原資料）</option>}
+          {POSITION_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+      </Field>
       <Field label="計薪方式">
         <select className="ph-input" value={employmentType} onChange={(e) => setEmploymentType(e.target.value)}>
           <option value="full_time">全職（月薪）</option>
