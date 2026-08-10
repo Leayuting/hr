@@ -119,6 +119,26 @@ function shiftHours(startTime, endTime) {
   if (mins < 0) mins += 24 * 60; // 跨半夜班次（例如 22:00–02:00）
   return mins / 60;
 }
+// 加班費依勞基法第24條分級計算，hourlyBase 為平日每小時工資額
+function overtimePayForRequest(hourlyBase, hours, overtimeType) {
+  const h = Number(hours) || 0;
+  if (h <= 0) return 0;
+  if (overtimeType === "rest_day") {
+    // 休息日加班：前2小時1又1/3、再2小時起至第8小時1又2/3、超過8小時2又2/3
+    const t1 = Math.min(h, 2);
+    const t2 = Math.min(Math.max(h - 2, 0), 6);
+    const t3 = Math.max(h - 8, 0);
+    return hourlyBase * ((4 / 3) * t1 + (5 / 3) * t2 + (8 / 3) * t3);
+  }
+  if (overtimeType === "holiday" || overtimeType === "statutory_rest") {
+    // 國定假日／特別休假／例假出勤：工資照給外再加發，此處計算「加發」部分
+    return hourlyBase * 1 * h;
+  }
+  // 平日加班（預設）：前2小時1又1/3、再延長1又2/3
+  const t1 = Math.min(h, 2);
+  const t2 = Math.max(h - 2, 0);
+  return hourlyBase * ((4 / 3) * t1 + (5 / 3) * t2);
+}
 async function logAudit(actorLabel, action, target, detail = "") {
   try {
     await sb.from("audit_logs").insert({ actor_label: actorLabel, action, target, detail });
@@ -796,6 +816,9 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
                 <div style={{ minWidth: 90 }}>
                   <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>申請類型</div>
                   <span className="ph-badge" style={{ background: pill.bg, color: pill.fg, fontWeight: 600 }}>{REQ_TYPE_LABEL[r.type]}</span>
+                  {r.type === "overtime" && r.overtime_type && (
+                    <div style={{ fontSize: 11, color: T.sub, marginTop: 4 }}>{OVERTIME_TYPE_LABEL[r.overtime_type]}</div>
+                  )}
                 </div>
                 <div style={{ minWidth: 110 }}>
                   <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>日期</div>
@@ -826,8 +849,16 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
   );
 }
 
+const OVERTIME_TYPE_LABEL = {
+  workday: "平日加班",
+  rest_day: "休息日加班",
+  holiday: "國定假日／特別休假出勤",
+  statutory_rest: "例假出勤（天災／事變／突發事件）",
+};
+
 function RequestFormModal({ me, storeId, onClose, onSaved }) {
   const [type, setType] = useState("annual_leave");
+  const [overtimeType, setOvertimeType] = useState("workday");
   const [date, setDate] = useState(todayStr());
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("18:00");
@@ -846,6 +877,7 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
     setBusy(true);
     const { error } = await sb.from("requests").insert({
       employee_id: me.id, store_id: storeId, type, start_at: startAt, end_at: endAt, hours, reason: reason.trim(),
+      overtime_type: type === "overtime" ? overtimeType : null,
     });
     setBusy(false);
     if (error) { setErr(error.message.includes("row-level security") ? "此月份薪資已鎖定，無法送出" : error.message); return; }
@@ -862,6 +894,13 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
           <option value="overtime">加班</option>
         </select>
       </Field>
+      {type === "overtime" && (
+        <Field label="加班類型（依勞基法計算加班費）">
+          <select className="ph-input" value={overtimeType} onChange={(e) => setOvertimeType(e.target.value)}>
+            {Object.entries(OVERTIME_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+        </Field>
+      )}
       <Field label="日期"><input className="ph-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
       <div style={{ display: "flex", gap: 8 }}>
         <Field label="開始時間"><input className="ph-input" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} /></Field>
@@ -1505,11 +1544,13 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
       const empShifts = shifts.filter((s) => s.employee_id === emp.id && !s.is_day_off && s.start_time && s.end_time);
       const workedHours = empShifts.reduce((sum, s) => sum + shiftHours(s.start_time, s.end_time), 0);
       const empRequests = requests.filter((r) => r.employee_id === emp.id);
-      const overtimeHours = empRequests.filter((r) => r.type === "overtime").reduce((s, r) => s + Number(r.hours), 0);
+      const overtimeRequests = empRequests.filter((r) => r.type === "overtime");
+      const overtimeHours = overtimeRequests.reduce((s, r) => s + Number(r.hours), 0);
       const personalLeaveHours = empRequests.filter((r) => r.type === "personal_leave").reduce((s, r) => s + Number(r.hours), 0);
       const isFullTime = emp.employment_type === "full_time";
       const hourlyBase = isFullTime ? Number(emp.base_salary) / 240 : Number(emp.hourly_rate);
-      const overtimePay = overtimeHours * hourlyBase * 1.34;
+      // 加班費逐筆依勞基法分級計算（每筆加班申請以送出當天為一個計算單位，各自從第1小時起算級距）
+      const overtimePay = overtimeRequests.reduce((sum, r) => sum + overtimePayForRequest(hourlyBase, r.hours, r.overtime_type || "workday"), 0);
       const attendanceDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0; // 遲到／請假／曠職扣款
       const basePay = isFullTime ? Number(emp.base_salary) : workedHours * Number(emp.hourly_rate);
       const mealAllowance = Number(emp.meal_allowance) || 0;
