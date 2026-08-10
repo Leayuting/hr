@@ -1235,22 +1235,39 @@ function PayslipSection({ title }) {
 }
 
 function AdjustmentsModal({ me, emp, storeId, ym, items, locked, onClose, toast }) {
-  const [label, setLabel] = useState("");
-  const [amount, setAmount] = useState("");
-  const [taxable, setTaxable] = useState(true);
+  const blankRow = () => ({ key: Math.random().toString(36).slice(2), label: "", amount: "", taxable: true });
+  const [drafts, setDrafts] = useState([blankRow()]);
   const [busy, setBusy] = useState(false);
 
-  async function addItem() {
-    if (!label.trim()) { toast("請輸入項目名稱"); return; }
-    if (!amount || Number.isNaN(Number(amount)) || Number(amount) === 0) { toast("請輸入金額"); return; }
+  function updateDraft(key, patch) {
+    setDrafts((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  }
+
+  function addRow() {
+    setDrafts((rows) => [...rows, blankRow()]);
+  }
+
+  function removeRow(key) {
+    setDrafts((rows) => (rows.length > 1 ? rows.filter((r) => r.key !== key) : rows));
+  }
+
+  async function saveAll() {
+    const filled = drafts.filter((r) => r.label.trim() || r.amount !== "");
+    if (filled.length === 0) { toast("請至少填寫一列項目"); return; }
+    for (const r of filled) {
+      if (!r.label.trim()) { toast("請輸入項目名稱"); return; }
+      if (r.amount === "" || Number.isNaN(Number(r.amount)) || Number(r.amount) === 0) { toast("請輸入金額"); return; }
+    }
     setBusy(true);
     try {
-      const { error } = await sb.from("payroll_adjustments").insert({
-        employee_id: emp.id, store_id: storeId, year_month: ym, label: label.trim(), amount: Number(amount), taxable,
-      });
+      const rows = filled.map((r) => ({
+        employee_id: emp.id, store_id: storeId, year_month: ym, label: r.label.trim(), amount: Number(r.amount), taxable: r.taxable,
+      }));
+      const { error } = await sb.from("payroll_adjustments").insert(rows);
       if (error) { toast("新增失敗：" + (error.message.includes("row-level security") ? "此月份薪資已鎖定" : error.message)); return; }
-      await logAudit(me.name, "add_payroll_adjustment", `${emp.id}:${ym}`, `${label.trim()} ${amount}`);
-      setLabel(""); setAmount(""); setTaxable(true);
+      await logAudit(me.name, "add_payroll_adjustment", `${emp.id}:${ym}`, rows.map((r) => `${r.label} ${r.amount}`).join("、"));
+      toast(`已新增 ${rows.length} 筆調整項`);
+      setDrafts([blankRow()]);
     } finally {
       setBusy(false);
     }
@@ -1284,16 +1301,26 @@ function AdjustmentsModal({ me, emp, storeId, ym, items, locked, onClose, toast 
       )}
       {!locked ? (
         <>
-          <Field label="項目名稱"><input className="ph-input" placeholder="例：端午禮金" value={label} onChange={(e) => setLabel(e.target.value)} /></Field>
-          <Field label="金額（負數可作為單月扣款）"><input className="ph-input" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
-          <Field label="">
-            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
-              <input type="checkbox" checked={taxable} onChange={(e) => setTaxable(e.target.checked)} /> 計入應稅所得
-            </label>
-          </Field>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            <button className="ph-btn" onClick={onClose}>關閉</button>
-            <button className="ph-btn primary" disabled={busy} onClick={addItem}>{busy ? "新增中…" : "＋ 新增項目"}</button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+            {drafts.map((r, i) => (
+              <div key={r.key} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: T.sub, width: 46, flexShrink: 0 }}>項目{i + 1}</span>
+                <input className="ph-input" style={{ flex: 2 }} placeholder="例：端午禮金" value={r.label} onChange={(e) => updateDraft(r.key, { label: e.target.value })} />
+                <input className="ph-input" style={{ flex: 1 }} type="number" placeholder="金額" value={r.amount} onChange={(e) => updateDraft(r.key, { amount: e.target.value })} />
+                <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 11.5, color: T.sub, flexShrink: 0, whiteSpace: "nowrap" }}>
+                  <input type="checkbox" checked={r.taxable} onChange={(e) => updateDraft(r.key, { taxable: e.target.checked })} /> 應稅
+                </label>
+                <button className="ph-btn small danger" disabled={drafts.length === 1} onClick={() => removeRow(r.key)} style={{ flexShrink: 0, opacity: drafts.length === 1 ? 0.35 : 1 }}>移除</button>
+              </div>
+            ))}
+          </div>
+          <p style={{ color: T.sub, fontSize: 12, marginTop: -2, marginBottom: 12 }}>金額可填負數作為單月扣款；未填寫的空白列儲存時會自動略過。</p>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+            <button className="ph-btn" onClick={addRow}>＋ 再加一列</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="ph-btn" onClick={onClose}>關閉</button>
+              <button className="ph-btn primary" disabled={busy} onClick={saveAll}>{busy ? "儲存中…" : "全部儲存"}</button>
+            </div>
           </div>
         </>
       ) : (
