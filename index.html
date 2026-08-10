@@ -125,6 +125,18 @@ async function logAudit(actorLabel, action, target, detail = "") {
   } catch (e) { console.warn("audit log failed", e); }
 }
 
+const SHIFT_TEMPLATES = {
+  "中山店": [
+    { group: "吧台外場", label: "早班", start: "08:00", end: "17:00", staffing: "平假日 2 人" },
+    { group: "吧台外場", label: "中班1", start: "09:00", end: "18:00", staffing: "" },
+    { group: "吧台外場", label: "中班2", start: "09:30", end: "18:30", staffing: "平假日 2 人" },
+    { group: "吧台外場", label: "晚班", start: "10:30", end: "19:30", staffing: "平日 2 人／假日 3 人" },
+    { group: "廚房甜點", label: "廚早", start: "08:30", end: "17:30", staffing: "" },
+    { group: "廚房甜點", label: "廚中", start: "09:00", end: "18:00", staffing: "" },
+    { group: "廚房甜點", label: "廚晚", start: "10:30", end: "19:30", staffing: "" },
+  ],
+};
+
 /* ────────────────────────────────────────────
    共用 UI 元件
 ──────────────────────────────────────────── */
@@ -529,7 +541,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
                       return (
                         <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
                           style={mine ? { background: T.brownSoft } : undefined}
-                          onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, date: d, existing: s })}>
+                          onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, storeName: storeById[r.store_id]?.name, date: d, existing: s })}>
                           {s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}
                         </td>
                       );
@@ -567,7 +579,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
               const s = shiftMap[`${r.id}_${d}`];
               return (
                 <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: canEdit ? "pointer" : "default" }}
-                  onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, date: d, existing: s })}>
+                  onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, storeName: storeById[r.store_id]?.name, date: d, existing: s })}>
                   <RosterCell r={r} index={idx} showStore storeName={storeById[r.store_id]?.name} />
                   <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
                 </div>
@@ -601,6 +613,23 @@ function ShiftEditModal({ editing, onClose, onSave }) {
   const [endTime, setEndTime] = useState(ex?.end_time?.slice(0, 5) || "19:00");
   const [note, setNote] = useState(ex?.note || "");
   const [busy, setBusy] = useState(false);
+  const templates = SHIFT_TEMPLATES[editing.storeName] || [];
+  const templateGroups = useMemo(() => {
+    const groups = [];
+    templates.forEach((t) => {
+      let g = groups.find((g) => g.name === t.group);
+      if (!g) { g = { name: t.group, items: [] }; groups.push(g); }
+      g.items.push(t);
+    });
+    return groups;
+  }, [templates]);
+
+  function applyTemplate(t) {
+    setIsDayOff(false);
+    setStartTime(t.start);
+    setEndTime(t.end);
+    setNote(t.label);
+  }
 
   async function handleSave() {
     setBusy(true);
@@ -613,6 +642,23 @@ function ShiftEditModal({ editing, onClose, onSave }) {
 
   return (
     <Modal title={`${editing.employeeName}・${editing.date}`} onClose={onClose}>
+      {templateGroups.length > 0 && (
+        <Field label="快速套用班別">
+          {templateGroups.map((g) => (
+            <div key={g.name} style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 11.5, color: T.sub, marginBottom: 4 }}>{g.name}</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {g.items.map((t) => (
+                  <button key={t.label} type="button" className="ph-btn small" onClick={() => applyTemplate(t)}
+                    title={t.staffing ? `${t.start}–${t.end}（${t.staffing}）` : `${t.start}–${t.end}`}>
+                    {t.label} {t.start}–{t.end}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </Field>
+      )}
       <Field label="班次">
         <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <input type="checkbox" checked={isDayOff} onChange={(e) => setIsDayOff(e.target.checked)} /> 休假
