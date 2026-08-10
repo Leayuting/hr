@@ -2367,13 +2367,21 @@ function AppShell({ session }) {
   const [me, setMe] = useState(undefined); // undefined=載入中, null=查無員工資料
   const [stores, setStores] = useState([]);
   const [storeId, setStoreId] = useState(null);
-  const [scope, setScope] = useState("all"); // 全站共用門市篩選：'all' 或某個 store id，僅 hr 可切換
+  const [scope, setScope] = useState(() => new URLSearchParams(location.search).get("scope") || "all"); // 全站共用門市篩選：'all' 或某個 store id，僅 hr 可切換
   const [page, setPage] = useState(() => new URLSearchParams(location.search).get("page") || "dashboard");
   const [toastMsg, setToastMsg] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
 
   const toast = useCallback((msg) => { setToastMsg(msg); setTimeout(() => setToastMsg(""), 3200); }, []);
+
+  // 重新整理頁面須停留在原本瀏覽的頁面／門市篩選，不可跳回預設首頁
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    params.set("page", page);
+    params.set("scope", scope);
+    history.replaceState(null, "", `${location.pathname}?${params.toString()}${location.hash}`);
+  }, [page, scope]);
 
   useEffect(() => {
     (async () => {
