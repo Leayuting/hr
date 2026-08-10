@@ -1860,12 +1860,20 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
                 </div>
                 <span className="ph-pill">{storeById[r.store_id]?.name}</span>
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, paddingTop: 12, borderTop: `1px solid ${T.line}`, marginBottom: 14 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 10, columnGap: 8, fontSize: 12.5, paddingTop: 12, borderTop: `1px solid ${T.line}`, marginBottom: 14 }}>
+                <div>
+                  <div style={{ color: T.sub, marginBottom: 4 }}>聘僱類型</div>
+                  <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "正職" : "兼職"}</div>
+                </div>
                 <div>
                   <div style={{ color: T.sub, marginBottom: 4 }}>計薪方式</div>
                   <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "月薪制" : "時薪制"}</div>
                 </div>
-                <div style={{ textAlign: "right" }}>
+                <div>
+                  <div style={{ color: T.sub, marginBottom: 4 }}>到職日</div>
+                  <div style={{ fontWeight: 600 }}>{r.hire_date || "—"}</div>
+                </div>
+                <div>
                   <div style={{ color: T.sub, marginBottom: 4 }}>狀態</div>
                   <div style={{ fontWeight: 600, color: r.active ? T.green : T.sub }}>{r.active ? "在職" : "停用"}</div>
                 </div>
