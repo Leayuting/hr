@@ -1853,17 +1853,14 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <RosterAvatar name={r.name} index={idx} />
-                  <div>
-                    <div style={{ fontWeight: 500 }}>{r.name}</div>
-                    <div style={{ fontSize: 11.5, color: T.sub }}>{r.position}</div>
-                  </div>
+                  <div style={{ fontWeight: 500 }}>{r.name}</div>
                 </div>
                 <span className="ph-pill">{storeById[r.store_id]?.name}</span>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 10, columnGap: 8, fontSize: 12.5, paddingTop: 12, borderTop: `1px solid ${T.line}`, marginBottom: 14 }}>
                 <div>
                   <div style={{ color: T.sub, marginBottom: 4 }}>聘僱類型</div>
-                  <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "正職" : "兼職"}</div>
+                  <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "正職" : "兼職"}{r.position ? `／${r.position}` : ""}</div>
                 </div>
                 <div>
                   <div style={{ color: T.sub, marginBottom: 4 }}>計薪方式</div>
