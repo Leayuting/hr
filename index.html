@@ -1254,10 +1254,23 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
       const isFullTime = emp.employment_type === "full_time";
       const hourlyBase = isFullTime ? Number(emp.base_salary) / 240 : Number(emp.hourly_rate);
       const overtimePay = overtimeHours * hourlyBase * 1.34;
-      const leaveDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0;
+      const attendanceDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0; // 遲到／請假／曠職扣款
       const basePay = isFullTime ? Number(emp.base_salary) : workedHours * Number(emp.hourly_rate);
-      const total = basePay + Number(emp.bonus) + overtimePay - leaveDeduction;
-      return { emp, workedHours, overtimeHours, personalLeaveHours, basePay, overtimePay, leaveDeduction, total };
+      const mealAllowance = Number(emp.meal_allowance) || 0;
+      const positionAllowance = Number(emp.position_allowance) || 0;
+      const fullAttendanceBonus = Number(emp.bonus) || 0;
+      const laborInsuranceFee = Number(emp.labor_insurance_fee) || 0;
+      const healthInsuranceFee = Number(emp.health_insurance_fee) || 0;
+      const incomeTax = Number(emp.income_tax) || 0;
+      const grossPay = basePay + mealAllowance + positionAllowance + overtimePay + fullAttendanceBonus;
+      const taxableIncome = grossPay - mealAllowance; // 伙食費屬免稅項目（現行每月上限 NT$3,000）
+      const totalDeduction = attendanceDeduction + laborInsuranceFee + healthInsuranceFee + incomeTax;
+      const total = grossPay - totalDeduction;
+      return {
+        emp, workedHours, overtimeHours, personalLeaveHours, basePay, mealAllowance, positionAllowance,
+        overtimePay, fullAttendanceBonus, attendanceDeduction, laborInsuranceFee, healthInsuranceFee, incomeTax,
+        grossPay, taxableIncome, totalDeduction, total,
+      };
     });
   }, [roster, shifts, requests]);
 
@@ -1292,12 +1305,17 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   }
 
   function exportCsv() {
-    const head = ["姓名", "類型", "本薪/工時薪資", "獎金", "加班費", "事假扣款", "應發合計"];
-    const lines = [head.join(",")].concat(rows.map((r) => [r.emp.name, r.emp.employment_type === "full_time" ? "全職" : "兼職", Math.round(r.basePay), Math.round(r.emp.bonus), Math.round(r.overtimePay), Math.round(r.leaveDeduction), Math.round(r.total)].join(",")));
+    const head = ["姓名", "到職日", "計薪方式", "基本薪資", "伙食費", "職務津貼", "加班費", "全勤獎金", "應發總額", "遲到/請假/曠職扣款", "勞保費", "健保費", "所得稅", "應稅所得", "應減總額", "實發金額"];
+    const lines = [head.join(",")].concat(rows.map((r) => [
+      r.emp.name, r.emp.hire_date || "", r.emp.employment_type === "full_time" ? "全職" : "兼職",
+      Math.round(r.basePay), Math.round(r.mealAllowance), Math.round(r.positionAllowance), Math.round(r.overtimePay), Math.round(r.fullAttendanceBonus), Math.round(r.grossPay),
+      Math.round(r.attendanceDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.taxableIncome), Math.round(r.totalDeduction),
+      Math.round(r.total),
+    ].join(",")));
     const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `PHASE_薪資試算_${ym}.csv`;
+    a.download = `PHASE_薪資明細_${ym}.csv`;
     a.click();
   }
 
@@ -1347,6 +1365,9 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
     );
   }
 
+  const days = monthDays(ym);
+  const periodLabel = `${ym}-01 ~ ${ym}-${pad2(days)}`;
+
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
@@ -1360,26 +1381,54 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
         )}
         {locked && <Badge tone="brown">{storeById[activeStoreId]?.name} 已鎖定</Badge>}
       </div>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 4 }}>
+        {storeById[activeStoreId]?.name}・{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月份薪資明細表　薪資計算區間：{periodLabel}
+      </p>
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 14 }}>
-        ※ 此頁為內部薪資試算，正式發薪前仍須人工複核；加班費／事假扣款皆為估算值。
+        ※ 此頁為內部薪資試算，正式發薪前仍須人工複核；加班費／遲到請假曠職扣款為系統估算值，勞健保費與所得稅為人資於「人員資料」設定的固定金額，實際金額仍以官方級距表與正式扣繳為準。
       </p>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div className="ph-card" style={{ overflowX: "auto" }}>
           <table className="ph-table">
-            <thead><tr><th>夥伴</th><th>類型</th><th>本薪/工資</th><th>獎金</th><th>加班</th><th>事假扣款</th><th>應發合計</th></tr></thead>
+            <thead>
+              <tr>
+                <th rowSpan={2} style={{ position: "sticky", left: 0, background: "#FCFAF6", zIndex: 1, minWidth: 140 }}>夥伴</th>
+                <th rowSpan={2} className="ph-hide-mobile">到職日</th>
+                <th rowSpan={2} className="ph-hide-mobile">計薪方式</th>
+                <th colSpan={3} style={{ textAlign: "center" }}>薪資結構</th>
+                <th colSpan={2} style={{ textAlign: "center" }}>薪資科目加項</th>
+                <th colSpan={4} style={{ textAlign: "center" }}>薪資科目扣項</th>
+                <th colSpan={4} style={{ textAlign: "center" }}>薪資總計</th>
+              </tr>
+              <tr>
+                <th>基本薪資</th><th>伙食費</th><th>職務津貼</th>
+                <th>加班費</th><th>全勤獎金</th>
+                <th>遲到/請假/曠職</th><th>勞保費</th><th>健保費</th><th>所得稅</th>
+                <th>應稅所得</th><th>應發總額</th><th>應減總額</th><th>實發金額</th>
+              </tr>
+            </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.emp.id}>
-                  <td>{r.emp.name}</td>
-                  <td>{r.emp.employment_type === "full_time" ? "全職" : "兼職"}</td>
-                  <td>NT$ {money(r.basePay)}</td>
-                  <td>NT$ {money(r.emp.bonus)}</td>
-                  <td>NT$ {money(r.overtimePay)}</td>
-                  <td>−NT$ {money(r.leaveDeduction)}</td>
+                  <td style={{ position: "sticky", left: 0, background: "#fff" }}>{r.emp.name}</td>
+                  <td className="ph-hide-mobile">{r.emp.hire_date || "—"}</td>
+                  <td className="ph-hide-mobile">{r.emp.employment_type === "full_time" ? "月薪" : "時薪"}</td>
+                  <td>{money(r.basePay)}</td>
+                  <td>{money(r.mealAllowance)}</td>
+                  <td>{money(r.positionAllowance)}</td>
+                  <td>{money(r.overtimePay)}</td>
+                  <td>{money(r.fullAttendanceBonus)}</td>
+                  <td>{money(r.attendanceDeduction)}</td>
+                  <td>{money(r.laborInsuranceFee)}</td>
+                  <td>{money(r.healthInsuranceFee)}</td>
+                  <td>{money(r.incomeTax)}</td>
+                  <td>{money(r.taxableIncome)}</td>
+                  <td>{money(r.grossPay)}</td>
+                  <td>{money(r.totalDeduction)}</td>
                   <td style={{ fontWeight: 600 }}>NT$ {money(r.total)}</td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={7} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={16} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
             </tbody>
           </table>
         </div>
@@ -1422,7 +1471,7 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div className="ph-card" style={{ overflowX: "auto" }}>
           <table className="ph-table">
-            <thead><tr><th>姓名</th>{scopeStoreIds.length > 1 && <th>門市</th>}<th>職務</th><th>類型</th><th>角色</th><th className="ph-hide-mobile">本薪/時薪</th><th className="ph-hide-mobile">獎金</th><th>在職</th><th>Email</th><th>操作</th></tr></thead>
+            <thead><tr><th>姓名</th>{scopeStoreIds.length > 1 && <th>門市</th>}<th>職務</th><th>類型</th><th>角色</th><th className="ph-hide-mobile">到職日</th><th className="ph-hide-mobile">本薪/時薪</th><th className="ph-hide-mobile">全勤獎金</th><th>在職</th><th>Email</th><th>操作</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id}>
@@ -1431,6 +1480,7 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
                   <td>{r.position}</td>
                   <td>{r.employment_type === "full_time" ? "全職" : "兼職"}</td>
                   <td>{ROLE_LABEL[r.role]}</td>
+                  <td className="ph-hide-mobile">{r.hire_date || "—"}</td>
                   <td className="ph-hide-mobile">{r.employment_type === "full_time" ? `NT$${money(r.base_salary)}` : `NT$${money(r.hourly_rate)}/hr`}</td>
                   <td className="ph-hide-mobile">NT$ {money(r.bonus)}</td>
                   <td>{r.active ? <Badge tone="green">在職</Badge> : <Badge tone="sub">停用</Badge>}</td>
@@ -1461,6 +1511,12 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const [baseSalary, setBaseSalary] = useState(editing.base_salary ?? 0);
   const [hourlyRate, setHourlyRate] = useState(editing.hourly_rate ?? 0);
   const [bonus, setBonus] = useState(editing.bonus ?? 0);
+  const [hireDate, setHireDate] = useState(editing.hire_date || "");
+  const [mealAllowance, setMealAllowance] = useState(editing.meal_allowance ?? 0);
+  const [positionAllowance, setPositionAllowance] = useState(editing.position_allowance ?? 0);
+  const [laborInsuranceFee, setLaborInsuranceFee] = useState(editing.labor_insurance_fee ?? 0);
+  const [healthInsuranceFee, setHealthInsuranceFee] = useState(editing.health_insurance_fee ?? 0);
+  const [incomeTax, setIncomeTax] = useState(editing.income_tax ?? 0);
   const [active, setActive] = useState(editing.active ?? true);
   const [email, setEmail] = useState(editing.email || "");
   const [err, setErr] = useState("");
@@ -1470,8 +1526,18 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
     if (!name.trim()) { setErr("請輸入姓名"); return; }
     if (!storeIdSel) { setErr("請選擇所屬門市"); return; }
     setErr(""); setBusy(true);
-    const payload = { name: name.trim(), position, employment_type: employmentType, active, store_id: storeIdSel };
-    if (isHr) { payload.role = role; payload.base_salary = Number(baseSalary) || 0; payload.hourly_rate = Number(hourlyRate) || 0; payload.bonus = Number(bonus) || 0; }
+    const payload = { name: name.trim(), position, employment_type: employmentType, active, store_id: storeIdSel, hire_date: hireDate || null };
+    if (isHr) {
+      payload.role = role;
+      payload.base_salary = Number(baseSalary) || 0;
+      payload.hourly_rate = Number(hourlyRate) || 0;
+      payload.bonus = Number(bonus) || 0;
+      payload.meal_allowance = Number(mealAllowance) || 0;
+      payload.position_allowance = Number(positionAllowance) || 0;
+      payload.labor_insurance_fee = Number(laborInsuranceFee) || 0;
+      payload.health_insurance_fee = Number(healthInsuranceFee) || 0;
+      payload.income_tax = Number(incomeTax) || 0;
+    }
     let error;
     if (editing.isNew) {
       ({ error } = await sb.from("employees").insert(payload));
@@ -1516,7 +1582,17 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
         <Field label={"本薪（全職）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={baseSalary} onChange={(e) => setBaseSalary(e.target.value)} /></Field>
         <Field label={"時薪（兼職）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} /></Field>
       </div>
-      <Field label={"獎金" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={bonus} onChange={(e) => setBonus(e.target.value)} /></Field>
+      <Field label="到職日"><input className="ph-input" type="date" value={hireDate} onChange={(e) => setHireDate(e.target.value)} /></Field>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label={"伙食費" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={mealAllowance} onChange={(e) => setMealAllowance(e.target.value)} /></Field>
+        <Field label={"職務津貼" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={positionAllowance} onChange={(e) => setPositionAllowance(e.target.value)} /></Field>
+      </div>
+      <Field label={"全勤獎金" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={bonus} onChange={(e) => setBonus(e.target.value)} /></Field>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label={"勞保費（自付額）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={laborInsuranceFee} onChange={(e) => setLaborInsuranceFee(e.target.value)} /></Field>
+        <Field label={"健保費（自付額）" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={healthInsuranceFee} onChange={(e) => setHealthInsuranceFee(e.target.value)} /></Field>
+      </div>
+      <Field label={"所得稅代扣" + (isHr ? "" : "（僅人資可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={incomeTax} onChange={(e) => setIncomeTax(e.target.value)} /></Field>
       <Field label="在職狀態">
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> 在職中</label>
       </Field>
