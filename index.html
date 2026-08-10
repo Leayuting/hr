@@ -54,6 +54,11 @@ const sb = createClient(SB_URL, SB_KEY);
 
 const ROLE_LABEL = { staff: "夥伴", manager: "店長", hr: "營運／人資" };
 const REQ_TYPE_LABEL = { annual_leave: "特休", personal_leave: "事假", overtime: "加班" };
+const REQ_TYPE_PILL = {
+  annual_leave: { bg: "#E7EAE1", fg: "#4B5530" },
+  overtime: { bg: "#E8E3F0", fg: "#6B5B95" },
+  personal_leave: { bg: "#F1E7DD", fg: "#A34F2D" },
+};
 const REQ_STATUS_LABEL = { pending: "待審核", approved: "已核准", rejected: "已拒絕" };
 const REPORT_STATUS_LABEL = { draft: "未送出", submitted: "待簽核", signed: "待人資交接", hr_received: "已完成" };
 const BACKUP_TABLES = ["stores", "employees", "shifts", "requests", "payroll_runs", "daily_reports", "daily_report_entries", "daily_report_attachments", "audit_logs"];
@@ -78,6 +83,17 @@ const MONTH_EN = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP",
 function weekdayZh(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   return WEEKDAY_ZH[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+}
+function fmtDateShort(iso) {
+  if (!iso) return "";
+  const d = new Date(new Date(iso).getTime() + 8 * 3600 * 1000);
+  const wd = WEEKDAY_ZH[d.getUTCDay()];
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}（週${wd}）`;
+}
+function fmtDateTimeShort(iso) {
+  if (!iso) return "";
+  const d = new Date(new Date(iso).getTime() + 8 * 3600 * 1000);
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
 }
 function addDaysStr(dateStr, n) {
   const [y, m, d] = dateStr.split("-").map(Number);
@@ -658,68 +674,78 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
     if (monthFilter && !r.start_at?.startsWith(monthFilter)) return false;
     return true;
   });
+  const scopeName = scopeStoreIds.length > 1 ? "ALL STORES" : (storeById[scopeStoreIds[0]]?.name || "");
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-        <h2 className="ph-serif" style={{ margin: 0 }}>{canReview ? "申請審核" : "請假／加班"}</h2>
-        <button className="ph-btn primary" style={{ marginLeft: canReview ? 0 : "auto" }} onClick={() => setShowForm(true)}>＋ 送出申請</button>
-      </div>
-      {canReview && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-          <select className="ph-input" style={{ width: 130 }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
-            <option value="all">全部類型</option>
-            <option value="annual_leave">特休</option>
-            <option value="personal_leave">事假</option>
-            <option value="overtime">加班</option>
-          </select>
-          <select className="ph-input" style={{ width: 130 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-            <option value="all">全部狀態</option>
-            <option value="pending">待審核</option>
-            <option value="approved">已核准</option>
-            <option value="rejected">已拒絕</option>
-          </select>
-          <input className="ph-input" style={{ width: 150 }} type="month" value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)} />
-          {monthFilter && <button className="ph-btn small" onClick={() => setMonthFilter("")}>清除月份</button>}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>{scopeName}</p>
+          <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>{canReview ? "待處理申請" : "我的請假／加班申請"}</h2>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>{canReview ? "每間門店獨立審核，核准後同步影響該店班表與薪資試算。" : "送出後由店長或人資審核，核准後同步影響班表與薪資試算。"}</p>
         </div>
-      )}
+        <button className="ph-btn primary" onClick={() => setShowForm(true)}>＋ 送出申請</button>
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", margin: "18px 0 14px" }}>
+        <select className="ph-input" style={{ width: 130 }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <option value="all">全部類型</option>
+          <option value="annual_leave">特休</option>
+          <option value="personal_leave">事假</option>
+          <option value="overtime">加班</option>
+        </select>
+        <select className="ph-input" style={{ width: 130 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="all">全部狀態</option>
+          <option value="pending">待審核</option>
+          <option value="approved">已核准</option>
+          <option value="rejected">已拒絕</option>
+        </select>
+        <input className="ph-input" style={{ width: 150 }} type="month" value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)} />
+        {monthFilter && <button className="ph-btn small" onClick={() => setMonthFilter("")}>清除月份</button>}
+      </div>
       {truncated && (
         <p style={{ color: T.brown, fontSize: 12.5, marginTop: 0, marginBottom: 10 }}>
           僅顯示最近 300 筆申請，較舊的紀錄未顯示；可用上方月份篩選查詢特定月份。
         </p>
       )}
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
-        <div className="ph-card" style={{ overflowX: "auto" }}>
-          <table className="ph-table">
-            <thead><tr>
-              <th>夥伴</th>{scopeStoreIds.length > 1 && <th>門市</th>}<th>類型</th><th>起</th><th>迄</th><th>時數</th><th>事由</th><th>狀態</th>{canReview && <th>操作</th>}
-            </tr></thead>
-            <tbody>
-              {filteredRows.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.employees?.name || "—"}</td>
-                  {scopeStoreIds.length > 1 && <td style={{ fontSize: 12, color: T.sub }}>{storeById[r.store_id]?.name}</td>}
-                  <td>{REQ_TYPE_LABEL[r.type]}</td>
-                  <td>{fmtTaipei(r.start_at)}</td>
-                  <td>{fmtTaipei(r.end_at)}</td>
-                  <td>{r.hours}</td>
-                  <td>{r.reason}</td>
-                  <td><Badge tone={r.status === "approved" ? "green" : r.status === "rejected" ? "red" : "yellow"}>{REQ_STATUS_LABEL[r.status]}</Badge></td>
-                  {canReview && (
-                    <td>
-                      {r.status === "pending" ? (
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => decide(r.id, "approved")}>{decidingId === r.id ? "處理中…" : "核准"}</button>
-                          <button className="ph-btn small danger" disabled={decidingId === r.id} onClick={() => decide(r.id, "rejected")}>拒絕</button>
-                        </div>
-                      ) : "—"}
-                    </td>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {filteredRows.map((r, idx) => {
+            const pill = REQ_TYPE_PILL[r.type];
+            return (
+              <div key={r.id} className="ph-card" style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 190, flex: 1 }}>
+                  <RosterAvatar name={r.employees?.name} index={idx} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 500 }}>{r.employees?.name || "—"}</div>
+                    <div style={{ fontSize: 11.5, color: T.sub }}>{storeById[r.store_id]?.name}・{fmtDateTimeShort(r.submitted_at)} 提交</div>
+                  </div>
+                </div>
+                <div style={{ minWidth: 90 }}>
+                  <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>申請類型</div>
+                  <span className="ph-badge" style={{ background: pill.bg, color: pill.fg, fontWeight: 600 }}>{REQ_TYPE_LABEL[r.type]}</span>
+                </div>
+                <div style={{ minWidth: 110 }}>
+                  <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>日期</div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{fmtDateShort(r.start_at)}</div>
+                </div>
+                <div style={{ minWidth: 70 }}>
+                  <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>時數</div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{r.hours} 小時</div>
+                </div>
+                <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                  {r.status === "pending" && canReview ? (
+                    <>
+                      <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => decide(r.id, "rejected")}>退回</button>
+                      <button className="ph-btn small" style={{ background: T.olive, borderColor: T.olive, color: "#fff" }} disabled={decidingId === r.id} onClick={() => decide(r.id, "approved")}>{decidingId === r.id ? "處理中…" : "核准"}</button>
+                    </>
+                  ) : (
+                    <Badge tone={r.status === "approved" ? "green" : r.status === "rejected" ? "red" : "yellow"}>{REQ_STATUS_LABEL[r.status]}</Badge>
                   )}
-                </tr>
-              ))}
-              {filteredRows.length === 0 && <tr><td colSpan={canReview ? (scopeStoreIds.length > 1 ? 9 : 8) : 7} style={{ color: T.sub, textAlign: "center" }}>沒有符合條件的紀錄</td></tr>}
-            </tbody>
-          </table>
+                </div>
+              </div>
+            );
+          })}
+          {filteredRows.length === 0 && <div className="ph-card" style={{ padding: 24, color: T.sub, textAlign: "center" }}>沒有符合條件的紀錄</div>}
         </div>
       )}
       {showForm && <RequestFormModal me={me} storeId={storeId} onClose={() => setShowForm(false)} onSaved={() => { setShowForm(false); load(); toast("已送出申請"); }} />}
