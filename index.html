@@ -2680,6 +2680,7 @@ function AppShell({ session }) {
   const [toastMsg, setToastMsg] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
+  const [showChangePassword, setShowChangePassword] = useState(false);
 
   const toast = useCallback((msg) => { setToastMsg(msg); setTimeout(() => setToastMsg(""), 3200); }, []);
 
@@ -2775,6 +2776,7 @@ function AppShell({ session }) {
             <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{me.name}</div>
             <div style={{ fontSize: 11.5, color: T.sidebarSub }}>{TIER_LABEL[me.access_tier]}</div>
           </div>
+          <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => setShowChangePassword(true)}>更改密碼</button>
           <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => sb.auth.signOut()}>登出</button>
         </div>
       </aside>
@@ -2825,7 +2827,50 @@ function AppShell({ session }) {
         </main>
       </div>
       {toastMsg && <div className="ph-toast">{toastMsg}</div>}
+      {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} toast={toast} />}
     </div>
+  );
+}
+
+function ChangePasswordModal({ onClose, toast }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (pw.length < 6) { setErr("密碼至少需要 6 個字元"); return; }
+    if (pw !== pw2) { setErr("兩次輸入的密碼不一致"); return; }
+    setErr(""); setBusy(true);
+    try {
+      const { error } = await sb.auth.updateUser({ password: pw });
+      if (error) { setErr("更改失敗：" + error.message); return; }
+      toast("密碼已更新");
+      onClose();
+    } catch (e2) {
+      setErr("更改時發生錯誤：" + (e2?.message || String(e2)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="更改密碼" onClose={onClose}>
+      <form onSubmit={submit}>
+        <Field label="新密碼">
+          <input className="ph-input" type="password" required autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} />
+        </Field>
+        <Field label="再輸入一次">
+          <input className="ph-input" type="password" required autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+        </Field>
+        {err && <div className="ph-err">{err}</div>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" className="ph-btn" onClick={onClose} disabled={busy}>取消</button>
+          <button className="ph-btn primary" disabled={busy} type="submit">{busy ? "更改中…" : "確認更改"}</button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
