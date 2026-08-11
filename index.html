@@ -2062,6 +2062,9 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const [email, setEmail] = useState(editing.email || "");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+  const [pinErr, setPinErr] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
 
   async function save() {
     if (!name.trim()) { setErr("請輸入姓名"); return; }
@@ -2102,6 +2105,22 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
     if (error) { setErr(error.message); return; }
     if (!data) { setErr("尚未在 Supabase 後台建立此 Email 的登入帳號"); return; }
     setErr(""); alert("已綁定登入帳號");
+  }
+
+  async function setPinForStaff() {
+    if (!/^[0-9]{6,}$/.test(pinInput)) { setPinErr("PIN 碼至少需要 6 位數字"); return; }
+    setPinErr(""); setPinBusy(true);
+    try {
+      const { data, error } = await sb.functions.invoke("admin-set-pin", { body: { employee_id: editing.id, pin: pinInput } });
+      if (error) { setPinErr("設定失敗：" + error.message); return; }
+      if (data?.error) { setPinErr("設定失敗：" + data.error); return; }
+      setPinInput("");
+      alert(`已為 ${editing.name} 設定 PIN 碼`);
+    } catch (e2) {
+      setPinErr("設定時發生錯誤：" + (e2?.message || String(e2)));
+    } finally {
+      setPinBusy(false);
+    }
   }
 
   return (
@@ -2159,6 +2178,16 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
             <input className="ph-input" value={email} onChange={(e) => setEmail(e.target.value)} />
             <button className="ph-btn small" type="button" onClick={linkAuth}>綁定</button>
           </div>
+        </Field>
+      )}
+      {isHr && !editing.isNew && accessTier === "staff" && (
+        <Field label="幫此夥伴設定 PIN 碼（一般夥伴專用，需先完成上方帳號綁定）">
+          <div style={{ display: "flex", gap: 8 }}>
+            <input className="ph-input" style={{ letterSpacing: 3 }} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="至少 6 位數字" value={pinInput} onChange={(e) => setPinInput(e.target.value.replace(/[^0-9]/g, ""))} />
+            <button className="ph-btn small" type="button" disabled={pinBusy} onClick={setPinForStaff}>{pinBusy ? "設定中…" : "設定 PIN"}</button>
+          </div>
+          {pinErr && <div className="ph-err">{pinErr}</div>}
+          <p style={{ color: T.sub, fontSize: 11.5, margin: "6px 0 0" }}>設定後這位夥伴登入畫面選「PIN 快速登入」即可用這組 PIN 登入，會直接覆蓋原本的密碼。</p>
         </Field>
       )}
       {err && <div className="ph-err">{err}</div>}
