@@ -415,6 +415,7 @@ function Field({ label, children }) {
 ──────────────────────────────────────────── */
 
 function Login() {
+  const [mode, setMode] = useState("password"); // 'password' | 'pin'
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
@@ -429,6 +430,8 @@ function Login() {
       if (error) {
         try { await sb.rpc("record_failed_login", { p_email: email.trim() }); } catch (e3) { /* 記錄失敗次數失敗不影響登入流程 */ }
         setErr("登入失敗，請確認帳號密碼（" + error.message + "）");
+      } else {
+        try { await sb.rpc("reset_my_failed_logins"); } catch (e4) { /* 不影響登入流程 */ }
       }
     } catch (e2) {
       setErr("登入時發生錯誤：" + (e2?.message || String(e2)));
@@ -446,25 +449,114 @@ function Login() {
     <div className="ph-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div className="ph-card" style={{ width: 360, padding: 28 }}>
         <h1 className="ph-serif" style={{ fontSize: 20, marginTop: 0, marginBottom: 4 }}>PHASE 人事排班系統</h1>
-        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 20 }}>排班・請假加班・電子日總表・薪資試算</p>
-        <form onSubmit={submit}>
-          <Field label="Email">
-            <input className="ph-input" type="email" name="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-          </Field>
-          <Field label="密碼">
-            <input className="ph-input" type="password" name="password" autoComplete="current-password" required value={pw} onChange={(e) => setPw(e.target.value)} />
-          </Field>
-          {err && <div className="ph-err">{err}</div>}
-          {resetSent && <div style={{ color: T.green, fontSize: 12.5, marginBottom: 8 }}>已寄出重設密碼信件</div>}
-          <button className="ph-btn primary" style={{ width: "100%", marginTop: 6 }} disabled={busy} type="submit">
-            {busy ? "登入中…" : "登入"}
-          </button>
-          <button type="button" className="ph-btn" style={{ width: "100%", marginTop: 8, border: "none", background: "none", color: T.sub, fontSize: 12.5 }} onClick={forgotPw}>
-            忘記密碼？
-          </button>
-        </form>
+        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 16 }}>排班・請假加班・電子日總表・薪資試算</p>
+        <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+          <button type="button" className="ph-btn small" style={{ flex: 1, ...(mode === "password" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => { setMode("password"); setErr(""); }}>帳號密碼登入</button>
+          <button type="button" className="ph-btn small" style={{ flex: 1, ...(mode === "pin" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => { setMode("pin"); setErr(""); }}>PIN 快速登入</button>
+        </div>
+        {mode === "password" ? (
+          <form onSubmit={submit}>
+            <Field label="Email">
+              <input className="ph-input" type="email" name="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+            </Field>
+            <Field label="密碼">
+              <input className="ph-input" type="password" name="password" autoComplete="current-password" required value={pw} onChange={(e) => setPw(e.target.value)} />
+            </Field>
+            {err && <div className="ph-err">{err}</div>}
+            {resetSent && <div style={{ color: T.green, fontSize: 12.5, marginBottom: 8 }}>已寄出重設密碼信件</div>}
+            <button className="ph-btn primary" style={{ width: "100%", marginTop: 6 }} disabled={busy} type="submit">
+              {busy ? "登入中…" : "登入"}
+            </button>
+            <button type="button" className="ph-btn" style={{ width: "100%", marginTop: 8, border: "none", background: "none", color: T.sub, fontSize: 12.5 }} onClick={forgotPw}>
+              忘記密碼？
+            </button>
+          </form>
+        ) : (
+          <PinLogin />
+        )}
       </div>
     </div>
+  );
+}
+
+function PinLogin() {
+  const [roster, setRoster] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    sb.rpc("pin_login_roster").then(({ data, error }) => {
+      if (error) { setErr("載入夥伴名單失敗：" + error.message); setRoster([]); return; }
+      setRoster(data || []);
+    });
+  }, []);
+
+  const grouped = useMemo(() => {
+    const g = {};
+    (roster || []).forEach((r) => { (g[r.store_name] = g[r.store_name] || []).push(r); });
+    return g;
+  }, [roster]);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!selected) { setErr("請先選擇姓名"); return; }
+    setErr(""); setBusy(true);
+    try {
+      const { data: locked } = await sb.rpc("pin_login_locked", { p_employee_id: selected.employee_id });
+      if (locked) { setErr("此帳號已因多次輸入錯誤被鎖定，請洽店長或人資協助重設 PIN"); return; }
+      const { data: email } = await sb.rpc("pin_login_email", { p_employee_id: selected.employee_id });
+      if (!email) { setErr("此夥伴尚未開通 PIN 登入，請洽店長或人資"); return; }
+      const { error } = await sb.auth.signInWithPassword({ email, password: pin });
+      if (error) {
+        try { await sb.rpc("record_failed_login", { p_email: email }); } catch (e3) { /* 不影響流程 */ }
+        setErr("PIN 錯誤，請再試一次");
+        setPin("");
+        return;
+      }
+      try { await sb.rpc("reset_my_failed_logins"); } catch (e4) { /* 不影響流程 */ }
+    } catch (e2) {
+      setErr("登入時發生錯誤：" + (e2?.message || String(e2)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (roster === null) return <p style={{ color: T.sub, fontSize: 12.5 }}>載入中…</p>;
+
+  if (!selected) {
+    return (
+      <div>
+        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 10 }}>請選擇你的姓名</p>
+        {Object.keys(grouped).length === 0 && <p style={{ color: T.sub, fontSize: 12.5 }}>目前沒有已開通 PIN 登入的夥伴。</p>}
+        <div style={{ maxHeight: 320, overflowY: "auto" }}>
+          {Object.entries(grouped).map(([storeName, list]) => (
+            <div key={storeName} style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11.5, color: T.sub, marginBottom: 6 }}>{storeName}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {list.map((r) => (
+                  <button key={r.employee_id} type="button" className="ph-btn" style={{ textAlign: "left" }} onClick={() => { setSelected(r); setErr(""); }}>{r.name}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <button type="button" className="ph-btn small" style={{ marginBottom: 12, border: "none", background: "none", color: T.sub, padding: 0 }} onClick={() => { setSelected(null); setPin(""); setErr(""); }}>‹ 重新選擇姓名</button>
+      <Field label={`${selected.name}・請輸入 PIN 碼`}>
+        <input className="ph-input" style={{ letterSpacing: 4, fontSize: 20, textAlign: "center" }} type="password" inputMode="numeric" pattern="[0-9]*" autoFocus maxLength={12} required value={pin} onChange={(e) => setPin(e.target.value.replace(/[^0-9]/g, ""))} />
+      </Field>
+      {err && <div className="ph-err">{err}</div>}
+      <button className="ph-btn primary" style={{ width: "100%", marginTop: 6 }} disabled={busy} type="submit">
+        {busy ? "登入中…" : "登入"}
+      </button>
+    </form>
   );
 }
 
@@ -2782,7 +2874,7 @@ function AppShell({ session }) {
             </div>
           </div>
           <div className="ph-sidebar-foot-actions">
-            <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => setShowChangePassword(true)}>更改密碼</button>
+            <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => setShowChangePassword(true)}>{me.access_tier === "staff" ? "設定 PIN 碼" : "更改密碼"}</button>
             <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => sb.auth.signOut()}>登出</button>
           </div>
         </div>
@@ -2834,12 +2926,12 @@ function AppShell({ session }) {
         </main>
       </div>
       {toastMsg && <div className="ph-toast">{toastMsg}</div>}
-      {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} toast={toast} />}
+      {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} toast={toast} pinMode={me.access_tier === "staff"} />}
     </div>
   );
 }
 
-function ChangePasswordModal({ onClose, toast }) {
+function ChangePasswordModal({ onClose, toast, pinMode }) {
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
   const [err, setErr] = useState("");
@@ -2847,13 +2939,17 @@ function ChangePasswordModal({ onClose, toast }) {
 
   async function submit(e) {
     e.preventDefault();
-    if (pw.length < 6) { setErr("密碼至少需要 6 個字元"); return; }
-    if (pw !== pw2) { setErr("兩次輸入的密碼不一致"); return; }
+    if (pinMode) {
+      if (!/^[0-9]{6,}$/.test(pw)) { setErr("PIN 碼至少需要 6 位數字"); return; }
+    } else if (pw.length < 6) {
+      setErr("密碼至少需要 6 個字元"); return;
+    }
+    if (pw !== pw2) { setErr("兩次輸入的內容不一致"); return; }
     setErr(""); setBusy(true);
     try {
       const { error } = await sb.auth.updateUser({ password: pw });
       if (error) { setErr("更改失敗：" + error.message); return; }
-      toast("密碼已更新");
+      toast(pinMode ? "PIN 碼已更新" : "密碼已更新");
       onClose();
     } catch (e2) {
       setErr("更改時發生錯誤：" + (e2?.message || String(e2)));
@@ -2863,13 +2959,14 @@ function ChangePasswordModal({ onClose, toast }) {
   }
 
   return (
-    <Modal title="更改密碼" onClose={onClose}>
+    <Modal title={pinMode ? "設定 PIN 碼" : "更改密碼"} onClose={onClose}>
+      {pinMode && <p style={{ color: T.sub, fontSize: 12.5, marginTop: -6, marginBottom: 12 }}>設定後即可在登入畫面用「PIN 快速登入」，選自己的姓名＋輸入這組 PIN 碼即可。</p>}
       <form onSubmit={submit}>
-        <Field label="新密碼">
-          <input className="ph-input" type="password" required autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} />
+        <Field label={pinMode ? "新 PIN 碼（至少 6 位數字）" : "新密碼"}>
+          <input className="ph-input" style={pinMode ? { letterSpacing: 4, fontSize: 18 } : undefined} type="password" inputMode={pinMode ? "numeric" : undefined} pattern={pinMode ? "[0-9]*" : undefined} required autoComplete="new-password" value={pw} onChange={(e) => setPw(pinMode ? e.target.value.replace(/[^0-9]/g, "") : e.target.value)} />
         </Field>
         <Field label="再輸入一次">
-          <input className="ph-input" type="password" required autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+          <input className="ph-input" style={pinMode ? { letterSpacing: 4, fontSize: 18 } : undefined} type="password" inputMode={pinMode ? "numeric" : undefined} pattern={pinMode ? "[0-9]*" : undefined} required autoComplete="new-password" value={pw2} onChange={(e) => setPw2(pinMode ? e.target.value.replace(/[^0-9]/g, "") : e.target.value)} />
         </Field>
         {err && <div className="ph-err">{err}</div>}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
