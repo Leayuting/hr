@@ -1451,7 +1451,11 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     const draft = {};
     rosterActive.forEach((r) => {
       const e = entryMap[r.id];
-      draft[r.id] = e ? { ...e } : { late: false, late_minutes: "", missed_punch: false, leave: false, leave_hours: "", overtime: false, overtime_hours: "", reason: "", improvement: "", note: "" };
+      draft[r.id] = e ? { ...e } : {
+        late: false, late_minutes: "", missed_punch: false, leave: false, leave_hours: "", overtime: false, overtime_hours: "",
+        missed_punch_reason: "", missed_punch_error_start: "", missed_punch_error_end: "", missed_punch_fix_start: "", missed_punch_fix_end: "",
+        reason: "", improvement: "", note: "",
+      };
     });
     setEntries(draft);
     setAttachments(attachRows);
@@ -1478,6 +1482,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { toast(`${r.name}的加班時數須以 0.5 小時為單位`); return; }
       if (e.late && !(Number.isInteger(Number(e.late_minutes)) && Number(e.late_minutes) > 0)) { toast(`${r.name}的遲到分鐘數須為正整數`); return; }
       if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { toast(`${r.name}的請假時數須以 0.5 小時為單位`); return; }
+      if (e.missed_punch && !e.missed_punch_reason?.trim()) { toast(`${r.name}的補打卡單須填寫事由`); return; }
     }
     setActionBusy(true);
     try {
@@ -1498,6 +1503,11 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           late: e.late, late_minutes: e.late ? Number(e.late_minutes) : null,
           missed_punch: e.missed_punch, leave: e.leave, leave_hours: e.leave ? Number(e.leave_hours) : null,
           overtime: e.overtime, overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
+          missed_punch_reason: e.missed_punch ? (e.missed_punch_reason || "") : null,
+          missed_punch_error_start: e.missed_punch ? (e.missed_punch_error_start || null) : null,
+          missed_punch_error_end: e.missed_punch ? (e.missed_punch_error_end || null) : null,
+          missed_punch_fix_start: e.missed_punch ? (e.missed_punch_fix_start || null) : null,
+          missed_punch_fix_end: e.missed_punch ? (e.missed_punch_fix_end || null) : null,
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
         }, { onConflict: "daily_report_id,employee_id" });
       }
@@ -1695,6 +1705,52 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
             <strong style={{ fontSize: 13 }}>相關附件</strong>
             <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>漏打卡、請假或加班須上傳相關補單、加班單或證明；支援 PDF 與圖片，單檔上限 10MB。</p>
+
+            {roster.some((r) => entries[r.id]?.missed_punch) && (
+              <div style={{ marginBottom: 14 }}>
+                {roster.filter((r) => entries[r.id]?.missed_punch).map((r) => {
+                  const e = entries[r.id] || {};
+                  const dis = !canWrite;
+                  const missing = !e.missed_punch_reason?.trim();
+                  return (
+                    <div key={r.id} style={{ border: `1px solid ${T.line}`, borderRadius: 8, padding: 12, marginBottom: 10, background: T.bg }}>
+                      <strong style={{ fontSize: 12.5 }}>{r.name}　補打卡單</strong>
+                      <div style={{ marginTop: 8 }}>
+                        <textarea className="ph-input" rows={2} disabled={dis} placeholder="事由（如去客戶／廠商端出差，請填寫客戶／廠商名稱）"
+                          value={e.missed_punch_reason || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_reason: ev.target.value })}
+                          style={missing ? { borderColor: T.red } : undefined} />
+                      </div>
+                      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8 }}>
+                        <div>
+                          <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>錯誤時間</p>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                              value={e.missed_punch_error_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_start: ev.target.value })} />
+                            <span style={{ color: T.sub, fontSize: 12 }}>至</span>
+                            <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                              value={e.missed_punch_error_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_end: ev.target.value })} />
+                          </div>
+                        </div>
+                        <div>
+                          <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>修正時間</p>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                              value={e.missed_punch_fix_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_start: ev.target.value })} />
+                            <span style={{ color: T.sub, fontSize: 12 }}>至</span>
+                            <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                              value={e.missed_punch_fix_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_end: ev.target.value })} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <p style={{ color: T.sub, fontSize: 11.5, margin: 0 }}>
+                  請於二日內申請補卡；若當月個人因忘記打卡事由累計達 3 次（含）以上，扣除全勤獎金。嚴禁代打卡，若有發生此情形連坐罰各記一支大過。
+                </p>
+              </div>
+            )}
+
             {!report?.id && !canWrite ? (
               <p style={{ color: T.sub, fontSize: 12.5, background: T.bg, padding: "8px 12px", borderRadius: 6 }}>目前尚無日總表資料。</p>
             ) : (
