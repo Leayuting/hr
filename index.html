@@ -2496,9 +2496,22 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const [pinErr, setPinErr] = useState("");
   const [pinBusy, setPinBusy] = useState(false);
 
+  async function callSetPin(employeeId, pin) {
+    const { data, error } = await sb.functions.invoke("admin-set-pin", { body: { employee_id: employeeId, pin } });
+    if (error) {
+      let msg = error.message;
+      if (error.context && typeof error.context.json === "function") {
+        try { const body = await error.context.json(); if (body?.error) msg = body.error; } catch (e3) { /* 不影響流程，退回原本的通用錯誤訊息 */ }
+      }
+      throw new Error(msg);
+    }
+    if (data?.error) throw new Error(data.error);
+  }
+
   async function save() {
     if (!name.trim()) { setErr("請輸入姓名"); return; }
     if (!storeIdSel) { setErr("請選擇所屬門市"); return; }
+    if (editing.isNew && pinInput && !/^[0-9]{6,}$/.test(pinInput)) { setErr("PIN 碼至少需要 6 位數字"); return; }
     setErr(""); setBusy(true);
     const payload = { name: name.trim(), position, employment_type: employmentType, active, store_id: storeIdSel, hire_date: hireDate || null };
     if (isHr) {
@@ -2525,6 +2538,16 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
     if (isHr && newId) {
       await sb.rpc("seed_default_permissions", { p_employee_id: newId });
     }
+    if (isHr && editing.isNew && newId && PIN_ELIGIBLE_TIERS.includes(accessTier) && pinInput) {
+      try {
+        await callSetPin(newId, pinInput);
+      } catch (e2) {
+        setBusy(false);
+        setErr("夥伴已新增，但 PIN 設定失敗：" + e2.message + "（可到「人員資料」再設定一次）");
+        onSaved();
+        return;
+      }
+    }
     await logAudit(me.name, editing.isNew ? "create_employee" : "update_employee", editing.id || name);
     setBusy(false);
     onSaved();
@@ -2534,20 +2557,11 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
     if (!/^[0-9]{6,}$/.test(pinInput)) { setPinErr("PIN 碼至少需要 6 位數字"); return; }
     setPinErr(""); setPinBusy(true);
     try {
-      const { data, error } = await sb.functions.invoke("admin-set-pin", { body: { employee_id: editing.id, pin: pinInput } });
-      if (error) {
-        let msg = error.message;
-        if (error.context && typeof error.context.json === "function") {
-          try { const body = await error.context.json(); if (body?.error) msg = body.error; } catch (e3) { /* 不影響流程，退回原本的通用錯誤訊息 */ }
-        }
-        setPinErr("設定失敗：" + msg);
-        return;
-      }
-      if (data?.error) { setPinErr("設定失敗：" + data.error); return; }
+      await callSetPin(editing.id, pinInput);
       setPinInput("");
       alert(`已為 ${editing.name} 設定 PIN 碼`);
     } catch (e2) {
-      setPinErr("設定時發生錯誤：" + (e2?.message || String(e2)));
+      setPinErr("設定失敗：" + e2.message);
     } finally {
       setPinBusy(false);
     }
@@ -2607,15 +2621,21 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
       <Field label="在職狀態">
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> 在職中</label>
       </Field>
-      {isHr && !editing.isNew && PIN_ELIGIBLE_TIERS.includes(accessTier) && (
-        <Field label="幫此夥伴設定 PIN 碼（限一般夥伴／行政專責，此員工須已綁定登入帳號）">
-          <div style={{ display: "flex", gap: 8 }}>
-            <input className="ph-input" style={{ letterSpacing: 3 }} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="至少 6 位數字" value={pinInput} onChange={(e) => setPinInput(e.target.value.replace(/[^0-9]/g, ""))} />
-            <button className="ph-btn small" type="button" disabled={pinBusy} onClick={setPinForStaff}>{pinBusy ? "設定中…" : "設定 PIN"}</button>
-          </div>
-          {pinErr && <div className="ph-err">{pinErr}</div>}
-          <p style={{ color: T.sub, fontSize: 11.5, margin: "6px 0 0" }}>設定後這位夥伴登入畫面選「PIN 快速登入」即可用這組 PIN 登入，會直接覆蓋原本的密碼。</p>
-        </Field>
+      {isHr && PIN_ELIGIBLE_TIERS.includes(accessTier) && (
+        editing.isNew ? (
+          <Field label="PIN 碼（選填，除最高管理員外不需要另外綁定登入帳號，儲存時自動建立）">
+            <input className="ph-input" style={{ letterSpacing: 3 }} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="至少 6 位數字，可先留空之後再設定" value={pinInput} onChange={(e) => setPinInput(e.target.value.replace(/[^0-9]/g, ""))} />
+          </Field>
+        ) : (
+          <Field label="幫此夥伴設定／重設 PIN 碼">
+            <div style={{ display: "flex", gap: 8 }}>
+              <input className="ph-input" style={{ letterSpacing: 3 }} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="至少 6 位數字" value={pinInput} onChange={(e) => setPinInput(e.target.value.replace(/[^0-9]/g, ""))} />
+              <button className="ph-btn small" type="button" disabled={pinBusy} onClick={setPinForStaff}>{pinBusy ? "設定中…" : "設定 PIN"}</button>
+            </div>
+            {pinErr && <div className="ph-err">{pinErr}</div>}
+            <p style={{ color: T.sub, fontSize: 11.5, margin: "6px 0 0" }}>設定後這位夥伴登入畫面選「PIN 快速登入」即可用這組 PIN 登入；若尚未有登入帳號會自動建立，不需要另外綁定。</p>
+          </Field>
+        )
       )}
       {err && <div className="ph-err">{err}</div>}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
