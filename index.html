@@ -2512,7 +2512,14 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
     setPinErr(""); setPinBusy(true);
     try {
       const { data, error } = await sb.functions.invoke("admin-set-pin", { body: { employee_id: editing.id, pin: pinInput } });
-      if (error) { setPinErr("設定失敗：" + error.message); return; }
+      if (error) {
+        let msg = error.message;
+        if (error.context && typeof error.context.json === "function") {
+          try { const body = await error.context.json(); if (body?.error) msg = body.error; } catch (e3) { /* 不影響流程，退回原本的通用錯誤訊息 */ }
+        }
+        setPinErr("設定失敗：" + msg);
+        return;
+      }
       if (data?.error) { setPinErr("設定失敗：" + data.error); return; }
       setPinInput("");
       alert(`已為 ${editing.name} 設定 PIN 碼`);
@@ -2573,7 +2580,7 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> 在職中</label>
       </Field>
       {isHr && !editing.isNew && PIN_ELIGIBLE_TIERS.includes(accessTier) && (
-        <Field label="幫此夥伴設定 PIN 碼（一般夥伴專用，需先完成上方帳號綁定）">
+        <Field label="幫此夥伴設定 PIN 碼（限一般夥伴／行政專責，此員工須已綁定登入帳號）">
           <div style={{ display: "flex", gap: 8 }}>
             <input className="ph-input" style={{ letterSpacing: 3 }} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="至少 6 位數字" value={pinInput} onChange={(e) => setPinInput(e.target.value.replace(/[^0-9]/g, ""))} />
             <button className="ph-btn small" type="button" disabled={pinBusy} onClick={setPinForStaff}>{pinBusy ? "設定中…" : "設定 PIN"}</button>
