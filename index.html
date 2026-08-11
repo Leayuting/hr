@@ -196,7 +196,11 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   const overtimeHours = overtimeRequests.reduce((s, r) => s + Number(r.hours), 0);
   const isFullTime = emp.employment_type === "full_time";
   const hourlyBase = isFullTime ? Number(emp.base_salary) / 240 : Number(emp.hourly_rate);
-  const overtimePay = overtimeRequests.reduce((sum, r) => sum + overtimePayForRequest(hourlyBase, r.hours, r.overtime_type || "workday"), 0);
+  // 加班費時薪基準用「總薪」（本薪＋伙食費＋職務津貼＋全勤獎金），跟請假扣款用的 hourlyBase（僅本薪）分開算
+  const overtimeHourlyBase = isFullTime
+    ? (Number(emp.base_salary) + (Number(emp.meal_allowance) || 0) + (Number(emp.position_allowance) || 0) + (Number(emp.bonus) || 0)) / 240
+    : Number(emp.hourly_rate);
+  const overtimePay = overtimeRequests.reduce((sum, r) => sum + overtimePayForRequest(overtimeHourlyBase, r.hours, r.overtime_type || "workday"), 0);
 
   // 依《勞工請假規則》：事假不給工資、普通傷病假工資折半、婚假/喪假/公假/公傷病假工資照給不扣款
   const leaveHoursByType = {};
