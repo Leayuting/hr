@@ -681,7 +681,7 @@ function PinLogin() {
 function prevMonthStr(ym) { const [y, m] = ym.split("-").map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${pad2(m - 1)}`; }
 function nextMonthStr(ym) { const [y, m] = ym.split("-").map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${pad2(m + 1)}`; }
 
-function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
+function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
   const [shifts, setShifts] = useState([]);
@@ -818,6 +818,29 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
   }
 
   const scopeName = scope === "all" ? "全部門市" : (storeById[scopeStoreIds[0]]?.name || "");
+  const activeStore = activeStoreId ? storeById[activeStoreId] : null;
+  const [pickFrom, setPickFrom] = useState("");
+  const [pickTo, setPickTo] = useState("");
+  const [pickBusy, setPickBusy] = useState(false);
+  useEffect(() => {
+    setPickFrom(activeStore?.leave_pick_open_from || "");
+    setPickTo(activeStore?.leave_pick_open_to || "");
+  }, [activeStoreId, activeStore?.leave_pick_open_from, activeStore?.leave_pick_open_to]);
+
+  async function savePickWindow(openFrom, openTo) {
+    if (!activeStoreId) return;
+    setPickBusy(true);
+    try {
+      const { error } = await sb.rpc("set_leave_pick_window", { p_store_id: activeStoreId, p_open_from: openFrom || null, p_open_to: openTo || null });
+      if (error) { toast("設定失敗：" + error.message); return; }
+      setPickFrom(openFrom || ""); setPickTo(openTo || "");
+      if (activeStore) { activeStore.leave_pick_open_from = openFrom || null; activeStore.leave_pick_open_to = openTo || null; }
+      await logAudit(me.name, "set_leave_pick_window", activeStoreId, `${openFrom || "—"} ~ ${openTo || "—"}`);
+      toast(openFrom && openTo ? "已開放劃假期間" : "已關閉劃假期間");
+    } finally {
+      setPickBusy(false);
+    }
+  }
 
   return (
     <div>
@@ -836,6 +859,21 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, toast }) {
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
         整月排班（{Number(ym.slice(5, 7))}/1–{Number(ym.slice(5, 7))}/{days}）；各門店分開處理，點擊班次即可修改。
       </p>
+      {canEdit && activeStoreId && (
+        <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12.5, color: T.sub, minWidth: 200 }}>
+            <strong style={{ color: T.ink }}>夥伴自助劃假期間</strong>
+            <div>{activeStore?.name}用門市 PIN 登入後，可在此區間內自己劃休假／特休。</div>
+          </div>
+          <input className="ph-input" style={{ width: 150 }} type="date" value={pickFrom} onChange={(e) => setPickFrom(e.target.value)} />
+          <span style={{ color: T.sub }}>～</span>
+          <input className="ph-input" style={{ width: 150 }} type="date" value={pickTo} onChange={(e) => setPickTo(e.target.value)} />
+          <button className="ph-btn small primary" disabled={pickBusy || !pickFrom || !pickTo} onClick={() => savePickWindow(pickFrom, pickTo)}>{pickBusy ? "設定中…" : "設定開放"}</button>
+          {(activeStore?.leave_pick_open_from || activeStore?.leave_pick_open_to) && (
+            <button className="ph-btn small" disabled={pickBusy} onClick={() => savePickWindow(null, null)}>關閉</button>
+          )}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
         <div style={{ display: "flex", gap: 4 }}>
           <button className="ph-btn small" onClick={() => setYm(prevMonthStr(ym))}>‹ 上個月</button>
@@ -1690,24 +1728,186 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
 
 function DailyReportKioskShell({ me, store, toast }) {
   const [date, setDate] = useState(todayStr());
+  const [tab, setTab] = useState("daily_report"); // 'daily_report' | 'self_schedule'
   return (
     <div className="ph-root ph-shell">
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
         <div className="ph-topbar">
           <div style={{ minWidth: 0 }}>
             <p className="ph-eyebrow" style={{ margin: 0 }}>PHASE COFFEE ROASTERS</p>
-            <h1 className="ph-serif" style={{ fontSize: 19, margin: 0 }}>{store?.name}・每日回報</h1>
+            <h1 className="ph-serif" style={{ fontSize: 19, margin: 0 }}>{store?.name}・門市 PIN</h1>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
-            <span className="ph-pill">每日回報 PIN 模式</span>
+            <span className="ph-pill">門市 PIN 模式</span>
             <button className="ph-btn small" onClick={() => sb.auth.signOut()}>登出</button>
           </div>
         </div>
         <main className="ph-main-pad" style={{ flex: 1, padding: "24px 40px", minWidth: 0 }}>
           <div style={{ maxWidth: 1460, margin: "0 auto" }}>
-            <DailyReportDetail me={me} store={store} date={date} onDateChange={setDate} toast={toast} kioskMode />
+            <div style={{ display: "flex", gap: 6, marginBottom: 18, maxWidth: 360 }}>
+              <button type="button" className="ph-btn small" style={{ flex: 1, ...(tab === "daily_report" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => setTab("daily_report")}>每日回報</button>
+              <button type="button" className="ph-btn small" style={{ flex: 1, ...(tab === "self_schedule" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => setTab("self_schedule")}>夥伴排休</button>
+            </div>
+            {tab === "daily_report"
+              ? <DailyReportDetail me={me} store={store} date={date} onDateChange={setDate} toast={toast} kioskMode />
+              : <KioskSelfSchedule store={store} toast={toast} />}
           </div>
         </main>
+      </div>
+    </div>
+  );
+}
+
+function KioskSelfSchedule({ store, toast }) {
+  const [roster, setRoster] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [shiftsByDate, setShiftsByDate] = useState({});
+  const [requestsByDate, setRequestsByDate] = useState({});
+  const [busyDate, setBusyDate] = useState("");
+
+  const openFrom = store?.leave_pick_open_from;
+  const openTo = store?.leave_pick_open_to;
+  const isOpen = !!(openFrom && openTo);
+
+  const dateList = useMemo(() => {
+    if (!isOpen) return [];
+    const list = [];
+    let d = openFrom;
+    let guard = 0;
+    while (d <= openTo && guard < 366) {
+      list.push(d);
+      d = addDaysStr(d, 1);
+      guard++;
+    }
+    return list;
+  }, [openFrom, openTo, isOpen]);
+
+  const loadRoster = useCallback(async () => {
+    if (!store?.id) return;
+    const { data, error } = await sb.rpc("store_roster", { p_store_id: store.id });
+    if (error) { console.error("store_roster", error); setRoster([]); return; }
+    setRoster((data || []).filter((r) => r.active));
+  }, [store?.id]);
+
+  useEffect(() => { loadRoster(); }, [loadRoster]);
+
+  const loadSelectedData = useCallback(async () => {
+    if (!selected || !isOpen) return;
+    const [shiftRes, reqRes] = await Promise.all([
+      sb.from("shifts").select("*").eq("employee_id", selected.id).gte("work_date", openFrom).lte("work_date", openTo),
+      sb.from("requests").select("*").eq("employee_id", selected.id).eq("type", "annual_leave")
+        .gte("start_at", `${openFrom}T00:00:00+08:00`).lte("start_at", `${openTo}T23:59:59+08:00`),
+    ]);
+    const sMap = {};
+    (shiftRes.data || []).forEach((s) => { sMap[s.work_date] = s; });
+    setShiftsByDate(sMap);
+    const rMap = {};
+    (reqRes.data || []).forEach((r) => { rMap[r.start_at.slice(0, 10)] = r; });
+    setRequestsByDate(rMap);
+  }, [selected, openFrom, openTo, isOpen]);
+
+  useEffect(() => { loadSelectedData(); }, [loadSelectedData]);
+
+  async function pickDayOff(date) {
+    if (!selected) return;
+    setBusyDate(date);
+    try {
+      const { error } = await sb.from("shifts").upsert({
+        employee_id: selected.id, store_id: store.id, work_date: date, is_day_off: true, start_time: null, end_time: null,
+      }, { onConflict: "employee_id,work_date" });
+      if (error) { toast("設定失敗：" + error.message); return; }
+      const existingReq = requestsByDate[date];
+      if (existingReq) await sb.from("requests").delete().eq("id", existingReq.id);
+      toast(`${date} 已排休假`);
+      loadSelectedData();
+    } finally {
+      setBusyDate("");
+    }
+  }
+
+  async function pickAnnualLeave(date) {
+    if (!selected) return;
+    setBusyDate(date);
+    try {
+      const { error: shiftError } = await sb.from("shifts").upsert({
+        employee_id: selected.id, store_id: store.id, work_date: date, is_day_off: true, start_time: null, end_time: null,
+      }, { onConflict: "employee_id,work_date" });
+      if (shiftError) { toast("設定失敗：" + shiftError.message); return; }
+      if (!requestsByDate[date]) {
+        const { error: reqError } = await sb.from("requests").insert({
+          employee_id: selected.id, store_id: store.id, type: "annual_leave",
+          start_at: `${date}T09:00:00+08:00`, end_at: `${date}T18:00:00+08:00`, hours: 8,
+          status: "approved", reason: "門市 PIN 自助排休",
+        });
+        if (reqError) { toast("特休登記失敗：" + reqError.message); return; }
+      }
+      toast(`${date} 已排特休`);
+      loadSelectedData();
+    } finally {
+      setBusyDate("");
+    }
+  }
+
+  async function clearDay(date) {
+    if (!selected) return;
+    setBusyDate(date);
+    try {
+      const existingReq = requestsByDate[date];
+      if (existingReq) await sb.from("requests").delete().eq("id", existingReq.id);
+      const s = shiftsByDate[date];
+      if (s) await sb.from("shifts").delete().eq("id", s.id);
+      toast(`${date} 已取消排休`);
+      loadSelectedData();
+    } finally {
+      setBusyDate("");
+    }
+  }
+
+  if (!isOpen) {
+    return <div className="ph-card" style={{ padding: 20, textAlign: "center", color: T.sub }}>目前未開放劃假期間，請洽店長或人資。</div>;
+  }
+  if (roster === null) return <p style={{ color: T.sub }}>載入中…</p>;
+
+  if (!selected) {
+    return (
+      <div>
+        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 10 }}>開放劃假期間：{openFrom} ～ {openTo}，請選擇你的姓名</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 360 }}>
+          {roster.map((r) => (
+            <button key={r.id} type="button" className="ph-btn" style={{ textAlign: "left" }} onClick={() => setSelected(r)}>{r.name}</button>
+          ))}
+          {roster.length === 0 && <p style={{ color: T.sub, fontSize: 12.5 }}>此門市尚無在職夥伴</p>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button type="button" className="ph-btn small" style={{ marginBottom: 12, border: "none", background: "none", color: T.sub, padding: 0 }} onClick={() => setSelected(null)}>‹ 重新選擇姓名</button>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>{selected.name}・開放期間 {openFrom} ～ {openTo}</p>
+      <div className="ph-card" style={{ padding: 0, overflow: "hidden" }}>
+        {dateList.map((d) => {
+          const s = shiftsByDate[d];
+          const req = requestsByDate[d];
+          const hasRealShift = s && !s.is_day_off;
+          const status = req ? "特休" : s?.is_day_off ? "休假" : hasRealShift ? "已排班" : "—";
+          const busy = busyDate === d;
+          return (
+            <div key={d} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", borderBottom: `1px solid ${T.line}`, flexWrap: "wrap", gap: 8 }}>
+              <span style={{ fontSize: 13.5 }}>{d.slice(5)}（週{weekdayZh(d)}）<span style={{ color: T.sub, marginLeft: 8 }}>{status}</span></span>
+              {hasRealShift ? (
+                <span style={{ color: T.sub, fontSize: 12 }}>已排班，如需異動請洽店長</span>
+              ) : (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="ph-btn small" disabled={busy} onClick={() => pickDayOff(d)}>休假</button>
+                  <button className="ph-btn small" disabled={busy} onClick={() => pickAnnualLeave(d)}>特休</button>
+                  {(s || req) && <button className="ph-btn small danger" disabled={busy} onClick={() => clearDay(d)}>取消</button>}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
