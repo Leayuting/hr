@@ -1351,7 +1351,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     const draft = {};
     rosterActive.forEach((r) => {
       const e = entryMap[r.id];
-      draft[r.id] = e ? { ...e } : { late: false, late_hours: "", missed_punch: false, leave: false, leave_hours: "", overtime: false, overtime_hours: "", reason: "", improvement: "", note: "" };
+      draft[r.id] = e ? { ...e } : { late: false, late_minutes: "", missed_punch: false, leave: false, leave_hours: "", overtime: false, overtime_hours: "", reason: "", improvement: "", note: "" };
     });
     setEntries(draft);
     setAttachments(attachRows);
@@ -1376,7 +1376,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
       if (anomaly && !e.reason?.trim()) { toast(`${r.name}的異常須填寫「其他異常／補充」說明`); return; }
       if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { toast(`${r.name}的加班時數須以 0.5 小時為單位`); return; }
-      if (e.late && !isHalfHourStep(Number(e.late_hours))) { toast(`${r.name}的遲到時數須以 0.5 小時為單位`); return; }
+      if (e.late && !(Number.isInteger(Number(e.late_minutes)) && Number(e.late_minutes) > 0)) { toast(`${r.name}的遲到分鐘數須為正整數`); return; }
       if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { toast(`${r.name}的請假時數須以 0.5 小時為單位`); return; }
     }
     setActionBusy(true);
@@ -1395,7 +1395,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         const e = entries[r.id];
         await sb.from("daily_report_entries").upsert({
           daily_report_id: reportId, store_id: storeId, employee_id: r.id,
-          late: e.late, late_hours: e.late ? Number(e.late_hours) : null,
+          late: e.late, late_minutes: e.late ? Number(e.late_minutes) : null,
           missed_punch: e.missed_punch, leave: e.leave, leave_hours: e.leave ? Number(e.leave_hours) : null,
           overtime: e.overtime, overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
@@ -1515,8 +1515,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                         <td>
                           <input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} />
                           {e.late && (
-                            <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="0.5" min="0.5" placeholder="時數"
-                              disabled={dis} value={e.late_hours} onChange={(ev) => updateEntry(r.id, { late_hours: ev.target.value })} />
+                            <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="1" min="1" placeholder="分鐘"
+                              disabled={dis} value={e.late_minutes} onChange={(ev) => updateEntry(r.id, { late_minutes: ev.target.value })} />
                           )}
                         </td>
                         <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /></td>
@@ -1560,8 +1560,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                     </div>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                       {e.late && (
-                        <input className="ph-input" style={{ width: 90 }} type="number" step="0.5" min="0.5" placeholder="遲到時數"
-                          disabled={dis} value={e.late_hours} onChange={(ev) => updateEntry(r.id, { late_hours: ev.target.value })} />
+                        <input className="ph-input" style={{ width: 90 }} type="number" step="1" min="1" placeholder="遲到分鐘"
+                          disabled={dis} value={e.late_minutes} onChange={(ev) => updateEntry(r.id, { late_minutes: ev.target.value })} />
                       )}
                       {e.leave && (
                         <input className="ph-input" style={{ width: 90 }} type="number" step="0.5" min="0.5" placeholder="請假時數"
