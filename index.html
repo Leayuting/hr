@@ -268,7 +268,10 @@ const css = `
 .ph-nav-item.on::before { content:""; position:absolute; left:-14px; top:8px; bottom:8px; width:3px; border-radius:2px; background:${T.gold}; }
 .ph-nav-item .ph-nav-icon { display:flex; flex-shrink:0; opacity:.9; }
 .ph-nav-item .ph-nav-badge { margin-left:auto; background:${T.gold}; color:#241C16; font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px; }
-.ph-sidebar-foot { margin-top:auto; padding-top:14px; border-top:1px solid ${T.sidebarLine}; display:flex; align-items:center; gap:10px; }
+.ph-sidebar-foot { margin-top:auto; padding-top:14px; border-top:1px solid ${T.sidebarLine}; display:flex; flex-direction:column; gap:10px; }
+.ph-sidebar-foot-id { display:flex; align-items:center; gap:10px; min-width:0; }
+.ph-sidebar-foot-actions { display:flex; gap:8px; }
+.ph-sidebar-foot-actions .ph-btn { flex:1; }
 .ph-avatar { width:34px; height:34px; border-radius:999px; background:${T.brown}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:600; flex-shrink:0; }
 .ph-topbar { position:sticky; top:0; z-index:40; display:flex; align-items:center; gap:14px; padding:14px 28px; background:${T.bg}; border-bottom:1px solid ${T.line}; flex-wrap:wrap; }
 .ph-pill { display:inline-flex; align-items:center; padding:4px 12px; border-radius:999px; font-size:12px; font-weight:500; background:${T.brownSoft}; color:${T.brown}; white-space:nowrap; }
@@ -2771,13 +2774,17 @@ function AppShell({ session }) {
           ))}
         </div>
         <div className="ph-sidebar-foot">
-          <div className="ph-avatar">{me.name.slice(0, 1)}</div>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{me.name}</div>
-            <div style={{ fontSize: 11.5, color: T.sidebarSub }}>{TIER_LABEL[me.access_tier]}</div>
+          <div className="ph-sidebar-foot-id">
+            <div className="ph-avatar">{me.name.slice(0, 1)}</div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{me.name}</div>
+              <div style={{ fontSize: 11.5, color: T.sidebarSub, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{TIER_LABEL[me.access_tier]}</div>
+            </div>
           </div>
-          <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => setShowChangePassword(true)}>更改密碼</button>
-          <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => sb.auth.signOut()}>登出</button>
+          <div className="ph-sidebar-foot-actions">
+            <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => setShowChangePassword(true)}>更改密碼</button>
+            <button className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => sb.auth.signOut()}>登出</button>
+          </div>
         </div>
       </aside>
 
