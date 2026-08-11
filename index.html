@@ -1323,7 +1323,9 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
     setLoading(true);
     const repRes = await sb.from("daily_reports").select("*").in("store_id", scopeStoreIds).eq("report_date", date);
     if (repRes.error) console.error("daily_reports", repRes.error);
-    const reps = repRes.data || [];
+    // 非「填寫」層級（例如人資、最高管理員的跨店檢視）只看得到已最終送出的日總表，未送出的草稿視同尚未繳交
+    const canFill = me.permissions?.daily_report === "fill";
+    const reps = (repRes.data || []).filter((r) => canFill || r.status !== "draft");
     setReports(reps);
     const reportIds = reps.map((r) => r.id);
     const [entriesRes, attachRes, rosterResList] = await Promise.all([
@@ -1341,7 +1343,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
     setAttachCounts(fCounts);
     setNameById(Object.fromEntries(rosterResList.flatMap((r) => r.data || []).map((e) => [e.id, e.name])));
     setLoading(false);
-  }, [scopeStoreIds, date]);
+  }, [scopeStoreIds, date, me.permissions?.daily_report]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -3345,6 +3347,12 @@ function AppShell({ session }) {
   }, [me, scope, stores, storeId]);
   // 需要單一門市才能寫入的頁面（排班/每日回報/薪資/人員）用這個：跨店範圍的人選「全部門市」時為 null，要求先選定一間店
   const activeStoreId = me?.isGlobalScope ? (scope === "all" ? null : scope) : storeId;
+  // 每日回報「unit／all」代表可跨店查看（例如人資），即使該員工的 access_tier 本身不是跨店層級，也要能看到全部門市
+  const dailyReportScopeStoreIds = useMemo(() => {
+    if (!me) return [];
+    if (me.access_tier === "super_admin" || ["unit", "all"].includes(me.permissions?.daily_report)) return stores.map((s) => s.id);
+    return scopeStoreIds;
+  }, [me, stores, scopeStoreIds]);
 
   const loadPendingCount = useCallback(() => {
     if (!canReview || !scopeStoreIds.length) { setPendingCount(0); return; }
@@ -3450,7 +3458,7 @@ function AppShell({ session }) {
               ? <MySchedulePage me={me} />
               : <SchedulePage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />)}
             {page === "requests" && <RequestsPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setScope={setScope} toast={toast} />}
-            {page === "daily_report" && perm.daily_report !== "none" && <DailyReportPage me={me} stores={stores} storeId={storeId} scopeStoreIds={scopeStoreIds} toast={toast} />}
+            {page === "daily_report" && perm.daily_report !== "none" && <DailyReportPage me={me} stores={stores} storeId={storeId} scopeStoreIds={dailyReportScopeStoreIds} toast={toast} />}
             {page === "payroll" && perm.payroll && perm.payroll !== "self" && <PayrollPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />}
             {page === "staff" && (perm.staff && perm.staff !== "self"
               ? <StaffPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />
