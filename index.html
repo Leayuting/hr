@@ -83,11 +83,31 @@ const FEATURE_LEVEL_OPTIONS = {
   backup: ["none", "download", "manage"],
   permission_admin: ["none", "manage"],
 };
-const REQ_TYPE_LABEL = { annual_leave: "特休", personal_leave: "事假", overtime: "加班" };
+const REQ_TYPE_LABEL = {
+  annual_leave: "特休", personal_leave: "事假", marriage_leave: "婚假", bereavement_leave: "喪假",
+  sick_leave: "普通傷病假", official_leave: "公假", injury_leave: "公傷病假", overtime: "加班",
+};
 const REQ_TYPE_PILL = {
   annual_leave: { bg: "#E7EAE1", fg: "#4B5530" },
   overtime: { bg: "#E8E3F0", fg: "#6B5B95" },
   personal_leave: { bg: "#F1E7DD", fg: "#A34F2D" },
+  marriage_leave: { bg: "#F3E2E8", fg: "#96355C" },
+  bereavement_leave: { bg: "#E4E4E4", fg: "#555555" },
+  sick_leave: { bg: "#DCEAF0", fg: "#2E6A82" },
+  official_leave: { bg: "#EDEBDA", fg: "#7A6A2A" },
+  injury_leave: { bg: "#F0DEDA", fg: "#8A4030" },
+};
+// 假別的薪資規則（依勞工請假規則）：工資是否照給、是否影響全勤獎金
+// full＝工資照給不扣款；half＝工資折半（普通傷病假）；unpaid＝不給工資（事假）
+// 全勤獎金：protected＝不受影響；prorate＝依請假比例扣除；unaffected＝目前不特別處理（沿用既有事假規則）
+const LEAVE_PAY_RULES = {
+  annual_leave: { wage: "full", bonus: "protected" },
+  personal_leave: { wage: "unpaid", bonus: "unaffected" },
+  marriage_leave: { wage: "full", bonus: "protected" },
+  bereavement_leave: { wage: "full", bonus: "protected" },
+  sick_leave: { wage: "half", bonus: "prorate" },
+  official_leave: { wage: "full", bonus: "protected" },
+  injury_leave: { wage: "full", bonus: "protected" },
 };
 const REQ_STATUS_LABEL = { pending: "待審核", approved: "已核准", rejected: "已拒絕" };
 const REPORT_STATUS_LABEL = { draft: "未送出", submitted: "待簽核", signed: "待人資交接", hr_received: "已完成" };
@@ -174,15 +194,37 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   const workedHours = empShifts.filter((s) => !s.is_day_off && s.start_time && s.end_time).reduce((sum, s) => sum + shiftHours(s.start_time, s.end_time), 0);
   const overtimeRequests = empRequests.filter((r) => r.type === "overtime");
   const overtimeHours = overtimeRequests.reduce((s, r) => s + Number(r.hours), 0);
-  const personalLeaveHours = empRequests.filter((r) => r.type === "personal_leave").reduce((s, r) => s + Number(r.hours), 0);
   const isFullTime = emp.employment_type === "full_time";
   const hourlyBase = isFullTime ? Number(emp.base_salary) / 240 : Number(emp.hourly_rate);
   const overtimePay = overtimeRequests.reduce((sum, r) => sum + overtimePayForRequest(hourlyBase, r.hours, r.overtime_type || "workday"), 0);
-  const attendanceDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0;
+
+  // 依《勞工請假規則》：事假不給工資、普通傷病假工資折半、婚假/喪假/公假/公傷病假工資照給不扣款
+  const leaveHoursByType = {};
+  let wageLeaveDeduction = 0;
+  let bonusProrateHours = 0;
+  Object.keys(LEAVE_PAY_RULES).forEach((type) => {
+    const hours = empRequests.filter((r) => r.type === type).reduce((s, r) => s + Number(r.hours), 0);
+    leaveHoursByType[type] = hours;
+    if (!isFullTime || hours <= 0) return;
+    const rule = LEAVE_PAY_RULES[type];
+    if (rule.wage === "unpaid") wageLeaveDeduction += hours * hourlyBase;
+    else if (rule.wage === "half") wageLeaveDeduction += hours * hourlyBase * 0.5;
+    if (rule.bonus === "prorate") bonusProrateHours += hours;
+  });
+  const personalLeaveHours = leaveHoursByType.personal_leave || 0;
+  const personalLeaveDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0;
+  const sickLeaveHours = leaveHoursByType.sick_leave || 0;
+  const sickLeaveDeduction = isFullTime ? sickLeaveHours * hourlyBase * 0.5 : 0;
+  const attendanceDeduction = wageLeaveDeduction;
+
   const basePay = isFullTime ? Number(emp.base_salary) : workedHours * Number(emp.hourly_rate);
   const mealAllowance = Number(emp.meal_allowance) || 0;
   const positionAllowance = Number(emp.position_allowance) || 0;
   const fullAttendanceBonus = Number(emp.bonus) || 0;
+  // 普通傷病假：全勤獎金依請假時數比例扣除（比例基準沿用系統既有的月標準工時 240 小時）
+  const bonusProrateDeduction = isFullTime && fullAttendanceBonus > 0
+    ? Math.min(fullAttendanceBonus, fullAttendanceBonus * (bonusProrateHours / 240))
+    : 0;
   const laborInsuranceFee = Number(emp.labor_insurance_fee) || 0;
   const healthInsuranceFee = Number(emp.health_insurance_fee) || 0;
   const incomeTax = Number(emp.income_tax) || 0;
@@ -193,11 +235,12 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   const taxableAdjustments = confirmedAdjustments.filter((a) => a.taxable).reduce((sum, a) => sum + Number(a.amount), 0);
   const grossPay = basePay + mealAllowance + positionAllowance + overtimePay + fullAttendanceBonus + adjustmentsTotal;
   const taxableIncome = grossPay - mealAllowance - (adjustmentsTotal - taxableAdjustments);
-  const totalDeduction = attendanceDeduction + laborInsuranceFee + healthInsuranceFee + incomeTax;
+  const totalDeduction = attendanceDeduction + bonusProrateDeduction + laborInsuranceFee + healthInsuranceFee + incomeTax;
   const total = grossPay - totalDeduction;
   return {
-    emp, workedHours, overtimeHours, personalLeaveHours, basePay, mealAllowance, positionAllowance,
-    overtimePay, fullAttendanceBonus, attendanceDeduction, laborInsuranceFee, healthInsuranceFee, incomeTax,
+    emp, workedHours, overtimeHours, personalLeaveHours, leaveHoursByType, basePay, mealAllowance, positionAllowance,
+    overtimePay, fullAttendanceBonus, attendanceDeduction, personalLeaveDeduction, sickLeaveHours, sickLeaveDeduction,
+    bonusProrateDeduction, laborInsuranceFee, healthInsuranceFee, incomeTax,
     empAdjustments: confirmedAdjustments, pendingAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
   };
 }
@@ -1065,9 +1108,7 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", margin: "18px 0 14px" }}>
         <select className="ph-input" style={{ width: 130 }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
           <option value="all">全部類型</option>
-          <option value="annual_leave">特休</option>
-          <option value="personal_leave">事假</option>
-          <option value="overtime">加班</option>
+          {Object.entries(REQ_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
         <select className="ph-input" style={{ width: 130 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="all">全部狀態</option>
@@ -1172,9 +1213,7 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
     <Modal title="送出請假／加班申請" onClose={onClose}>
       <Field label="類型">
         <select className="ph-input" value={type} onChange={(e) => setType(e.target.value)}>
-          <option value="annual_leave">特休</option>
-          <option value="personal_leave">事假</option>
-          <option value="overtime">加班</option>
+          {Object.entries(REQ_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
       </Field>
       {type === "overtime" && (
@@ -1859,7 +1898,9 @@ function PayslipModal({ store, ym, periodLabel, row, onClose }) {
               {row.empAdjustments.filter((a) => Number(a.amount) < 0).map((a) => (
                 <PayslipRow key={a.id} label={a.label} value={-a.amount} />
               ))}
-              <PayslipRow label="遲到／請假／曠職" value={row.attendanceDeduction} />
+              {row.personalLeaveDeduction > 0 && <PayslipRow label="事假扣款（不給工資）" value={row.personalLeaveDeduction} />}
+              {row.sickLeaveDeduction > 0 && <PayslipRow label="普通傷病假扣款（工資折半）" value={row.sickLeaveDeduction} />}
+              {row.bonusProrateDeduction > 0 && <PayslipRow label="全勤獎金比例扣除（普通傷病假）" value={row.bonusProrateDeduction} />}
               <PayslipRow label="勞保費" value={row.laborInsuranceFee} />
               <PayslipRow label="健保費" value={row.healthInsuranceFee} />
               <PayslipRow label="所得稅" value={row.incomeTax} />
@@ -1959,13 +2000,13 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   }
 
   function exportCsv() {
-    const head = ["姓名", "到職日", "計薪方式", "基本薪資", "伙食費", "職務津貼", "加班費", "全勤獎金", "本月調整項", "應發總額", "遲到/請假/曠職扣款", "勞保費", "健保費", "所得稅", "應稅所得", "應減總額", "實發金額"];
+    const head = ["姓名", "到職日", "計薪方式", "基本薪資", "伙食費", "職務津貼", "加班費", "全勤獎金", "本月調整項", "應發總額", "請假扣款", "全勤獎金比例扣除", "勞保費", "健保費", "所得稅", "應稅所得", "應減總額", "實發金額"];
     const lines = [head.join(",")].concat(rows.map((r) => [
       r.emp.name, r.emp.hire_date || "", r.emp.employment_type === "full_time" ? "全職" : "兼職",
       Math.round(r.basePay), Math.round(r.mealAllowance), Math.round(r.positionAllowance), Math.round(r.overtimePay), Math.round(r.fullAttendanceBonus),
       `"${Math.round(r.adjustmentsTotal)}${r.empAdjustments.length ? ` (${r.empAdjustments.map((a) => a.label).join("／")})` : ""}"`,
       Math.round(r.grossPay),
-      Math.round(r.attendanceDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.taxableIncome), Math.round(r.totalDeduction),
+      Math.round(r.attendanceDeduction), Math.round(r.bonusProrateDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.taxableIncome), Math.round(r.totalDeduction),
       Math.round(r.total),
     ].join(",")));
     const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
@@ -2053,14 +2094,14 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                 <th rowSpan={2} className="ph-hide-mobile">計薪方式</th>
                 <th colSpan={3} style={{ textAlign: "center" }}>薪資結構</th>
                 <th colSpan={3} style={{ textAlign: "center" }}>薪資科目加項</th>
-                <th colSpan={4} style={{ textAlign: "center" }}>薪資科目扣項</th>
+                <th colSpan={5} style={{ textAlign: "center" }}>薪資科目扣項</th>
                 <th colSpan={4} style={{ textAlign: "center" }}>薪資總計</th>
                 <th rowSpan={2}>個人明細</th>
               </tr>
               <tr>
                 <th>基本薪資</th><th>伙食費</th><th>職務津貼</th>
                 <th>加班費</th><th>全勤獎金</th><th>本月調整</th>
-                <th>遲到/請假/曠職</th><th>勞保費</th><th>健保費</th><th>所得稅</th>
+                <th>請假扣款</th><th>全勤獎金比例扣除</th><th>勞保費</th><th>健保費</th><th>所得稅</th>
                 <th>應稅所得</th><th>應發總額</th><th>應減總額</th><th>實發金額</th>
               </tr>
             </thead>
@@ -2086,6 +2127,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                     )}
                   </td>
                   <td>{money(r.attendanceDeduction)}</td>
+                  <td>{money(r.bonusProrateDeduction)}</td>
                   <td>{money(r.laborInsuranceFee)}</td>
                   <td>{money(r.healthInsuranceFee)}</td>
                   <td>{money(r.incomeTax)}</td>
@@ -2096,7 +2138,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                   <td><button className="ph-btn small" onClick={() => setPayslipRow(r)}>薪資明細 →</button></td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={18} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={19} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
             </tbody>
           </table>
         </div>
@@ -2732,7 +2774,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
   const monthScheduledCount = new Set(scopedMonthShifts.map((s) => s.employee_id)).size;
   const monthPlannedHours = scopedMonthShifts.reduce((sum, s) => sum + shiftHours(s.start_time, s.end_time), 0);
   const scopedPending = pendingReqs.filter((r) => scopeStoreIds.includes(r.store_id));
-  const pendingLeave = scopedPending.filter((r) => r.type === "annual_leave" || r.type === "personal_leave").length;
+  const pendingLeave = scopedPending.filter((r) => r.type !== "overtime").length;
   const pendingOvertime = scopedPending.filter((r) => r.type === "overtime").length;
   const scopedTodayReports = todayReports.filter((r) => scopeStoreIds.includes(r.store_id));
   const reportDoneCount = scopedTodayReports.filter((r) => r.status === "hr_received").length;
