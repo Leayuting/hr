@@ -59,8 +59,8 @@ const TIER_LABEL = {
   admin_specialist: "行政專責",
   staff: "一般夥伴",
 };
-// 可以用 PIN 快速登入的層級（一般夥伴＋行政專責）
-const PIN_ELIGIBLE_TIERS = ["staff", "admin_specialist"];
+// 可以用 PIN 快速登入的層級：除了最高管理員（需要真正帳密登入），其他層級一律可用 PIN
+const PIN_ELIGIBLE_TIERS = ["staff", "admin_specialist", "dept_manager", "ops_admin"];
 const FEATURE_LABEL = {
   dashboard: "營運總覽", schedule: "門市排班", daily_report: "每日回報", requests: "申請審核",
   payroll: "薪資試算", staff: "人員資料", backup: "備份", permission_admin: "權限管理",
