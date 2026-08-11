@@ -162,6 +162,23 @@ function monthDays(yearMonth) {
   return new Date(y, m, 0).getDate();
 }
 function money(n) { return Math.round(Number(n) || 0).toLocaleString("zh-TW"); }
+// 依勞基法第38條年資對照表算特休天數（以到職日起算，asOfDateStr 預設抓今天）
+function annualLeaveDaysForSeniority(hireDateStr, asOfDateStr) {
+  if (!hireDateStr) return 0;
+  const hire = new Date(hireDateStr + "T00:00:00Z");
+  const asOf = new Date((asOfDateStr || todayStr()) + "T00:00:00Z");
+  if (asOf < hire) return 0;
+  let months = (asOf.getUTCFullYear() - hire.getUTCFullYear()) * 12 + (asOf.getUTCMonth() - hire.getUTCMonth());
+  if (asOf.getUTCDate() < hire.getUTCDate()) months -= 1;
+  if (months < 6) return 0;
+  if (months < 12) return 3;
+  const years = Math.floor(months / 12);
+  if (years < 2) return 7;
+  if (years < 3) return 10;
+  if (years < 5) return 14;
+  if (years < 10) return 15;
+  return Math.min(30, 15 + (years - 9));
+}
 function isHalfHourStep(n) { return Number.isFinite(n) && n > 0 && Math.round(n * 2) === n * 2; }
 function shiftHours(startTime, endTime) {
   if (!startTime || !endTime) return 0;
@@ -2432,6 +2449,10 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
                   <div style={{ color: T.sub, marginBottom: 4 }}>狀態</div>
                   <div style={{ fontWeight: 600, color: r.active ? T.green : T.sub }}>{r.active ? "在職" : "停用"}</div>
                 </div>
+                <div>
+                  <div style={{ color: T.sub, marginBottom: 4 }}>特休天數</div>
+                  <div style={{ fontWeight: 600 }}>{r.annual_leave_days ?? annualLeaveDaysForSeniority(r.hire_date)} 天{r.annual_leave_days == null ? "（自動計算）" : ""}</div>
+                </div>
               </div>
               {me.permissions?.staff === "edit" && (
                 <button className="ph-btn small" style={{ width: "100%" }} onClick={() => setEditing({ ...r })}>查看資料</button>
@@ -2462,6 +2483,7 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const [hourlyRate, setHourlyRate] = useState(editing.hourly_rate ?? 0);
   const [bonus, setBonus] = useState(editing.bonus ?? 0);
   const [hireDate, setHireDate] = useState(editing.hire_date || "");
+  const [annualLeaveDays, setAnnualLeaveDays] = useState(editing.annual_leave_days ?? "");
   const [mealAllowance, setMealAllowance] = useState(editing.meal_allowance ?? 0);
   const [positionAllowance, setPositionAllowance] = useState(editing.position_allowance ?? 0);
   const [laborInsuranceFee, setLaborInsuranceFee] = useState(editing.labor_insurance_fee ?? 0);
@@ -2489,6 +2511,7 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
       payload.labor_insurance_fee = Number(laborInsuranceFee) || 0;
       payload.health_insurance_fee = Number(healthInsuranceFee) || 0;
       payload.income_tax = Number(incomeTax) || 0;
+      payload.annual_leave_days = annualLeaveDays === "" ? null : Number(annualLeaveDays);
     }
     let error, newId = editing.id;
     if (editing.isNew) {
@@ -2566,6 +2589,11 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
         <Field label={"時薪（兼職）" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} /></Field>
       </div>
       <Field label="到職日"><input className="ph-input" type="date" value={hireDate} onChange={(e) => setHireDate(e.target.value)} /></Field>
+      <Field label={"特休天數" + (isHr ? "" : "（僅最高管理員可調整）")}>
+        <input className="ph-input" type="number" min="0" max="30" disabled={!isHr} placeholder={`留空＝依到職日自動算（目前 ${annualLeaveDaysForSeniority(hireDate)} 天）`}
+          value={annualLeaveDays} onChange={(e) => setAnnualLeaveDays(e.target.value)} />
+        {isHr && <p style={{ color: T.sub, fontSize: 11.5, margin: "6px 0 0" }}>留空會依《勞基法》第38條年資對照表自動計算；填數字則覆蓋自動計算結果。</p>}
+      </Field>
       <div style={{ display: "flex", gap: 8 }}>
         <Field label={"伙食費" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={mealAllowance} onChange={(e) => setMealAllowance(e.target.value)} /></Field>
         <Field label={"職務津貼" + (isHr ? "" : "（僅最高管理員可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={positionAllowance} onChange={(e) => setPositionAllowance(e.target.value)} /></Field>
