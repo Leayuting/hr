@@ -841,10 +841,16 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast }
   const [pickFrom, setPickFrom] = useState("");
   const [pickTo, setPickTo] = useState("");
   const [pickBusy, setPickBusy] = useState(false);
+  const [blackoutDates, setBlackoutDates] = useState([]);
+  const [newBlackout, setNewBlackout] = useState("");
+  const [blackoutBusy, setBlackoutBusy] = useState(false);
   useEffect(() => {
     setPickFrom(activeStore?.leave_pick_open_from || "");
     setPickTo(activeStore?.leave_pick_open_to || "");
-  }, [activeStoreId, activeStore?.leave_pick_open_from, activeStore?.leave_pick_open_to]);
+    setBlackoutDates(activeStore?.leave_pick_blackout_dates || []);
+  }, [activeStoreId, activeStore?.leave_pick_open_from, activeStore?.leave_pick_open_to, activeStore?.leave_pick_blackout_dates]);
+  // 夥伴實際能挑選的目標月份＝提交期間開始日期的下個月（提交期間本身只是「開放讓夥伴進來排休的那幾天」，不是可排的日期範圍）
+  const targetMonth = pickFrom ? nextMonthStr(pickFrom.slice(0, 7)) : "";
 
   async function savePickWindow(openFrom, openTo) {
     if (!activeStoreId) return;
@@ -853,12 +859,42 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast }
       const { error } = await sb.rpc("set_leave_pick_window", { p_store_id: activeStoreId, p_open_from: openFrom || null, p_open_to: openTo || null });
       if (error) { toast("設定失敗：" + error.message); return; }
       setPickFrom(openFrom || ""); setPickTo(openTo || "");
-      if (activeStore) { activeStore.leave_pick_open_from = openFrom || null; activeStore.leave_pick_open_to = openTo || null; }
+      const newBlackoutDates = openFrom && openTo ? blackoutDates.filter((d) => d.slice(0, 7) === nextMonthStr(openFrom.slice(0, 7))) : [];
+      setBlackoutDates(newBlackoutDates);
+      if (activeStore) {
+        activeStore.leave_pick_open_from = openFrom || null;
+        activeStore.leave_pick_open_to = openTo || null;
+        activeStore.leave_pick_blackout_dates = newBlackoutDates;
+      }
       await logAudit(me.name, "set_leave_pick_window", activeStoreId, `${openFrom || "—"} ~ ${openTo || "—"}`);
-      toast(openFrom && openTo ? "已開放劃假期間" : "已關閉劃假期間");
+      toast(openFrom && openTo ? "已開放提交期間" : "已關閉提交期間");
     } finally {
       setPickBusy(false);
     }
+  }
+
+  async function saveBlackoutDates(next) {
+    if (!activeStoreId) return;
+    setBlackoutBusy(true);
+    try {
+      const { error } = await sb.rpc("set_leave_pick_blackout_dates", { p_store_id: activeStoreId, p_blackout_dates: next });
+      if (error) { toast("設定失敗：" + error.message); return; }
+      setBlackoutDates(next);
+      if (activeStore) activeStore.leave_pick_blackout_dates = next;
+      await logAudit(me.name, "set_leave_pick_blackout_dates", activeStoreId, next.join("、") || "（清空）");
+    } finally {
+      setBlackoutBusy(false);
+    }
+  }
+
+  function addBlackoutDate() {
+    if (!newBlackout || blackoutDates.includes(newBlackout)) { setNewBlackout(""); return; }
+    saveBlackoutDates([...blackoutDates, newBlackout].sort());
+    setNewBlackout("");
+  }
+
+  function removeBlackoutDate(d) {
+    saveBlackoutDates(blackoutDates.filter((x) => x !== d));
   }
 
   return (
@@ -879,17 +915,40 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast }
         整月排班（{Number(ym.slice(5, 7))}/1–{Number(ym.slice(5, 7))}/{days}）；各門店分開處理，點擊班次即可修改。
       </p>
       {canEdit && activeStoreId && (
-        <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <div style={{ fontSize: 12.5, color: T.sub, minWidth: 200 }}>
-            <strong style={{ color: T.ink }}>夥伴自助劃假期間</strong>
-            <div>{activeStore?.name}用門市 PIN 登入後，可在此區間內自己劃休假／特休。</div>
+        <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12.5, color: T.sub, minWidth: 200 }}>
+              <strong style={{ color: T.ink }}>夥伴自助排休・提交期間</strong>
+              <div>{activeStore?.name}用門市 PIN 登入後，在此期間內可以預先排下個月（{targetMonth ? `${targetMonth.slice(0, 4)}年${Number(targetMonth.slice(5, 7))}月` : "—"}）的休假／特休，不是排這幾天本身。</div>
+            </div>
+            <input className="ph-input" style={{ width: 150 }} type="date" value={pickFrom} onChange={(e) => setPickFrom(e.target.value)} />
+            <span style={{ color: T.sub }}>～</span>
+            <input className="ph-input" style={{ width: 150 }} type="date" value={pickTo} onChange={(e) => setPickTo(e.target.value)} />
+            <button className="ph-btn small primary" disabled={pickBusy || !pickFrom || !pickTo} onClick={() => savePickWindow(pickFrom, pickTo)}>{pickBusy ? "設定中…" : "設定開放"}</button>
+            {(activeStore?.leave_pick_open_from || activeStore?.leave_pick_open_to) && (
+              <button className="ph-btn small" disabled={pickBusy} onClick={() => savePickWindow(null, null)}>關閉</button>
+            )}
           </div>
-          <input className="ph-input" style={{ width: 150 }} type="date" value={pickFrom} onChange={(e) => setPickFrom(e.target.value)} />
-          <span style={{ color: T.sub }}>～</span>
-          <input className="ph-input" style={{ width: 150 }} type="date" value={pickTo} onChange={(e) => setPickTo(e.target.value)} />
-          <button className="ph-btn small primary" disabled={pickBusy || !pickFrom || !pickTo} onClick={() => savePickWindow(pickFrom, pickTo)}>{pickBusy ? "設定中…" : "設定開放"}</button>
-          {(activeStore?.leave_pick_open_from || activeStore?.leave_pick_open_to) && (
-            <button className="ph-btn small" disabled={pickBusy} onClick={() => savePickWindow(null, null)}>關閉</button>
+          {activeStore?.leave_pick_open_from && activeStore?.leave_pick_open_to && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.line}`, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ fontSize: 12.5, color: T.sub, minWidth: 200 }}>
+                <strong style={{ color: T.ink }}>{targetMonth ? `${Number(targetMonth.slice(5, 7))}月` : ""}禁休日</strong>
+                <div>指定的日子夥伴不能自助排休假／特休（例如出杯量大的日子）。</div>
+              </div>
+              <input className="ph-input" style={{ width: 150 }} type="date"
+                min={`${targetMonth}-01`} max={targetMonth ? `${targetMonth}-${pad2(monthDays(targetMonth))}` : undefined}
+                value={newBlackout} onChange={(e) => setNewBlackout(e.target.value)} />
+              <button className="ph-btn small" disabled={blackoutBusy || !newBlackout} onClick={addBlackoutDate}>加入禁休日</button>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {blackoutDates.map((d) => (
+                  <span key={d} className="ph-pill" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {d.slice(5)}
+                    <button type="button" disabled={blackoutBusy} onClick={() => removeBlackoutDate(d)} style={{ border: "none", background: "none", cursor: "pointer", color: T.sub, padding: 0, fontSize: 13 }}>✕</button>
+                  </span>
+                ))}
+                {blackoutDates.length === 0 && <span style={{ fontSize: 12, color: T.sub }}>目前沒有禁休日</span>}
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -1379,6 +1438,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
           {visibleStores.map((s) => {
+            const canFill = me.permissions?.daily_report === "fill";
             const rep = reports.find((r) => r.store_id === s.id);
             const anomalyCount = rep ? (anomalyCounts[rep.id] || 0) : 0;
             const attachCount = rep ? (attachCounts[rep.id] || 0) : 0;
@@ -1402,8 +1462,8 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
                 ) : (
                   <p style={{ fontSize: 12, color: T.sub, margin: "0 0 14px" }}>今日尚未送出每日回報</p>
                 )}
-                <button className="ph-btn small primary" onClick={(e) => { e.stopPropagation(); setOpenStoreId(s.id); }}>
-                  {rep ? "查看回報 →" : "前往填寫 →"}
+                <button className={"ph-btn small" + (canFill ? " primary" : "")} onClick={(e) => { e.stopPropagation(); setOpenStoreId(s.id); }}>
+                  {rep ? "查看回報 →" : canFill ? "前往填寫 →" : "核對資料 →"}
                 </button>
               </div>
             );
@@ -1844,20 +1904,26 @@ function KioskSelfSchedule({ store, toast }) {
 
   const openFrom = store?.leave_pick_open_from;
   const openTo = store?.leave_pick_open_to;
-  const isOpen = !!(openFrom && openTo);
+  const today = todayStr();
+  const isOpen = !!(openFrom && openTo) && today >= openFrom && today <= openTo;
+  const blackoutDates = store?.leave_pick_blackout_dates || [];
+  // 提交期間只是「開放讓夥伴進來排休的那幾天」，夥伴實際能排的目標月份固定是提交期間開始日期的下個月
+  const targetMonth = openFrom ? nextMonthStr(openFrom.slice(0, 7)) : "";
+  const targetFrom = targetMonth ? `${targetMonth}-01` : "";
+  const targetTo = targetMonth ? `${targetMonth}-${pad2(monthDays(targetMonth))}` : "";
 
   const dateList = useMemo(() => {
     if (!isOpen) return [];
     const list = [];
-    let d = openFrom;
+    let d = targetFrom;
     let guard = 0;
-    while (d <= openTo && guard < 366) {
+    while (d <= targetTo && guard < 31) {
       list.push(d);
       d = addDaysStr(d, 1);
       guard++;
     }
     return list;
-  }, [openFrom, openTo, isOpen]);
+  }, [targetFrom, targetTo, isOpen]);
 
   const loadRoster = useCallback(async () => {
     if (!store?.id) return;
@@ -1871,9 +1937,9 @@ function KioskSelfSchedule({ store, toast }) {
   const loadSelectedData = useCallback(async () => {
     if (!selected || !isOpen) return;
     const [shiftRes, reqRes] = await Promise.all([
-      sb.from("shifts").select("*").eq("employee_id", selected.id).gte("work_date", openFrom).lte("work_date", openTo),
+      sb.from("shifts").select("*").eq("employee_id", selected.id).gte("work_date", targetFrom).lte("work_date", targetTo),
       sb.from("requests").select("*").eq("employee_id", selected.id).eq("type", "annual_leave")
-        .gte("start_at", `${openFrom}T00:00:00+08:00`).lte("start_at", `${openTo}T23:59:59+08:00`),
+        .gte("start_at", `${targetFrom}T00:00:00+08:00`).lte("start_at", `${targetTo}T23:59:59+08:00`),
     ]);
     const sMap = {};
     (shiftRes.data || []).forEach((s) => { sMap[s.work_date] = s; });
@@ -1881,7 +1947,7 @@ function KioskSelfSchedule({ store, toast }) {
     const rMap = {};
     (reqRes.data || []).forEach((r) => { rMap[r.start_at.slice(0, 10)] = r; });
     setRequestsByDate(rMap);
-  }, [selected, openFrom, openTo, isOpen]);
+  }, [selected, targetFrom, targetTo, isOpen]);
 
   useEffect(() => { loadSelectedData(); }, [loadSelectedData]);
 
@@ -1941,14 +2007,16 @@ function KioskSelfSchedule({ store, toast }) {
   }
 
   if (!isOpen) {
-    return <div className="ph-card" style={{ padding: 20, textAlign: "center", color: T.sub }}>目前未開放劃假期間，請洽店長或人資。</div>;
+    return <div className="ph-card" style={{ padding: 20, textAlign: "center", color: T.sub }}>目前未開放排休提交期間，請洽店長或人資。</div>;
   }
   if (roster === null) return <p style={{ color: T.sub }}>載入中…</p>;
+
+  const targetMonthLabel = targetMonth ? `${targetMonth.slice(0, 4)}年${Number(targetMonth.slice(5, 7))}月` : "";
 
   if (!selected) {
     return (
       <div>
-        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 10 }}>開放劃假期間：{openFrom} ～ {openTo}，請選擇你的姓名</p>
+        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 10 }}>提交期間：{openFrom} ～ {openTo}，可預先排{targetMonthLabel}的假，請選擇你的姓名</p>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 360 }}>
           {roster.map((r) => (
             <button key={r.id} type="button" className="ph-btn" style={{ textAlign: "left" }} onClick={() => setSelected(r)}>{r.name}</button>
@@ -1962,12 +2030,13 @@ function KioskSelfSchedule({ store, toast }) {
   return (
     <div>
       <button type="button" className="ph-btn small" style={{ marginBottom: 12, border: "none", background: "none", color: T.sub, padding: 0 }} onClick={() => setSelected(null)}>‹ 重新選擇姓名</button>
-      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>{selected.name}・開放期間 {openFrom} ～ {openTo}</p>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>{selected.name}・排{targetMonthLabel}的假（提交期間 {openFrom} ～ {openTo}）</p>
       <div className="ph-card" style={{ padding: 0, overflow: "hidden" }}>
         {dateList.map((d) => {
           const s = shiftsByDate[d];
           const req = requestsByDate[d];
           const hasRealShift = s && !s.is_day_off;
+          const isBlackout = blackoutDates.includes(d);
           const status = req ? "特休" : s?.is_day_off ? "休假" : hasRealShift ? "已排班" : "—";
           const busy = busyDate === d;
           return (
@@ -1975,10 +2044,12 @@ function KioskSelfSchedule({ store, toast }) {
               <span style={{ fontSize: 13.5 }}>{d.slice(5)}（週{weekdayZh(d)}）<span style={{ color: T.sub, marginLeft: 8 }}>{status}</span></span>
               {hasRealShift ? (
                 <span style={{ color: T.sub, fontSize: 12 }}>已排班，如需異動請洽店長</span>
+              ) : isBlackout && !s && !req ? (
+                <span style={{ color: T.red, fontSize: 12 }}>本日禁休</span>
               ) : (
                 <div style={{ display: "flex", gap: 6 }}>
-                  <button className="ph-btn small" disabled={busy} onClick={() => pickDayOff(d)}>休假</button>
-                  <button className="ph-btn small" disabled={busy} onClick={() => pickAnnualLeave(d)}>特休</button>
+                  {!isBlackout && <button className="ph-btn small" disabled={busy} onClick={() => pickDayOff(d)}>休假</button>}
+                  {!isBlackout && <button className="ph-btn small" disabled={busy} onClick={() => pickAnnualLeave(d)}>特休</button>}
                   {(s || req) && <button className="ph-btn small danger" disabled={busy} onClick={() => clearDay(d)}>取消</button>}
                 </div>
               )}
@@ -3175,7 +3246,9 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
                 ? <>{reportDoneCount}<span style={{ fontSize: 15, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}>／{reportScopeStoreIds.length} 店已完成</span></>
                 : REPORT_LABEL2[reportStatusOf(reportScopeStoreIds[0])]}
             </p>
-            <span style={{ fontSize: 12.5, color: !reportAllDone ? T.yellow : T.brown }}>{!reportAllDone ? "每日皆須完成繳交 →" : "前往填寫／查看 →"}</span>
+            <span style={{ fontSize: 12.5, color: !reportAllDone ? T.yellow : T.brown }}>
+              {!reportAllDone ? (me.permissions?.daily_report === "fill" ? "每日皆須完成繳交 →" : "尚有門市未繳交 →") : (me.permissions?.daily_report === "fill" ? "前往填寫／查看 →" : "前往核對 →")}
+            </span>
           </div>
         )}
       </div>
