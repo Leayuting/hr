@@ -3095,9 +3095,11 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
   const scopedPending = pendingReqs.filter((r) => scopeStoreIds.includes(r.store_id));
   const pendingLeave = scopedPending.filter((r) => r.type !== "overtime").length;
   const pendingOvertime = scopedPending.filter((r) => r.type === "overtime").length;
-  const scopedTodayReports = todayReports.filter((r) => scopeStoreIds.includes(r.store_id));
+  // 每日異常回報只有實體門市要填，總部（非門市人員）不用，算「待完成間數」時要排除總部
+  const reportScopeStoreIds = useMemo(() => scopeStoreIds.filter((sid) => storeById[sid]?.name !== "總部"), [scopeStoreIds, storeById]);
+  const scopedTodayReports = todayReports.filter((r) => reportScopeStoreIds.includes(r.store_id));
   const reportDoneCount = scopedTodayReports.filter((r) => r.status === "hr_received").length;
-  const reportAllDone = scopeStoreIds.length > 0 && reportDoneCount === scopeStoreIds.length;
+  const reportAllDone = reportScopeStoreIds.length === 0 || reportDoneCount === reportScopeStoreIds.length;
   function reportStatusOf(sid) {
     const row = todayReports.find((r) => r.store_id === sid);
     return row ? row.status : "missing";
@@ -3165,15 +3167,17 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
           <p className="ph-serif" style={{ fontSize: 32, margin: "0 0 8px" }}>{loading ? "…" : Math.round(monthPlannedHours)}<span style={{ fontSize: 14, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}> 小時</span></p>
           <span style={{ fontSize: 12.5, color: T.brown }}>依目前班表自動加總</span>
         </div>
-        <div className="ph-stat-card accent-maroon" onClick={() => setPage("daily_report")}>
-          <p className="ph-eyebrow" style={{ marginBottom: 8 }}>今日每日回報狀態</p>
-          <p className="ph-serif" style={{ fontSize: scopeStoreIds.length > 1 ? 32 : 20, margin: "0 0 8px", color: scopeStoreIds.length > 1 ? T.ink : T[REPORT_STATUS_TONE[reportStatusOf(scopeStoreIds[0])]] }}>
-            {loading ? "…" : scopeStoreIds.length > 1
-              ? <>{reportDoneCount}<span style={{ fontSize: 15, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}>／{scopeStoreIds.length} 店已完成</span></>
-              : REPORT_LABEL2[reportStatusOf(scopeStoreIds[0])]}
-          </p>
-          <span style={{ fontSize: 12.5, color: !reportAllDone ? T.yellow : T.brown }}>{!reportAllDone ? "每日皆須完成繳交 →" : "前往填寫／查看 →"}</span>
-        </div>
+        {reportScopeStoreIds.length > 0 && (
+          <div className="ph-stat-card accent-maroon" onClick={() => setPage("daily_report")}>
+            <p className="ph-eyebrow" style={{ marginBottom: 8 }}>今日每日回報狀態</p>
+            <p className="ph-serif" style={{ fontSize: reportScopeStoreIds.length > 1 ? 32 : 20, margin: "0 0 8px", color: reportScopeStoreIds.length > 1 ? T.ink : T[REPORT_STATUS_TONE[reportStatusOf(reportScopeStoreIds[0])]] }}>
+              {loading ? "…" : reportScopeStoreIds.length > 1
+                ? <>{reportDoneCount}<span style={{ fontSize: 15, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}>／{reportScopeStoreIds.length} 店已完成</span></>
+                : REPORT_LABEL2[reportStatusOf(reportScopeStoreIds[0])]}
+            </p>
+            <span style={{ fontSize: 12.5, color: !reportAllDone ? T.yellow : T.brown }}>{!reportAllDone ? "每日皆須完成繳交 →" : "前往填寫／查看 →"}</span>
+          </div>
+        )}
       </div>
 
       <div className="ph-card" style={{ marginTop: 22, padding: 18 }}>
@@ -3283,7 +3287,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
           )}
           <TodoRow label="請假申請待審核" count={pendingLeave} onClick={() => setPage("requests")} />
           <TodoRow label="加班申請待審核" count={pendingOvertime} onClick={() => setPage("requests")} />
-          <TodoRow label="電子日總表待處理" count={scopeStoreIds.length - reportDoneCount} unit="間門市" onClick={() => setPage("daily_report")} />
+          <TodoRow label="電子日總表待處理" count={reportScopeStoreIds.length - reportDoneCount} unit="間門市" onClick={() => setPage("daily_report")} />
           {!loading && noTodo && <p style={{ color: T.sub, fontSize: 13, textAlign: "center", padding: "16px 0" }}>目前沒有待辦事項</p>}
         </div>
       </div>
@@ -3347,11 +3351,14 @@ function AppShell({ session }) {
   }, [me, scope, stores, storeId]);
   // 需要單一門市才能寫入的頁面（排班/每日回報/薪資/人員）用這個：跨店範圍的人選「全部門市」時為 null，要求先選定一間店
   const activeStoreId = me?.isGlobalScope ? (scope === "all" ? null : scope) : storeId;
-  // 每日回報「unit／all」代表可跨店查看（例如人資），即使該員工的 access_tier 本身不是跨店層級，也要能看到全部門市
+  // 每日回報「unit／all」代表可跨店查看（例如人資），即使該員工的 access_tier 本身不是跨店層級，也要能看到全部門市；
+  // 總部不是門市，不需要填每日異常回報，一律排除
   const dailyReportScopeStoreIds = useMemo(() => {
     if (!me) return [];
-    if (me.access_tier === "super_admin" || ["unit", "all"].includes(me.permissions?.daily_report)) return stores.map((s) => s.id);
-    return scopeStoreIds;
+    const base = (me.access_tier === "super_admin" || ["unit", "all"].includes(me.permissions?.daily_report))
+      ? stores.map((s) => s.id)
+      : scopeStoreIds;
+    return base.filter((sid) => stores.find((s) => s.id === sid)?.name !== "總部");
   }, [me, stores, scopeStoreIds]);
 
   const loadPendingCount = useCallback(() => {
