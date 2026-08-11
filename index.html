@@ -186,8 +186,11 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   const laborInsuranceFee = Number(emp.labor_insurance_fee) || 0;
   const healthInsuranceFee = Number(emp.health_insurance_fee) || 0;
   const incomeTax = Number(emp.income_tax) || 0;
-  const adjustmentsTotal = empAdjustments.reduce((sum, a) => sum + Number(a.amount), 0);
-  const taxableAdjustments = empAdjustments.filter((a) => a.taxable).reduce((sum, a) => sum + Number(a.amount), 0);
+  // 未確認（confirmed=false，例如每日回報異常自動產生的草稿）不計入薪資，須人資在薪資試算頁確認後才生效
+  const confirmedAdjustments = empAdjustments.filter((a) => a.confirmed !== false);
+  const pendingAdjustments = empAdjustments.filter((a) => a.confirmed === false);
+  const adjustmentsTotal = confirmedAdjustments.reduce((sum, a) => sum + Number(a.amount), 0);
+  const taxableAdjustments = confirmedAdjustments.filter((a) => a.taxable).reduce((sum, a) => sum + Number(a.amount), 0);
   const grossPay = basePay + mealAllowance + positionAllowance + overtimePay + fullAttendanceBonus + adjustmentsTotal;
   const taxableIncome = grossPay - mealAllowance - (adjustmentsTotal - taxableAdjustments);
   const totalDeduction = attendanceDeduction + laborInsuranceFee + healthInsuranceFee + incomeTax;
@@ -195,7 +198,7 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   return {
     emp, workedHours, overtimeHours, personalLeaveHours, basePay, mealAllowance, positionAllowance,
     overtimePay, fullAttendanceBonus, attendanceDeduction, laborInsuranceFee, healthInsuranceFee, incomeTax,
-    empAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
+    empAdjustments: confirmedAdjustments, pendingAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
   };
 }
 async function logAudit(actorLabel, action, target, detail = "") {
@@ -1348,7 +1351,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     const draft = {};
     rosterActive.forEach((r) => {
       const e = entryMap[r.id];
-      draft[r.id] = e ? { ...e } : { late: false, missed_punch: false, leave: false, overtime: false, overtime_hours: "", reason: "", improvement: "", note: "" };
+      draft[r.id] = e ? { ...e } : { late: false, late_hours: "", missed_punch: false, leave: false, leave_hours: "", overtime: false, overtime_hours: "", reason: "", improvement: "", note: "" };
     });
     setEntries(draft);
     setAttachments(attachRows);
@@ -1373,6 +1376,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
       if (anomaly && !e.reason?.trim()) { toast(`${r.name}的異常須填寫「其他異常／補充」說明`); return; }
       if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { toast(`${r.name}的加班時數須以 0.5 小時為單位`); return; }
+      if (e.late && !isHalfHourStep(Number(e.late_hours))) { toast(`${r.name}的遲到時數須以 0.5 小時為單位`); return; }
+      if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { toast(`${r.name}的請假時數須以 0.5 小時為單位`); return; }
     }
     setActionBusy(true);
     try {
@@ -1390,8 +1395,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         const e = entries[r.id];
         await sb.from("daily_report_entries").upsert({
           daily_report_id: reportId, store_id: storeId, employee_id: r.id,
-          late: e.late, missed_punch: e.missed_punch, leave: e.leave, overtime: e.overtime,
-          overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
+          late: e.late, late_hours: e.late ? Number(e.late_hours) : null,
+          missed_punch: e.missed_punch, leave: e.leave, leave_hours: e.leave ? Number(e.leave_hours) : null,
+          overtime: e.overtime, overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
         }, { onConflict: "daily_report_id,employee_id" });
       }
@@ -1506,9 +1512,21 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                     return (
                       <tr key={r.id}>
                         <td><RosterCell r={r} index={idx} /></td>
-                        <td><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} /></td>
+                        <td>
+                          <input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} />
+                          {e.late && (
+                            <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="0.5" min="0.5" placeholder="時數"
+                              disabled={dis} value={e.late_hours} onChange={(ev) => updateEntry(r.id, { late_hours: ev.target.value })} />
+                          )}
+                        </td>
                         <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /></td>
-                        <td><input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} /></td>
+                        <td>
+                          <input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} />
+                          {e.leave && (
+                            <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="0.5" min="0.5" placeholder="時數"
+                              disabled={dis} value={e.leave_hours} onChange={(ev) => updateEntry(r.id, { leave_hours: ev.target.value })} />
+                          )}
+                        </td>
                         <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => updateEntry(r.id, { overtime: ev.target.checked })} /></td>
                         <td style={{ minWidth: 240 }}>
                           {e.overtime && (
@@ -1534,16 +1552,26 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                 return (
                   <div key={r.id} style={{ padding: "12px 0", borderBottom: `1px solid ${T.line}` }}>
                     <RosterCell r={r} index={idx} />
-                    <div style={{ display: "flex", gap: 14, margin: "10px 0" }}>
+                    <div style={{ display: "flex", gap: 14, margin: "10px 0", flexWrap: "wrap" }}>
                       <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} /> 遲到</label>
                       <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /> 漏打卡</label>
                       <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} /> 請假</label>
                       <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => updateEntry(r.id, { overtime: ev.target.checked })} /> 加班</label>
                     </div>
-                    {e.overtime && (
-                      <input className="ph-input" style={{ width: 90, marginBottom: 6 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
-                        disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })} />
-                    )}
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                      {e.late && (
+                        <input className="ph-input" style={{ width: 90 }} type="number" step="0.5" min="0.5" placeholder="遲到時數"
+                          disabled={dis} value={e.late_hours} onChange={(ev) => updateEntry(r.id, { late_hours: ev.target.value })} />
+                      )}
+                      {e.leave && (
+                        <input className="ph-input" style={{ width: 90 }} type="number" step="0.5" min="0.5" placeholder="請假時數"
+                          disabled={dis} value={e.leave_hours} onChange={(ev) => updateEntry(r.id, { leave_hours: ev.target.value })} />
+                      )}
+                      {e.overtime && (
+                        <input className="ph-input" style={{ width: 90 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
+                          disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })} />
+                      )}
+                    </div>
                     <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
                       value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
                       style={anomaly && !e.reason?.trim() ? { borderColor: T.red } : undefined} />
@@ -1712,14 +1740,39 @@ function AdjustmentsModal({ me, emp, storeId, ym, items, locked, onClose, toast 
     await logAudit(me.name, "remove_payroll_adjustment", id);
   }
 
+  async function confirmItem(id) {
+    const { error } = await sb.from("payroll_adjustments").update({ confirmed: true }).eq("id", id);
+    if (error) { toast("確認失敗：" + error.message); return; }
+    await logAudit(me.name, "confirm_payroll_adjustment", id);
+    toast("已確認，計入本月薪資");
+  }
+
+  const pendingItems = items.filter((a) => a.confirmed === false);
+  const confirmedItems = items.filter((a) => a.confirmed !== false);
+
   return (
     <Modal title={`本月調整項・${emp.name}`} onClose={onClose}>
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: -6, marginBottom: 12 }}>
         用於三節獎金、年終獎金等單月才有的加項（也可填負數作為單月扣款）。金額會計入本月「應發總額」，預設計入應稅所得，非應稅項目可取消勾選。
       </p>
-      {items.length > 0 && (
+      {pendingItems.length > 0 && (
         <div style={{ marginBottom: 14 }}>
-          {items.map((a) => (
+          <p style={{ fontSize: 12, color: T.red, fontWeight: 600, margin: "0 0 6px" }}>待確認（每日回報異常自動產生，尚未計入薪資）</p>
+          {pendingItems.map((a) => (
+            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.line}`, background: T.redBg }}>
+              <div style={{ fontSize: 13.5 }}>{a.label}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontWeight: 600 }}>NT$ {money(a.amount)}</span>
+                {!locked && <button className="ph-btn small" onClick={() => confirmItem(a.id)}>確認生效</button>}
+                {!locked && <button className="ph-btn small danger" onClick={() => removeItem(a.id)}>忽略</button>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {confirmedItems.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          {confirmedItems.map((a) => (
             <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
               <div>
                 <div style={{ fontSize: 13.5 }}>{a.label}{!a.taxable && <span style={{ color: T.sub, fontSize: 11.5 }}>（免稅）</span>}</div>
@@ -2024,8 +2077,9 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                   <td>{money(r.fullAttendanceBonus)}</td>
                   <td>
                     {me.permissions?.payroll === "edit" ? (
-                      <button className="ph-btn small" style={r.adjustmentsTotal !== 0 ? { borderColor: T.brown, color: T.brown } : undefined} onClick={() => setAdjustingEmp(r.emp)}>
+                      <button className="ph-btn small" style={r.adjustmentsTotal !== 0 || r.pendingAdjustments.length ? { borderColor: T.brown, color: T.brown } : undefined} onClick={() => setAdjustingEmp(r.emp)}>
                         {r.adjustmentsTotal !== 0 ? `${r.adjustmentsTotal > 0 ? "+" : ""}${money(r.adjustmentsTotal)}` : "＋ 調整"}
+                        {r.pendingAdjustments.length > 0 && <span style={{ marginLeft: 4, color: T.red }}>・{r.pendingAdjustments.length} 筆待確認</span>}
                       </button>
                     ) : (
                       r.adjustmentsTotal !== 0 ? `${r.adjustmentsTotal > 0 ? "+" : ""}${money(r.adjustmentsTotal)}` : "—"
