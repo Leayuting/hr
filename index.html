@@ -450,9 +450,10 @@ function Login() {
       <div className="ph-card" style={{ width: 360, padding: 28 }}>
         <h1 className="ph-serif" style={{ fontSize: 20, marginTop: 0, marginBottom: 4 }}>PHASE 人事排班系統</h1>
         <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 16 }}>排班・請假加班・電子日總表・薪資試算</p>
-        <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
-          <button type="button" className="ph-btn small" style={{ flex: 1, ...(mode === "password" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => { setMode("password"); setErr(""); }}>帳號密碼登入</button>
-          <button type="button" className="ph-btn small" style={{ flex: 1, ...(mode === "pin" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => { setMode("pin"); setErr(""); }}>PIN 快速登入</button>
+        <div style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap" }}>
+          <button type="button" className="ph-btn small" style={{ flex: 1, minWidth: 100, ...(mode === "password" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => { setMode("password"); setErr(""); }}>帳號密碼登入</button>
+          <button type="button" className="ph-btn small" style={{ flex: 1, minWidth: 100, ...(mode === "pin" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => { setMode("pin"); setErr(""); }}>PIN 快速登入</button>
+          <button type="button" className="ph-btn small" style={{ flex: 1, minWidth: 100, ...(mode === "store_pin" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => { setMode("store_pin"); setErr(""); }}>每日回報 PIN</button>
         </div>
         {mode === "password" ? (
           <form onSubmit={submit}>
@@ -471,11 +472,74 @@ function Login() {
               忘記密碼？
             </button>
           </form>
-        ) : (
+        ) : mode === "pin" ? (
           <PinLogin />
+        ) : (
+          <StorePinLogin />
         )}
       </div>
     </div>
+  );
+}
+
+function StorePinLogin() {
+  const [stores, setStores] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    sb.rpc("daily_report_pin_stores").then(({ data, error }) => {
+      if (error) { setErr("載入門市清單失敗：" + error.message); setStores([]); return; }
+      setStores(data || []);
+    });
+  }, []);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!selected) { setErr("請先選擇門市"); return; }
+    setErr(""); setBusy(true);
+    try {
+      const { data: email } = await sb.rpc("daily_report_pin_email", { p_store_id: selected.store_id });
+      if (!email) { setErr("此門市尚未設定每日回報 PIN，請洽最高管理員"); return; }
+      const { error } = await sb.auth.signInWithPassword({ email, password: pin });
+      if (error) { setErr("PIN 錯誤，請再試一次"); setPin(""); return; }
+    } catch (e2) {
+      setErr("登入時發生錯誤：" + (e2?.message || String(e2)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (stores === null) return <p style={{ color: T.sub, fontSize: 12.5 }}>載入中…</p>;
+
+  if (!selected) {
+    return (
+      <div>
+        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 10 }}>請選擇今天要填寫每日回報的門市</p>
+        {err && <div className="ph-err">{err}</div>}
+        {stores.length === 0 && <p style={{ color: T.sub, fontSize: 12.5 }}>目前沒有已設定每日回報 PIN 的門市。</p>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {stores.map((s) => (
+            <button key={s.store_id} type="button" className="ph-btn" onClick={() => { setSelected(s); setErr(""); }}>{s.store_name}</button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <button type="button" className="ph-btn small" style={{ marginBottom: 12, border: "none", background: "none", color: T.sub, padding: 0 }} onClick={() => { setSelected(null); setPin(""); setErr(""); }}>‹ 重新選擇門市</button>
+      <Field label={`${selected.store_name}・請輸入每日回報 PIN`}>
+        <input className="ph-input" style={{ letterSpacing: 4, fontSize: 20, textAlign: "center" }} type="password" inputMode="numeric" pattern="[0-9]*" autoFocus maxLength={20} required value={pin} onChange={(e) => setPin(e.target.value.replace(/[^0-9]/g, ""))} />
+      </Field>
+      {err && <div className="ph-err">{err}</div>}
+      <button className="ph-btn primary" style={{ width: "100%", marginTop: 6 }} disabled={busy} type="submit">
+        {busy ? "登入中…" : "登入"}
+      </button>
+    </form>
   );
 }
 
@@ -1245,7 +1309,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
   );
 }
 
-function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
+function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kioskMode }) {
   const storeId = store?.id;
   const [roster, setRoster] = useState([]);
   const [report, setReport] = useState(null);
@@ -1255,6 +1319,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
   const [loading, setLoading] = useState(true);
   const [attachmentsComplete, setAttachmentsComplete] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [managerName, setManagerName] = useState("");
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -1302,6 +1367,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
   async function submitReport() {
     if (actionBusy) return;
     if (!posVerified) { toast("請先勾選已完成 POS 出缺勤與加班核對"); return; }
+    if (kioskMode && !managerName) { toast("請先選擇當天主管姓名"); return; }
     for (const r of roster) {
       const e = entries[r.id];
       const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
@@ -1311,12 +1377,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
     setActionBusy(true);
     try {
       let reportId = report?.id;
+      const submittedByName = kioskMode ? managerName : null;
       if (!reportId) {
-        const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString() }).select().single();
+        const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), submitted_by_name: submittedByName }).select().single();
         if (error) { toast("送出失敗：" + error.message); return; }
         reportId = data.id;
       } else {
-        const { error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), signed_by: null, signed_at: null }).eq("id", reportId);
+        const { error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), submitted_by_name: submittedByName, signed_by: null, signed_at: null }).eq("id", reportId);
         if (error) { toast("送出失敗：" + error.message); return; }
       }
       for (const r of roster) {
@@ -1394,7 +1461,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 4 }}>
         <div>
-          <button className="ph-btn small" style={{ marginBottom: 10 }} onClick={onBack}>← 返回每日回報</button>
+          {!kioskMode && <button className="ph-btn small" style={{ marginBottom: 10 }} onClick={onBack}>← 返回每日回報</button>}
           <p className="ph-eyebrow" style={{ margin: 0 }}>DAILY OPERATIONS REPORT</p>
           <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每日異常回報</h2>
           <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>本頁為正式電子日總表，完整取代紙本；無論有無異常，每間門店每天都要完成。</p>
@@ -1486,6 +1553,17 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
             </div>
           </div>
 
+          {kioskMode && (
+            <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+              <Field label="送出時當天主管姓名（系統會自動記錄送出時間）">
+                <select className="ph-input" disabled={!canWrite} value={managerName} onChange={(e) => setManagerName(e.target.value)}>
+                  <option value="">請選擇姓名</option>
+                  {roster.map((r) => <option key={r.id} value={r.name}>{r.name}</option>)}
+                </select>
+              </Field>
+            </div>
+          )}
+
           <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
             <strong style={{ fontSize: 13 }}>相關附件</strong>
             <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>漏打卡、請假或加班須上傳相關補單、加班單或證明；支援 PDF 與圖片，單檔上限 10MB。</p>
@@ -1522,15 +1600,44 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack }) {
               {report?.status === "submitted" && canWrite && (
                 <button className="ph-btn primary" disabled={actionBusy} onClick={signReport}>{actionBusy ? "處理中…" : "領班簽核"}</button>
               )}
-              {report?.status === "signed" && (me.access_tier === "super_admin" || me.permissions?.daily_report === "fill") && (
+              {!kioskMode && report?.status === "signed" && (me.access_tier === "super_admin" || me.permissions?.daily_report === "fill") && (
                 <button className="ph-btn primary" disabled={actionBusy} onClick={handoffReport}>{actionBusy ? "處理中…" : "確認人資交接"}</button>
               )}
-              {report?.status === "signed" && !(me.access_tier === "super_admin" || me.permissions?.daily_report === "fill") && <span style={{ color: T.sub, fontSize: 12.5 }}>✓ 已完成領班簽核，等待人資交接</span>}
+              {report?.status === "signed" && !(!kioskMode && (me.access_tier === "super_admin" || me.permissions?.daily_report === "fill")) && <span style={{ color: T.sub, fontSize: 12.5 }}>✓ 已完成領班簽核，等待人資交接</span>}
               {report?.status === "hr_received" && <span style={{ color: T.green, fontSize: 12.5 }}>✓ 領班與人資流程皆已完成</span>}
             </div>
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────
+   每日回報門市 PIN kiosk 模式：登入後只看得到這一頁
+──────────────────────────────────────────── */
+
+function DailyReportKioskShell({ me, store, toast }) {
+  const [date, setDate] = useState(todayStr());
+  return (
+    <div className="ph-root ph-shell">
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <div className="ph-topbar">
+          <div style={{ minWidth: 0 }}>
+            <p className="ph-eyebrow" style={{ margin: 0 }}>PHASE COFFEE ROASTERS</p>
+            <h1 className="ph-serif" style={{ fontSize: 19, margin: 0 }}>{store?.name}・每日回報</h1>
+          </div>
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+            <span className="ph-pill">每日回報 PIN 模式</span>
+            <button className="ph-btn small" onClick={() => sb.auth.signOut()}>登出</button>
+          </div>
+        </div>
+        <main className="ph-main-pad" style={{ flex: 1, padding: "24px 40px", minWidth: 0 }}>
+          <div style={{ maxWidth: 1460, margin: "0 auto" }}>
+            <DailyReportDetail me={me} store={store} date={date} onDateChange={setDate} toast={toast} kioskMode />
+          </div>
+        </main>
+      </div>
     </div>
   );
 }
@@ -2847,6 +2954,9 @@ function AppShell({ session }) {
       <button className="ph-btn" onClick={() => sb.auth.signOut()}>登出</button>
     </div>
   );
+  if (me.is_shared_pin_account) {
+    return <DailyReportKioskShell me={me} store={stores.find((s) => s.id === me.store_id)} toast={toast} />;
+  }
 
   const perm = me.permissions || {};
   const navs = [
