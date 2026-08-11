@@ -2059,7 +2059,6 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const [healthInsuranceFee, setHealthInsuranceFee] = useState(editing.health_insurance_fee ?? 0);
   const [incomeTax, setIncomeTax] = useState(editing.income_tax ?? 0);
   const [active, setActive] = useState(editing.active ?? true);
-  const [email, setEmail] = useState(editing.email || "");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [pinInput, setPinInput] = useState("");
@@ -2097,14 +2096,6 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
     await logAudit(me.name, editing.isNew ? "create_employee" : "update_employee", editing.id || name);
     setBusy(false);
     onSaved();
-  }
-
-  async function linkAuth() {
-    if (!email.trim()) { setErr("請先輸入 Email"); return; }
-    const { data, error } = await sb.rpc("link_employee_auth", { p_employee_id: editing.id, p_email: email.trim() });
-    if (error) { setErr(error.message); return; }
-    if (!data) { setErr("尚未在 Supabase 後台建立此 Email 的登入帳號"); return; }
-    setErr(""); alert("已綁定登入帳號");
   }
 
   async function setPinForStaff() {
@@ -2172,14 +2163,6 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
       <Field label="在職狀態">
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> 在職中</label>
       </Field>
-      {!editing.isNew && (
-        <Field label="登入帳號 Email（先在 Supabase 後台建立同信箱的 Auth 帳號，再按下方綁定）">
-          <div style={{ display: "flex", gap: 8 }}>
-            <input className="ph-input" value={email} onChange={(e) => setEmail(e.target.value)} />
-            <button className="ph-btn small" type="button" onClick={linkAuth}>綁定</button>
-          </div>
-        </Field>
-      )}
       {isHr && !editing.isNew && accessTier === "staff" && (
         <Field label="幫此夥伴設定 PIN 碼（一般夥伴專用，需先完成上方帳號綁定）">
           <div style={{ display: "flex", gap: 8 }}>
