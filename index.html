@@ -628,18 +628,21 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
   const canEdit = me.permissions?.schedule === "edit";
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const hqStore = useMemo(() => stores.find((s) => s.name === "總部"), [stores]);
-  const showHqSection = !kioskMode && !!hqStore && !scopeStoreIds.includes(hqStore.id);
+  // 總部不需要加入排班：主要的可編輯班表格永遠不含總部人員，總部人員的休假改用下面
+  // 「總部人員排休」唯讀區塊顯示（各門市／店長 PIN 都看得到，不受 scope 是否含總部影響）
+  const scheduleStoreIds = useMemo(() => scopeStoreIds.filter((sid) => sid !== hqStore?.id), [scopeStoreIds, hqStore]);
+  const showHqSection = !!hqStore;
   const [hqRoster, setHqRoster] = useState([]);
   const [hqShifts, setHqShifts] = useState([]);
 
   const load = useCallback(async () => {
-    if (!scopeStoreIds.length) return;
+    if (!scheduleStoreIds.length) return;
     setLoading(true);
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
     const [empResList, shiftRes] = await Promise.all([
-      Promise.all(scopeStoreIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid }).then((r) => ({ ...r, data: (r.data || []).map((row) => ({ ...row, store_id: sid })) })))),
-      sb.from("shifts").select("*").in("store_id", scopeStoreIds).gte("work_date", from).lte("work_date", to),
+      Promise.all(scheduleStoreIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid }).then((r) => ({ ...r, data: (r.data || []).map((row) => ({ ...row, store_id: sid })) })))),
+      sb.from("shifts").select("*").in("store_id", scheduleStoreIds).gte("work_date", from).lte("work_date", to),
     ]);
     empResList.forEach((r) => { if (r.error) console.error("employees", r.error); });
     const empRes = { data: empResList.flatMap((r) => r.data || []).filter((r) => r.active) };
@@ -647,7 +650,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     setRoster(empRes.data || []);
     setShifts(shiftRes.data || []);
     setLoading(false);
-  }, [scopeStoreIds, ym]);
+  }, [scheduleStoreIds, ym]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -714,7 +717,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     setCopying(true);
     const prevYm = prevMonthStr(ym);
     const prevDays = monthDays(prevYm);
-    const { data: prevShifts, error } = await sb.from("shifts").select("*").in("store_id", scopeStoreIds)
+    const { data: prevShifts, error } = await sb.from("shifts").select("*").in("store_id", scheduleStoreIds)
       .gte("work_date", `${prevYm}-01`).lte("work_date", `${prevYm}-${pad2(prevDays)}`);
     if (error) { toast("讀取上月班表失敗：" + error.message); setCopying(false); return; }
     const rosterIds = new Set(roster.map((r) => r.id));
@@ -896,7 +899,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                   const renderRow = (r, idx) => (
                     <tr key={r.id}>
                       <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
-                        <RosterCell r={r} index={idx} showStore={scopeStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
+                        <RosterCell r={r} index={idx} showStore={scheduleStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
                       </td>
                       {dateList.map((d) => {
                         const s = shiftMap[`${r.id}_${d}`];
@@ -932,7 +935,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
               本月共 <strong style={{ color: T.ink }}>{totalShiftCount}</strong> 個班次
               <span style={{ marginLeft: 16 }}>預計工時 <strong style={{ color: T.ink }}>{Math.round(totalHours)}</strong> 小時</span>
             </span>
-            <span style={{ color: T.green }}>✓ {scopeStoreIds.length > 1 ? "已依門店分開顯示" : `${scopeName}資料獨立`}</span>
+            <span style={{ color: T.green }}>✓ {scheduleStoreIds.length > 1 ? "已依門店分開顯示" : `${scopeName}資料獨立`}</span>
           </div>
         )}
       </div>
@@ -1800,7 +1803,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
    每日回報門市 PIN kiosk 模式：登入後只看得到這一頁
 ──────────────────────────────────────────── */
 
-function DailyReportKioskShell({ me, store, toast }) {
+function DailyReportKioskShell({ me, store, stores, toast }) {
   const [date, setDate] = useState(todayStr());
   const isManager = me.access_tier === "dept_manager";
   const [tab, setTab] = useState("daily_report"); // 'daily_report' | 'self_schedule' | 'schedule_view' | 'requests_review'
@@ -1831,7 +1834,7 @@ function DailyReportKioskShell({ me, store, toast }) {
               ))}
             </div>
             {tab === "schedule_view" && (isManager
-              ? <SchedulePage me={me} stores={[store]} scope={store.id} scopeStoreIds={[store.id]} activeStoreId={store.id} toast={toast} kioskMode />
+              ? <SchedulePage me={me} stores={stores} scope={store.id} scopeStoreIds={[store.id]} activeStoreId={store.id} toast={toast} kioskMode />
               : <KioskScheduleView store={store} />)}
             {tab === "daily_report" && <DailyReportDetail me={me} store={store} date={date} onDateChange={setDate} toast={toast} kioskMode />}
             {tab === "self_schedule" && <KioskSelfSchedule store={store} toast={toast} />}
@@ -3372,7 +3375,8 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
   }, [canReview, load]);
 
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
-  const scopedRoster = useMemo(() => roster.filter((r) => scopeStoreIds.includes(r.store_id)), [roster, scopeStoreIds]);
+  // 總部不需要加入排班：本週班表預覽／本月預計工時統計都排除總部人員
+  const scopedRoster = useMemo(() => roster.filter((r) => scopeStoreIds.includes(r.store_id) && storeById[r.store_id]?.name !== "總部"), [roster, scopeStoreIds, storeById]);
   const scopedRosterIds = useMemo(() => new Set(scopedRoster.map((r) => r.id)), [scopedRoster]);
   const weekShifts = useMemo(() => monthShifts.filter((s) => weekDates.includes(s.work_date)), [monthShifts, weekDates]);
   const todayShifts = useMemo(() => monthShifts.filter((s) => s.work_date === today), [monthShifts, today]);
@@ -3538,7 +3542,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
               </div>
               <span className="ph-pill">{Number(today.slice(8, 10))}/{Number(today.slice(5, 7))}　週{weekdayZh(today)}</span>
             </div>
-            {loading ? <p style={{ color: T.sub }}>載入中…</p> : stores.map((s) => {
+            {loading ? <p style={{ color: T.sub }}>載入中…</p> : stores.filter((s) => s.name !== "總部").map((s) => {
               const storeRoster = roster.filter((r) => r.store_id === s.id);
               const storeTodayShifts = todayShifts.filter((sh) => storeRoster.some((r) => r.id === sh.employee_id));
               const workingCount = storeTodayShifts.filter((sh) => !sh.is_day_off).length;
@@ -3673,7 +3677,7 @@ function AppShell({ session }) {
     </div>
   );
   if (me.is_shared_pin_account) {
-    return <DailyReportKioskShell me={me} store={stores.find((s) => s.id === me.store_id)} toast={toast} />;
+    return <DailyReportKioskShell me={me} store={stores.find((s) => s.id === me.store_id)} stores={stores} toast={toast} />;
   }
 
   const perm = me.permissions || {};
