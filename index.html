@@ -21,6 +21,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <style>html,body{margin:0;padding:0;}</style>
 </head>
 <body>
@@ -428,6 +429,89 @@ function splitRosterByPosition(roster) {
   };
 }
 
+// 班表匯出成有樣式的 .xlsx（品牌色系＋週末/休假底色＋凍結窗格），不是純資料的 CSV
+async function exportScheduleWorkbook({ title, main, internal, dateList, shiftMap, showStoreCol, storeById, filename }) {
+  const thinBorder = { style: "thin", color: { argb: "FFD8D0C4" } };
+  const borderAll = { top: thinBorder, left: thinBorder, bottom: thinBorder, right: thinBorder };
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("排班表");
+
+  const baseCols = showStoreCol ? ["姓名", "職務", "門市"] : ["姓名", "職務"];
+  const headerLabels = [...baseCols, ...dateList.map((d) => `${d.slice(5)}\n週${weekdayZh(d)}`)];
+
+  ws.mergeCells(1, 1, 1, headerLabels.length);
+  const titleCell = ws.getCell(1, 1);
+  titleCell.value = title;
+  titleCell.font = { bold: true, size: 14, color: { argb: "FFA34F2D" } };
+  titleCell.alignment = { vertical: "middle" };
+  ws.getRow(1).height = 26;
+
+  const headerRow = ws.getRow(2);
+  headerLabels.forEach((label, i) => {
+    const cell = headerRow.getCell(i + 1);
+    cell.value = label;
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFA34F2D" } };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    cell.border = borderAll;
+  });
+  headerRow.height = 30;
+
+  let rowIdx = 3;
+  function writeGroup(group, sectionLabel) {
+    if (sectionLabel) {
+      ws.mergeCells(rowIdx, 1, rowIdx, headerLabels.length);
+      const c = ws.getCell(rowIdx, 1);
+      c.value = sectionLabel;
+      c.font = { bold: true, color: { argb: "FFA34F2D" } };
+      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFE0CF" } };
+      c.alignment = { vertical: "middle" };
+      rowIdx++;
+    }
+    group.forEach((r) => {
+      const row = ws.getRow(rowIdx);
+      let col = 1;
+      row.getCell(col++).value = r.name;
+      row.getCell(col++).value = r.position || "";
+      if (showStoreCol) row.getCell(col++).value = storeById[r.store_id]?.name || "";
+      dateList.forEach((d) => {
+        const s = shiftMap[`${r.id}_${d}`];
+        const cell = row.getCell(col++);
+        const wd = weekdayZh(d);
+        const isWeekend = wd === "六" || wd === "日";
+        if (s) {
+          cell.value = s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}-${(s.end_time || "").slice(0, 5)}`;
+          if (s.is_day_off) {
+            cell.font = { color: { argb: "FF8B8984" } };
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEDEBE6" } };
+          }
+        } else if (isWeekend) {
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF3EFE7" } };
+        }
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+      });
+      for (let c = 1; c < col; c++) row.getCell(c).border = borderAll;
+      rowIdx++;
+    });
+  }
+  writeGroup(main, null);
+  if (internal.length > 0) writeGroup(internal, "內場夥伴");
+
+  ws.getColumn(1).width = 12;
+  ws.getColumn(2).width = 10;
+  let dateStartCol = 3;
+  if (showStoreCol) { ws.getColumn(3).width = 10; dateStartCol = 4; }
+  dateList.forEach((_, i) => { ws.getColumn(dateStartCol + i).width = 11; });
+  ws.views = [{ state: "frozen", xSplit: dateStartCol - 1, ySplit: 2 }];
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+}
+
 function RosterCell({ r, index, showStore, storeName }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -752,24 +836,14 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     toast(`已確認發布 ${ym} 班表`);
   }
 
-  function exportScheduleCsv() {
-    const showStoreCol = scheduleStoreIds.length > 1;
-    const head = ["姓名", "職務", ...(showStoreCol ? ["門市"] : []), ...dateList.map((d) => `${d.slice(5)}(週${weekdayZh(d)})`)];
+  async function exportSchedule() {
     const { main, internal } = splitRosterByPosition(roster);
-    const rowsOf = (group) => group.map((r) => [
-      r.name, r.position || "", ...(showStoreCol ? [storeById[r.store_id]?.name || ""] : []),
-      ...dateList.map((d) => {
-        const s = shiftMap[`${r.id}_${d}`];
-        if (!s) return "";
-        return s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}-${(s.end_time || "").slice(0, 5)}`;
-      }),
-    ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","));
-    const lines = [head.join(","), ...rowsOf(main), ...rowsOf(internal)];
-    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `PHASE_排班表_${scopeName}_${ym}.csv`;
-    a.click();
+    await exportScheduleWorkbook({
+      title: `PHASE COFFEE ROASTERS・${scopeName}・${ym.slice(0, 4)}年${Number(ym.slice(5, 7))}月排班表`,
+      main, internal, dateList, shiftMap,
+      showStoreCol: scheduleStoreIds.length > 1, storeById,
+      filename: `PHASE_排班表_${scopeName}_${ym}.xlsx`,
+    });
     logAudit(me.name, "export_schedule", ym, scopeName);
   }
 
@@ -848,7 +922,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
               <button className="ph-btn small primary" onClick={() => setPublishModal(true)}>發布{Number(ym.slice(5, 7))}月班表</button>
             </>
           )}
-          {!loading && roster.length > 0 && <button className="ph-btn small" onClick={exportScheduleCsv}>匯出班表</button>}
+          {!loading && roster.length > 0 && <button className="ph-btn small" onClick={exportSchedule}>匯出班表</button>}
         </div>
       </div>
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
@@ -1904,23 +1978,14 @@ function KioskScheduleView({ store }) {
     return m;
   }, [shifts]);
 
-  function exportScheduleCsv() {
-    const head = ["姓名", "職務", ...dateList.map((d) => `${d.slice(5)}(週${weekdayZh(d)})`)];
+  async function exportSchedule() {
     const { main, internal } = splitRosterByPosition(roster);
-    const rowsOf = (group) => group.map((r) => [
-      r.name, r.position || "",
-      ...dateList.map((d) => {
-        const s = shiftMap[`${r.id}_${d}`];
-        if (!s) return "";
-        return s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}-${(s.end_time || "").slice(0, 5)}`;
-      }),
-    ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","));
-    const lines = [head.join(","), ...rowsOf(main), ...rowsOf(internal)];
-    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `PHASE_排班表_${store?.name || ""}_${ym}.csv`;
-    a.click();
+    await exportScheduleWorkbook({
+      title: `PHASE COFFEE ROASTERS・${store?.name || ""}・${ym.slice(0, 4)}年${Number(ym.slice(5, 7))}月排班表`,
+      main, internal, dateList, shiftMap,
+      showStoreCol: false, storeById: {},
+      filename: `PHASE_排班表_${store?.name || ""}_${ym}.xlsx`,
+    });
   }
 
   return (
@@ -1932,7 +1997,7 @@ function KioskScheduleView({ store }) {
           <button className="ph-btn small" onClick={() => setYm(nextMonthStr(ym))}>下個月 ›</button>
         </div>
         <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
-        {!loading && roster.length > 0 && <button className="ph-btn small" onClick={exportScheduleCsv}>匯出班表</button>}
+        {!loading && roster.length > 0 && <button className="ph-btn small" onClick={exportSchedule}>匯出班表</button>}
         <span style={{ fontSize: 12, color: T.sub }}>僅供查看，如需異動請洽店長或管理者</span>
       </div>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
