@@ -3544,19 +3544,29 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
             </div>
             {loading ? <p style={{ color: T.sub }}>載入中…</p> : stores.filter((s) => s.name !== "總部").map((s) => {
               const storeRoster = roster.filter((r) => r.store_id === s.id);
-              const storeTodayShifts = todayShifts.filter((sh) => storeRoster.some((r) => r.id === sh.employee_id));
-              const workingCount = storeTodayShifts.filter((sh) => !sh.is_day_off).length;
-              const ratio = storeRoster.length ? workingCount / storeRoster.length : 0;
-              const label = storeRoster.length === 0 ? "尚無夥伴" : ratio >= 0.8 ? "人力充足" : ratio >= 0.5 ? "人力吃緊" : "人力不足";
-              const dotColor = storeRoster.length === 0 ? T.sub : ratio >= 0.8 ? T.green : ratio >= 0.5 ? T.yellow : T.red;
+              const { main, internal } = splitRosterByPosition(storeRoster);
+              const manpowerRow = (label, group) => {
+                const groupShifts = todayShifts.filter((sh) => group.some((r) => r.id === sh.employee_id));
+                const workingCount = groupShifts.filter((sh) => !sh.is_day_off).length;
+                const ratio = group.length ? workingCount / group.length : 0;
+                const statusLabel = group.length === 0 ? "尚無夥伴" : ratio >= 0.8 ? "人力充足" : ratio >= 0.5 ? "人力吃緊" : "人力不足";
+                const dotColor = group.length === 0 ? T.sub : ratio >= 0.8 ? T.green : ratio >= 0.5 ? T.yellow : T.red;
+                return (
+                  <div key={label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0" }}>
+                    <span style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: "999px", background: dotColor, flexShrink: 0 }} />
+                      {label}
+                    </span>
+                    <span style={{ fontSize: 13, color: T.sub }}>{workingCount}／{group.length} 人</span>
+                    <span style={{ fontSize: 12.5, color: dotColor }}>{statusLabel}</span>
+                  </div>
+                );
+              };
               return (
-                <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.line}` }}>
-                  <span style={{ fontSize: 13.5, fontWeight: 500, display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ width: 7, height: 7, borderRadius: "999px", background: dotColor, flexShrink: 0 }} />
-                    {s.name}
-                  </span>
-                  <span style={{ fontSize: 13, color: T.sub }}>{workingCount}／{storeRoster.length} 人</span>
-                  <span style={{ fontSize: 12.5, color: dotColor }}>{label}</span>
+                <div key={s.id} style={{ padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 500, marginBottom: 2 }}>{s.name}</div>
+                  {manpowerRow("門店人員", main)}
+                  {internal.length > 0 && manpowerRow("內場夥伴", internal)}
                 </div>
               );
             })}
