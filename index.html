@@ -419,6 +419,15 @@ function RosterAvatar({ name, index, size = 32 }) {
     </div>
   );
 }
+// 班表分區：內場夥伴獨立一區，其餘為外場區；roster 本身已依 store_roster() 的
+// order by hire_date asc（年資由高到低）排序，這裡只切分不重排，維持年資順序
+function splitRosterByPosition(roster) {
+  return {
+    main: roster.filter((r) => r.position !== "內場夥伴"),
+    internal: roster.filter((r) => r.position === "內場夥伴"),
+  };
+}
+
 function RosterCell({ r, index, showStore, storeName }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -882,24 +891,36 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                 </tr>
               </thead>
               <tbody>
-                {roster.map((r, idx) => (
-                  <tr key={r.id}>
-                    <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
-                      <RosterCell r={r} index={idx} showStore={scopeStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
-                    </td>
-                    {dateList.map((d) => {
-                      const s = shiftMap[`${r.id}_${d}`];
-                      const mine = r.id === me.id;
-                      return (
-                        <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
-                          style={mine ? { background: T.brownSoft } : undefined}
-                          onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, storeName: storeById[r.store_id]?.name, date: d, existing: s })}>
-                          {s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
+                {(() => {
+                  const { main, internal } = splitRosterByPosition(roster);
+                  const renderRow = (r, idx) => (
+                    <tr key={r.id}>
+                      <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
+                        <RosterCell r={r} index={idx} showStore={scopeStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
+                      </td>
+                      {dateList.map((d) => {
+                        const s = shiftMap[`${r.id}_${d}`];
+                        const mine = r.id === me.id;
+                        return (
+                          <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
+                            style={mine ? { background: T.brownSoft } : undefined}
+                            onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, storeName: storeById[r.store_id]?.name, date: d, existing: s })}>
+                            {s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                  return (
+                    <>
+                      {main.map((r, idx) => renderRow(r, idx))}
+                      {internal.length > 0 && (
+                        <tr><td colSpan={days + 1} style={{ background: T.bg, fontWeight: 600, fontSize: 12, color: T.brown }}>內場夥伴</td></tr>
+                      )}
+                      {internal.map((r, idx) => renderRow(r, idx))}
+                    </>
+                  );
+                })()}
                 {roster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此範圍尚無在職夥伴</td></tr>}
               </tbody>
             </table>
@@ -926,17 +947,29 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
               <span style={{ fontSize: 14, fontWeight: 500 }}>{dateList[mobileDayIdx]}（週{weekdayZh(dateList[mobileDayIdx])}）</span>
               <button className="ph-btn small" onClick={() => setMobileDayIdx((i) => Math.min(days - 1, i + 1))} disabled={mobileDayIdx === days - 1}>›</button>
             </div>
-            {roster.map((r, idx) => {
+            {(() => {
               const d = dateList[mobileDayIdx];
-              const s = shiftMap[`${r.id}_${d}`];
+              const { main, internal } = splitRosterByPosition(roster);
+              const renderRow = (r, idx) => {
+                const s = shiftMap[`${r.id}_${d}`];
+                return (
+                  <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: canEdit ? "pointer" : "default" }}
+                    onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, storeName: storeById[r.store_id]?.name, date: d, existing: s })}>
+                    <RosterCell r={r} index={idx} showStore storeName={storeById[r.store_id]?.name} />
+                    <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
+                  </div>
+                );
+              };
               return (
-                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: canEdit ? "pointer" : "default" }}
-                  onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, storeName: storeById[r.store_id]?.name, date: d, existing: s })}>
-                  <RosterCell r={r} index={idx} showStore storeName={storeById[r.store_id]?.name} />
-                  <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
-                </div>
+                <>
+                  {main.map((r, idx) => renderRow(r, idx))}
+                  {internal.length > 0 && (
+                    <div style={{ padding: "8px 0 4px", fontWeight: 600, fontSize: 12, color: T.brown }}>內場夥伴</div>
+                  )}
+                  {internal.map((r, idx) => renderRow(r, idx))}
+                </>
               );
-            })}
+            })()}
           </div>
         )}
       </div>
@@ -1869,17 +1902,29 @@ function KioskScheduleView({ store }) {
               </tr>
             </thead>
             <tbody>
-              {roster.map((r, idx) => (
-                <tr key={r.id}>
-                  <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
-                    <RosterCell r={r} index={idx} />
-                  </td>
-                  {dateList.map((d) => {
-                    const s = shiftMap[`${r.id}_${d}`];
-                    return <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}>{s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}</td>;
-                  })}
-                </tr>
-              ))}
+              {(() => {
+                const { main, internal } = splitRosterByPosition(roster);
+                const renderRow = (r, idx) => (
+                  <tr key={r.id}>
+                    <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
+                      <RosterCell r={r} index={idx} />
+                    </td>
+                    {dateList.map((d) => {
+                      const s = shiftMap[`${r.id}_${d}`];
+                      return <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}>{s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}</td>;
+                    })}
+                  </tr>
+                );
+                return (
+                  <>
+                    {main.map((r, idx) => renderRow(r, idx))}
+                    {internal.length > 0 && (
+                      <tr><td colSpan={days + 1} style={{ background: T.bg, fontWeight: 600, fontSize: 12, color: T.brown }}>內場夥伴</td></tr>
+                    )}
+                    {internal.map((r, idx) => renderRow(r, idx))}
+                  </>
+                );
+              })()}
               {roster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
             </tbody>
           </table>
