@@ -908,27 +908,43 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     saveBlackoutDates(blackoutDates.filter((x) => x !== d));
   }
 
-  // 總部人員下場支援：從總部名單挑一個人＋一個日期，用同一個 ShiftEditModal 幫他在目前
-  // 這間店建立第一筆支援班次（store_id 是目前這間店，不是他總部的 store_id）。之後只要
-  // 這個人在這間店的月份範圍內還有班次，就會自動出現在班表上，不用每次都重新加入。
+  // 調店／總部支援：從其他門市或總部的名單挑一個人＋一個日期，用同一個 ShiftEditModal
+  // 幫他在目前這間店建立第一筆支援班次（store_id 是目前這間店，不是他原本的 store_id）。
+  // 之後只要這個人在這間店的月份範圍內還有班次，就會自動出現在班表上，不用每次都重新加入。
   const homeIds = useMemo(() => new Set(roster.map((r) => r.id)), [roster]);
-  // 支援人員只在「單一門市」畫面顯示（activeStoreId 有值），避免「全部門市」畫面下
-  // 一個人同時在好幾間店有支援班次時，搞不清楚點哪一格是要改哪一間店的班
+  // 候選支援名單（其他門市＋總部的在職人員），只在「單一門市」畫面載入（activeStoreId 有值），
+  // 避免「全部門市」畫面下一個人同時在好幾間店有支援班次時，搞不清楚點哪一格是要改哪一間店的班
+  const [supportPool, setSupportPool] = useState([]); // {id,name,position,employment_type,active,store_id}[]
+  const loadSupportPool = useCallback(async () => {
+    if (!activeStoreId || !canEdit) { setSupportPool([]); return; }
+    const otherStores = stores.filter((s) => s.id !== activeStoreId);
+    const results = await Promise.all(otherStores.map((s) =>
+      sb.rpc("store_roster", { p_store_id: s.id }).then((r) => (r.data || []).map((row) => ({ ...row, store_id: s.id })))
+    ));
+    setSupportPool(results.flat().filter((r) => r.active));
+  }, [activeStoreId, canEdit, stores]);
+  useEffect(() => { loadSupportPool(); }, [loadSupportPool]);
+
   const supportRoster = useMemo(() => {
     if (!activeStoreId) return [];
     const shiftEmployeeIds = new Set(shifts.map((s) => s.employee_id));
-    return hqRoster.filter((r) => !homeIds.has(r.id) && shiftEmployeeIds.has(r.id));
-  }, [hqRoster, homeIds, shifts, activeStoreId]);
+    return supportPool.filter((r) => !homeIds.has(r.id) && shiftEmployeeIds.has(r.id));
+  }, [supportPool, homeIds, shifts, activeStoreId]);
   const displayRoster = useMemo(() => [...roster, ...supportRoster], [roster, supportRoster]);
   const [addSupportOpen, setAddSupportOpen] = useState(false);
   const [supportPersonId, setSupportPersonId] = useState("");
   const [supportDate, setSupportDate] = useState(todayStr());
   const supportRosterIds = useMemo(() => new Set(supportRoster.map((r) => r.id)), [supportRoster]);
-  const supportCandidates = hqRoster.filter((r) => !homeIds.has(r.id) && !supportRosterIds.has(r.id));
+  const supportCandidates = supportPool.filter((r) => !homeIds.has(r.id) && !supportRosterIds.has(r.id));
+  const supportCandidatesByStore = useMemo(() => {
+    const groups = {};
+    supportCandidates.forEach((r) => { (groups[r.store_id] = groups[r.store_id] || []).push(r); });
+    return groups;
+  }, [supportCandidates]);
 
   function addSupportShift() {
     if (!supportPersonId || !supportDate || !activeStoreId) return;
-    const person = hqRoster.find((r) => r.id === supportPersonId);
+    const person = supportPool.find((r) => r.id === supportPersonId);
     if (!person) return;
     setEditing({ employeeId: person.id, employeeName: person.name, employeeStoreId: activeStoreId, storeName: activeStore?.name, date: supportDate, existing: shiftMap[`${person.id}_${supportDate}`] });
     setAddSupportOpen(false);
@@ -943,8 +959,8 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
           <h2 className="ph-serif" style={{ margin: "2px 0 0", fontSize: 26 }}>{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月</h2>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {canEdit && activeStoreId && hqStore && (
-            <button className="ph-btn small" onClick={() => setAddSupportOpen((v) => !v)}>＋新增人員（總部支援）</button>
+          {canEdit && activeStoreId && (
+            <button className="ph-btn small" onClick={() => setAddSupportOpen((v) => !v)}>＋新增人員（調店／總部支援）</button>
           )}
           {canEdit && !kioskMode && (
             <>
@@ -957,14 +973,18 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
       </div>
       {addSupportOpen && (
         <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <div style={{ fontSize: 12.5, color: T.sub }}>從總部挑一位人員，加入 {activeStore?.name} 某一天的班表（例如總部下場支援門市）：</div>
-          <select className="ph-input" style={{ width: 160 }} value={supportPersonId} onChange={(e) => setSupportPersonId(e.target.value)}>
-            <option value="">選擇總部人員</option>
-            {supportCandidates.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          <div style={{ fontSize: 12.5, color: T.sub }}>從其他門市或總部挑一位人員，加入 {activeStore?.name} 某一天的班表（例如調店或總部下場支援）：</div>
+          <select className="ph-input" style={{ width: 180 }} value={supportPersonId} onChange={(e) => setSupportPersonId(e.target.value)}>
+            <option value="">選擇支援人員</option>
+            {stores.filter((s) => supportCandidatesByStore[s.id]?.length).map((s) => (
+              <optgroup key={s.id} label={s.name}>
+                {supportCandidatesByStore[s.id].map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+              </optgroup>
+            ))}
           </select>
           <input className="ph-input" style={{ width: 150 }} type="date" value={supportDate} onChange={(e) => setSupportDate(e.target.value)} />
           <button className="ph-btn small primary" disabled={!supportPersonId || !supportDate} onClick={addSupportShift}>加入班表</button>
-          {supportCandidates.length === 0 && <span style={{ fontSize: 12, color: T.sub }}>總部目前沒有可加入的人員（可能都已經在此店班表上）</span>}
+          {supportCandidates.length === 0 && <span style={{ fontSize: 12, color: T.sub }}>目前沒有可加入的人員（可能都已經在此店班表上）</span>}
         </div>
       )}
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
@@ -1041,7 +1061,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                     return (
                       <tr key={r.id}>
                         <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
-                          <RosterCell r={r} index={idx} showStore={isSupport || scheduleStoreIds.length > 1} storeName={isSupport ? "總部支援" : storeById[r.store_id]?.name} />
+                          <RosterCell r={r} index={idx} showStore={isSupport || scheduleStoreIds.length > 1} storeName={isSupport ? `${storeById[r.store_id]?.name || ""}支援` : storeById[r.store_id]?.name} />
                         </td>
                         {dateList.map((d) => {
                           const s = shiftMap[`${r.id}_${d}`];
@@ -1102,7 +1122,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                 return (
                   <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: canEdit ? "pointer" : "default" }}
                     onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: activeStoreId || r.store_id, storeName: activeStore?.name || storeById[r.store_id]?.name, date: d, existing: s })}>
-                    <RosterCell r={r} index={idx} showStore storeName={isSupport ? "總部支援" : storeById[r.store_id]?.name} />
+                    <RosterCell r={r} index={idx} showStore storeName={isSupport ? `${storeById[r.store_id]?.name || ""}支援` : storeById[r.store_id]?.name} />
                     <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
                   </div>
                 );
