@@ -752,6 +752,27 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     toast(`已確認發布 ${ym} 班表`);
   }
 
+  function exportScheduleCsv() {
+    const showStoreCol = scheduleStoreIds.length > 1;
+    const head = ["姓名", "職務", ...(showStoreCol ? ["門市"] : []), ...dateList.map((d) => `${d.slice(5)}(週${weekdayZh(d)})`)];
+    const { main, internal } = splitRosterByPosition(roster);
+    const rowsOf = (group) => group.map((r) => [
+      r.name, r.position || "", ...(showStoreCol ? [storeById[r.store_id]?.name || ""] : []),
+      ...dateList.map((d) => {
+        const s = shiftMap[`${r.id}_${d}`];
+        if (!s) return "";
+        return s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}-${(s.end_time || "").slice(0, 5)}`;
+      }),
+    ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","));
+    const lines = [head.join(","), ...rowsOf(main), ...rowsOf(internal)];
+    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `PHASE_排班表_${scopeName}_${ym}.csv`;
+    a.click();
+    logAudit(me.name, "export_schedule", ym, scopeName);
+  }
+
   const scopeName = scope === "all" ? "全部門市" : (storeById[scopeStoreIds[0]]?.name || "");
   const activeStore = activeStoreId ? storeById[activeStoreId] : null;
   const [pickFrom, setPickFrom] = useState("");
@@ -820,12 +841,15 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
           <p className="ph-eyebrow" style={{ margin: 0 }}>{scopeName}</p>
           <h2 className="ph-serif" style={{ margin: "2px 0 0", fontSize: 26 }}>{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月</h2>
         </div>
-        {canEdit && !kioskMode && (
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="ph-btn small" disabled={copying} onClick={copyLastMonth}>{copying ? "複製中…" : "複製上月"}</button>
-            <button className="ph-btn small primary" onClick={() => setPublishModal(true)}>發布{Number(ym.slice(5, 7))}月班表</button>
-          </div>
-        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          {canEdit && !kioskMode && (
+            <>
+              <button className="ph-btn small" disabled={copying} onClick={copyLastMonth}>{copying ? "複製中…" : "複製上月"}</button>
+              <button className="ph-btn small primary" onClick={() => setPublishModal(true)}>發布{Number(ym.slice(5, 7))}月班表</button>
+            </>
+          )}
+          {!loading && roster.length > 0 && <button className="ph-btn small" onClick={exportScheduleCsv}>匯出班表</button>}
+        </div>
       </div>
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
         整月排班（{Number(ym.slice(5, 7))}/1–{Number(ym.slice(5, 7))}/{days}）；各門店分開處理，點擊班次即可修改。
@@ -1880,6 +1904,25 @@ function KioskScheduleView({ store }) {
     return m;
   }, [shifts]);
 
+  function exportScheduleCsv() {
+    const head = ["姓名", "職務", ...dateList.map((d) => `${d.slice(5)}(週${weekdayZh(d)})`)];
+    const { main, internal } = splitRosterByPosition(roster);
+    const rowsOf = (group) => group.map((r) => [
+      r.name, r.position || "",
+      ...dateList.map((d) => {
+        const s = shiftMap[`${r.id}_${d}`];
+        if (!s) return "";
+        return s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}-${(s.end_time || "").slice(0, 5)}`;
+      }),
+    ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","));
+    const lines = [head.join(","), ...rowsOf(main), ...rowsOf(internal)];
+    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `PHASE_排班表_${store?.name || ""}_${ym}.csv`;
+    a.click();
+  }
+
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
@@ -1889,6 +1932,7 @@ function KioskScheduleView({ store }) {
           <button className="ph-btn small" onClick={() => setYm(nextMonthStr(ym))}>下個月 ›</button>
         </div>
         <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+        {!loading && roster.length > 0 && <button className="ph-btn small" onClick={exportScheduleCsv}>匯出班表</button>}
         <span style={{ fontSize: 12, color: T.sub }}>僅供查看，如需異動請洽店長或管理者</span>
       </div>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
