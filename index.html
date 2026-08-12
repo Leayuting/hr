@@ -3070,7 +3070,7 @@ function PermissionsPage({ me, stores, toast }) {
 
   async function resetStorePin(storeId, employeeId) {
     const pin = pinInputs[storeId] || "";
-    if (!/^[0-9]{4,6}$/.test(pin)) { setPinErrs((p) => ({ ...p, [storeId]: "PIN 需為 4-6 位數字" })); return; }
+    if (!/^[0-9]{6}$/.test(pin)) { setPinErrs((p) => ({ ...p, [storeId]: "PIN 需為 6 位數字" })); return; }
     setBusyKey(`pin_${storeId}`);
     setPinErrs((p) => ({ ...p, [storeId]: "" }));
     const { data, error } = await sb.functions.invoke("admin-set-pin", { body: { employee_id: employeeId, pin } });
@@ -3121,7 +3121,7 @@ function PermissionsPage({ me, stores, toast }) {
           <h3 className="ph-serif" style={{ fontSize: 16, margin: "0 0 10px" }}>門市 PIN</h3>
           <div className="ph-card" style={{ overflowX: "auto", padding: 0 }}>
             <table className="ph-table">
-              <thead><tr><th>門市</th><th>重設 PIN（4-6 位數字）</th></tr></thead>
+              <thead><tr><th>門市</th><th>重設 PIN（6 位數字）</th></tr></thead>
               <tbody>
                 {stores.filter((s) => s.name !== "總部").map((s) => {
                   const acct = pinAccounts.find((a) => a.store_id === s.id);
