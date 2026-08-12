@@ -3042,6 +3042,8 @@ function PermissionsPage({ me, stores, toast }) {
   const [busyKey, setBusyKey] = useState("");
   const [pinInputs, setPinInputs] = useState({}); // store_id -> pin string
   const [pinErrs, setPinErrs] = useState({}); // store_id -> error message
+  const [pwInputs, setPwInputs] = useState({}); // employee_id -> password string
+  const [pwErrs, setPwErrs] = useState({}); // employee_id -> error message
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -3085,6 +3087,23 @@ function PermissionsPage({ me, stores, toast }) {
     setBusyKey("");
   }
 
+  async function resetPersonalPassword(employeeId) {
+    const pw = pwInputs[employeeId] || "";
+    if (pw.length < 6) { setPwErrs((p) => ({ ...p, [employeeId]: "密碼至少需要 6 個字元" })); return; }
+    setBusyKey(`pw_${employeeId}`);
+    setPwErrs((p) => ({ ...p, [employeeId]: "" }));
+    const { data, error } = await sb.functions.invoke("admin-set-pin", { body: { employee_id: employeeId, pin: pw } });
+    let errMsg = error?.message;
+    if (error?.context && typeof error.context.json === "function") {
+      try { const body = await error.context.json(); if (body?.error) errMsg = body.error; } catch (e3) { /* 退回原本的通用錯誤訊息 */ }
+    }
+    if (error) { setPwErrs((p) => ({ ...p, [employeeId]: errMsg })); setBusyKey(""); return; }
+    if (data?.error) { setPwErrs((p) => ({ ...p, [employeeId]: data.error })); setBusyKey(""); return; }
+    setPwInputs((p) => ({ ...p, [employeeId]: "" }));
+    toast("已設定密碼");
+    setBusyKey("");
+  }
+
   return (
     <div>
       <p className="ph-eyebrow" style={{ margin: 0 }}>PERMISSIONS</p>
@@ -3097,23 +3116,40 @@ function PermissionsPage({ me, stores, toast }) {
           <h3 className="ph-serif" style={{ fontSize: 16, margin: "0 0 10px" }}>總部人員</h3>
           <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginBottom: 24 }}>
             <table className="ph-table">
-              <thead><tr><th>姓名</th><th>角色</th><th>登入信箱</th><th>狀態</th></tr></thead>
+              <thead><tr><th>姓名</th><th>角色</th><th>登入信箱</th><th>狀態</th><th>建立／重設密碼</th></tr></thead>
               <tbody>
-                {hqRows.map((r) => (
-                  <tr key={r.id} style={!r.active ? { opacity: 0.5 } : undefined}>
-                    <td>{r.name}</td>
-                    <td>
-                      <select className="ph-input" style={{ fontSize: 12, padding: "4px 6px", minWidth: 110 }}
-                        value={r.access_tier} disabled={busyKey === r.id} onChange={(e) => updateRole(r.id, e.target.value)}>
-                        <option value="super_admin">管理者</option>
-                        <option value="admin_specialist">行政專責</option>
-                      </select>
-                    </td>
-                    <td style={{ fontSize: 12, color: T.sub }}>{r.email && !r.email.endsWith("@phasehr-internal.local") ? r.email : "（尚未設定）"}</td>
-                    <td style={{ fontSize: 12, color: T.sub }}>{r.active ? "在職" : "停用"}</td>
-                  </tr>
-                ))}
-                {hqRows.length === 0 && <tr><td colSpan={4} style={{ color: T.sub, textAlign: "center" }}>尚無總部人員資料</td></tr>}
+                {hqRows.map((r) => {
+                  const hasRealEmail = r.email && !r.email.endsWith("@phasehr-internal.local");
+                  return (
+                    <tr key={r.id} style={!r.active ? { opacity: 0.5 } : undefined}>
+                      <td>{r.name}</td>
+                      <td>
+                        <select className="ph-input" style={{ fontSize: 12, padding: "4px 6px", minWidth: 110 }}
+                          value={r.access_tier} disabled={busyKey === r.id} onChange={(e) => updateRole(r.id, e.target.value)}>
+                          <option value="super_admin">管理者</option>
+                          <option value="admin_specialist">行政專責</option>
+                        </select>
+                      </td>
+                      <td style={{ fontSize: 12, color: T.sub }}>{hasRealEmail ? r.email : "（尚未設定）"}</td>
+                      <td style={{ fontSize: 12, color: T.sub }}>{r.active ? "在職" : "停用"}</td>
+                      <td>
+                        {hasRealEmail ? (
+                          <div>
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <input className="ph-input" style={{ width: 160 }} type="password" placeholder="至少 6 個字元"
+                                value={pwInputs[r.id] || ""} onChange={(e) => setPwInputs((p) => ({ ...p, [r.id]: e.target.value }))} />
+                              <button className="ph-btn small" disabled={busyKey === `pw_${r.id}`} onClick={() => resetPersonalPassword(r.id)}>
+                                {busyKey === `pw_${r.id}` ? "設定中…" : "設定密碼"}
+                              </button>
+                            </div>
+                            {pwErrs[r.id] && <div className="ph-err" style={{ marginTop: 6 }}>{pwErrs[r.id]}</div>}
+                          </div>
+                        ) : <span style={{ fontSize: 12, color: T.sub }}>請先在人員資料填入登入信箱</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {hqRows.length === 0 && <tr><td colSpan={5} style={{ color: T.sub, textAlign: "center" }}>尚無總部人員資料</td></tr>}
               </tbody>
             </table>
           </div>
