@@ -64,8 +64,10 @@ const TIER_PERMISSIONS = {
   super_admin: { dashboard: "edit", schedule: "edit", daily_report: "all", requests: "full_review", payroll: "edit", staff: "edit", backup: "manage", permission_admin: "manage" },
   admin_specialist: { dashboard: "view", schedule: "unit", daily_report: "all", requests: "submit", payroll: "edit", staff: "edit", backup: "none", permission_admin: "none" },
 };
-// 門市共用 PIN 帳號的固定權限（查看本店班表／填寫本店每日異常單／自助排休／審核本店申請）
-const KIOSK_PERMISSIONS = { schedule: "unit", daily_report: "fill", requests: "first_review" };
+// 2026-08-12 門市 PIN 一分為二：一般門市 PIN（全體人員，查看班表＋填每日回報）
+// ／店長 PIN（多了編輯班表、審核本店申請），跟 DB 端 feature_level() 的兩個分支一一對應
+const KIOSK_STAFF_PERMISSIONS = { schedule: "unit", daily_report: "fill" };
+const KIOSK_MANAGER_PERMISSIONS = { schedule: "edit", daily_report: "fill", requests: "first_review" };
 const REQ_TYPE_LABEL = {
   annual_leave: "特休", personal_leave: "事假", marriage_leave: "婚假", bereavement_leave: "喪假",
   sick_leave: "普通傷病假", official_leave: "公假", injury_leave: "公傷病假", overtime: "加班",
@@ -548,10 +550,15 @@ function StorePinLogin() {
     if (!selected) { setErr("請先選擇門市"); return; }
     setErr(""); setBusy(true);
     try {
-      const { data: email } = await sb.rpc("daily_report_pin_email", { p_store_id: selected.store_id });
-      if (!email) { setErr("此門市尚未設定 PIN，請洽管理者"); return; }
-      const { error } = await sb.auth.signInWithPassword({ email, password: pin });
-      if (error) { setErr("PIN 錯誤，請再試一次"); setPin(""); return; }
+      // 一間店有一般門市 PIN／店長 PIN 兩組帳號，同一個輸入框，依序試登入哪一組信箱能對上
+      const { data: candidates } = await sb.rpc("store_pin_emails", { p_store_id: selected.store_id });
+      if (!candidates || candidates.length === 0) { setErr("此門市尚未設定 PIN，請洽管理者"); return; }
+      let loggedIn = false;
+      for (const c of candidates) {
+        const { error } = await sb.auth.signInWithPassword({ email: c.email, password: pin });
+        if (!error) { loggedIn = true; break; }
+      }
+      if (!loggedIn) { setErr("PIN 錯誤，請再試一次"); setPin(""); }
     } catch (e2) {
       setErr("登入時發生錯誤：" + (e2?.message || String(e2)));
     } finally {
@@ -597,7 +604,7 @@ function StorePinLogin() {
 function prevMonthStr(ym) { const [y, m] = ym.split("-").map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${pad2(m - 1)}`; }
 function nextMonthStr(ym) { const [y, m] = ym.split("-").map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${pad2(m + 1)}`; }
 
-function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast }) {
+function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, kioskMode }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
   const [shifts, setShifts] = useState([]);
@@ -612,7 +619,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast }
   const canEdit = me.permissions?.schedule === "edit";
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const hqStore = useMemo(() => stores.find((s) => s.name === "總部"), [stores]);
-  const showHqSection = !!hqStore && !scopeStoreIds.includes(hqStore.id);
+  const showHqSection = !kioskMode && !!hqStore && !scopeStoreIds.includes(hqStore.id);
   const [hqRoster, setHqRoster] = useState([]);
   const [hqShifts, setHqShifts] = useState([]);
 
@@ -801,7 +808,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast }
           <p className="ph-eyebrow" style={{ margin: 0 }}>{scopeName}</p>
           <h2 className="ph-serif" style={{ margin: "2px 0 0", fontSize: 26 }}>{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月</h2>
         </div>
-        {canEdit && (
+        {canEdit && !kioskMode && (
           <div style={{ display: "flex", gap: 8 }}>
             <button className="ph-btn small" disabled={copying} onClick={copyLastMonth}>{copying ? "複製中…" : "複製上月"}</button>
             <button className="ph-btn small primary" onClick={() => setPublishModal(true)}>發布{Number(ym.slice(5, 7))}月班表</button>
@@ -1762,12 +1769,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
 
 function DailyReportKioskShell({ me, store, toast }) {
   const [date, setDate] = useState(todayStr());
+  const isManager = me.access_tier === "dept_manager";
   const [tab, setTab] = useState("daily_report"); // 'daily_report' | 'self_schedule' | 'schedule_view' | 'requests_review'
   const KIOSK_TABS = [
-    ["schedule_view", "查看本店班表"],
+    ["schedule_view", isManager ? "門市排班" : "查看本店班表"],
     ["daily_report", "每日回報"],
     ["self_schedule", "夥伴排休"],
-    ["requests_review", "申請審核"],
+    ...(isManager ? [["requests_review", "申請審核"]] : []),
   ];
   return (
     <div className="ph-root ph-shell">
@@ -1778,7 +1786,7 @@ function DailyReportKioskShell({ me, store, toast }) {
             <h1 className="ph-serif" style={{ fontSize: 19, margin: 0 }}>{store?.name}・門市 PIN</h1>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
-            <span className="ph-pill">門市 PIN 模式</span>
+            <span className="ph-pill">{isManager ? "店長 PIN 模式" : "門市 PIN 模式"}</span>
             <button className="ph-btn small" onClick={() => sb.auth.signOut()}>登出</button>
           </div>
         </div>
@@ -1789,10 +1797,12 @@ function DailyReportKioskShell({ me, store, toast }) {
                 <button key={key} type="button" className="ph-btn small" style={{ flex: 1, minWidth: 120, ...(tab === key ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => setTab(key)}>{label}</button>
               ))}
             </div>
-            {tab === "schedule_view" && <KioskScheduleView store={store} />}
+            {tab === "schedule_view" && (isManager
+              ? <SchedulePage me={me} stores={[store]} scope={store.id} scopeStoreIds={[store.id]} activeStoreId={store.id} toast={toast} kioskMode />
+              : <KioskScheduleView store={store} />)}
             {tab === "daily_report" && <DailyReportDetail me={me} store={store} date={date} onDateChange={setDate} toast={toast} kioskMode />}
             {tab === "self_schedule" && <KioskSelfSchedule store={store} toast={toast} />}
-            {tab === "requests_review" && <KioskRequestsReview store={store} toast={toast} />}
+            {tab === "requests_review" && isManager && <KioskRequestsReview me={me} store={store} toast={toast} />}
           </div>
         </main>
       </div>
@@ -1879,24 +1889,14 @@ function KioskScheduleView({ store }) {
   );
 }
 
-function KioskRequestsReview({ store, toast }) {
-  const [managers, setManagers] = useState(null);
-  const [selected, setSelected] = useState(null);
+function KioskRequestsReview({ me, store, toast }) {
   const [rows, setRows] = useState([]);
   const [nameById, setNameById] = useState({});
   const [loading, setLoading] = useState(true);
   const [decidingId, setDecidingId] = useState(null);
 
-  useEffect(() => {
-    if (!store?.id) return;
-    sb.rpc("store_dept_managers", { p_store_id: store.id }).then(({ data, error }) => {
-      if (error) { console.error("store_dept_managers", error); setManagers([]); return; }
-      setManagers(data || []);
-    });
-  }, [store?.id]);
-
   const load = useCallback(async () => {
-    if (!store?.id || !selected) return;
+    if (!store?.id) return;
     setLoading(true);
     const [reqRes, rosterRes] = await Promise.all([
       sb.from("requests").select("*").eq("store_id", store.id).order("submitted_at", { ascending: false }).limit(200),
@@ -1906,50 +1906,31 @@ function KioskRequestsReview({ store, toast }) {
     setRows(reqRes.data || []);
     setNameById(Object.fromEntries((rosterRes.data || []).map((e) => [e.id, e.name])));
     setLoading(false);
-  }, [store?.id, selected]);
+  }, [store?.id]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    if (!selected) return;
     const ch = sb.channel("kiosk_requests_review_sync").on("postgres_changes", { event: "*", schema: "public", table: "requests" }, load).subscribe();
     return () => sb.removeChannel(ch);
-  }, [selected, load]);
+  }, [load]);
 
   async function decide(id, decision) {
     if (decidingId) return;
     setDecidingId(id);
     try {
-      const { error } = await sb.from("requests").update({ status: decision, reviewed_by: selected.id, reviewed_at: new Date().toISOString() }).eq("id", id);
+      const { error } = await sb.from("requests").update({ status: decision, reviewed_by: me.id, reviewed_at: new Date().toISOString() }).eq("id", id);
       if (error) { toast("操作失敗：" + error.message); return; }
-      await logAudit(selected.name, decision, `request:${id}`);
+      await logAudit(me.name, decision, `request:${id}`);
       toast(decision === "approved" ? "已核准" : "已拒絕");
     } finally {
       setDecidingId(null);
     }
   }
 
-  if (managers === null) return <p style={{ color: T.sub }}>載入中…</p>;
-  if (managers.length === 0) {
-    return <div className="ph-card" style={{ padding: 20, textAlign: "center", color: T.sub }}>此門市尚未設定店長，無法使用申請審核。</div>;
-  }
-  if (!selected) {
-    return (
-      <div>
-        <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 10 }}>申請審核僅限店長操作，請選擇你的姓名</p>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 360 }}>
-          {managers.map((m) => (
-            <button key={m.id} type="button" className="ph-btn" style={{ textAlign: "left" }} onClick={() => setSelected(m)}>{m.name}</button>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
   const pendingRows = rows.filter((r) => r.status === "pending");
   return (
     <div>
-      <button type="button" className="ph-btn small" style={{ marginBottom: 12, border: "none", background: "none", color: T.sub, padding: 0 }} onClick={() => setSelected(null)}>‹ 重新選擇姓名</button>
-      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>{selected.name}・{store?.name}待審核申請</p>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>{store?.name}待審核申請</p>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {pendingRows.map((r, idx) => {
@@ -3070,20 +3051,20 @@ function PermissionsPage({ me, stores, toast }) {
     setBusyKey("");
   }
 
-  async function resetStorePin(storeId, employeeId) {
-    const pin = pinInputs[storeId] || "";
-    if (!/^[0-9]{8}$/.test(pin)) { setPinErrs((p) => ({ ...p, [storeId]: "PIN 需為 8 位數字" })); return; }
-    setBusyKey(`pin_${storeId}`);
-    setPinErrs((p) => ({ ...p, [storeId]: "" }));
+  async function resetStorePin(employeeId) {
+    const pin = pinInputs[employeeId] || "";
+    if (!/^[0-9]{8}$/.test(pin)) { setPinErrs((p) => ({ ...p, [employeeId]: "PIN 需為 8 位數字" })); return; }
+    setBusyKey(`pin_${employeeId}`);
+    setPinErrs((p) => ({ ...p, [employeeId]: "" }));
     const { data, error } = await sb.functions.invoke("admin-set-pin", { body: { employee_id: employeeId, pin } });
     let errMsg = error?.message;
     if (error?.context && typeof error.context.json === "function") {
       try { const body = await error.context.json(); if (body?.error) errMsg = body.error; } catch (e3) { /* 退回原本的通用錯誤訊息 */ }
     }
-    if (error) { setPinErrs((p) => ({ ...p, [storeId]: errMsg })); setBusyKey(""); return; }
-    if (data?.error) { setPinErrs((p) => ({ ...p, [storeId]: data.error })); setBusyKey(""); return; }
-    setPinInputs((p) => ({ ...p, [storeId]: "" }));
-    toast("已重設此門市 PIN");
+    if (error) { setPinErrs((p) => ({ ...p, [employeeId]: errMsg })); setBusyKey(""); return; }
+    if (data?.error) { setPinErrs((p) => ({ ...p, [employeeId]: data.error })); setBusyKey(""); return; }
+    setPinInputs((p) => ({ ...p, [employeeId]: "" }));
+    toast("已重設 PIN");
     setBusyKey("");
   }
 
@@ -3155,29 +3136,33 @@ function PermissionsPage({ me, stores, toast }) {
           </div>
 
           <h3 className="ph-serif" style={{ fontSize: 16, margin: "0 0 10px" }}>門市 PIN</h3>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: "0 0 10px" }}>
+            一般門市 PIN：全體人員，查看班表＋填每日回報。店長 PIN：多了編輯班表、審核本店申請。兩組 PIN 不可設成相同（重設時系統會自動檢查）。
+          </p>
           <div className="ph-card" style={{ overflowX: "auto", padding: 0 }}>
             <table className="ph-table">
-              <thead><tr><th>門市</th><th>重設 PIN（8 位數字）</th></tr></thead>
+              <thead><tr><th>門市</th><th>一般門市 PIN（8 位數字）</th><th>店長 PIN（8 位數字）</th></tr></thead>
               <tbody>
                 {stores.filter((s) => s.name !== "總部").map((s) => {
-                  const acct = pinAccounts.find((a) => a.store_id === s.id);
+                  const staffAcct = pinAccounts.find((a) => a.store_id === s.id && a.access_tier === "staff");
+                  const managerAcct = pinAccounts.find((a) => a.store_id === s.id && a.access_tier === "dept_manager");
+                  const renderPinCell = (acct) => acct ? (
+                    <div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input className="ph-input" style={{ width: 130, letterSpacing: 3 }} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="新 PIN"
+                          value={pinInputs[acct.id] || ""} onChange={(e) => setPinInputs((p) => ({ ...p, [acct.id]: e.target.value.replace(/[^0-9]/g, "") }))} />
+                        <button className="ph-btn small" disabled={busyKey === `pin_${acct.id}`} onClick={() => resetStorePin(acct.id)}>
+                          {busyKey === `pin_${acct.id}` ? "設定中…" : "重設"}
+                        </button>
+                      </div>
+                      {pinErrs[acct.id] && <div className="ph-err" style={{ marginTop: 6 }}>{pinErrs[acct.id]}</div>}
+                    </div>
+                  ) : <span style={{ fontSize: 12, color: T.sub }}>尚未建立</span>;
                   return (
                     <tr key={s.id}>
                       <td>{s.name}</td>
-                      <td>
-                        {acct ? (
-                          <div>
-                            <div style={{ display: "flex", gap: 8 }}>
-                              <input className="ph-input" style={{ width: 140, letterSpacing: 3 }} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="新 PIN"
-                                value={pinInputs[s.id] || ""} onChange={(e) => setPinInputs((p) => ({ ...p, [s.id]: e.target.value.replace(/[^0-9]/g, "") }))} />
-                              <button className="ph-btn small" disabled={busyKey === `pin_${s.id}`} onClick={() => resetStorePin(s.id, acct.id)}>
-                                {busyKey === `pin_${s.id}` ? "設定中…" : "重設 PIN"}
-                              </button>
-                            </div>
-                            {pinErrs[s.id] && <div className="ph-err" style={{ marginTop: 6 }}>{pinErrs[s.id]}</div>}
-                          </div>
-                        ) : <span style={{ fontSize: 12, color: T.sub }}>此門市尚未建立共用 PIN 帳號</span>}
-                      </td>
+                      <td>{renderPinCell(staffAcct)}</td>
+                      <td>{renderPinCell(managerAcct)}</td>
                     </tr>
                   );
                 })}
@@ -3185,6 +3170,81 @@ function PermissionsPage({ me, stores, toast }) {
             </table>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+function AuditLogPage({ stores }) {
+  const [rows, setRows] = useState([]);
+  const [nameById, setNameById] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [monthFilter, setMonthFilter] = useState("");
+  const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const [logRes, empRes] = await Promise.all([
+      sb.from("audit_logs").select("*").eq("action", "update_shift").order("created_at", { ascending: false }).limit(500),
+      sb.from("employees").select("id,name,store_id"),
+    ]);
+    if (logRes.error) console.error("audit_logs", logRes.error);
+    setRows(logRes.data || []);
+    setNameById(Object.fromEntries((empRes.data || []).map((e) => [e.id, e])));
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("audit_log_sync").on("postgres_changes", { event: "INSERT", schema: "public", table: "audit_logs" }, load).subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
+
+  const filteredRows = rows.filter((r) => {
+    const [employeeId, date] = (r.target || "").split(":");
+    const emp = nameById[employeeId];
+    if (storeFilter !== "all" && emp?.store_id !== storeFilter) return false;
+    if (monthFilter && !date?.startsWith(monthFilter)) return false;
+    return true;
+  });
+
+  return (
+    <div>
+      <p className="ph-eyebrow" style={{ margin: 0 }}>AUDIT LOG</p>
+      <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>異動紀錄</h2>
+      <p style={{ color: T.sub, fontSize: 12.5, margin: "0 0 16px" }}>目前記錄班表異動（含店長 PIN 在門市端編輯的班次），依操作時間排序，最近 500 筆。</p>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+        <select className="ph-input" style={{ width: 150 }} value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)}>
+          <option value="all">全部門市</option>
+          {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <input className="ph-input" style={{ width: 150 }} type="month" value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)} />
+        {monthFilter && <button className="ph-btn small" onClick={() => setMonthFilter("")}>清除月份</button>}
+      </div>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
+        <div className="ph-card" style={{ overflowX: "auto", padding: 0 }}>
+          <table className="ph-table">
+            <thead><tr><th>操作者</th><th>門市</th><th>夥伴</th><th>日期</th><th>內容</th><th>時間</th></tr></thead>
+            <tbody>
+              {filteredRows.map((r) => {
+                const [employeeId, date] = (r.target || "").split(":");
+                const emp = nameById[employeeId];
+                return (
+                  <tr key={r.id}>
+                    <td>{r.actor_label}</td>
+                    <td style={{ fontSize: 12, color: T.sub }}>{storeById[emp?.store_id]?.name || "—"}</td>
+                    <td>{emp?.name || "—"}</td>
+                    <td style={{ fontSize: 12, color: T.sub }}>{date}</td>
+                    <td style={{ fontSize: 12, color: T.sub }}>{r.detail}</td>
+                    <td style={{ fontSize: 12, color: T.sub }}>{fmtTaipei(r.created_at)}</td>
+                  </tr>
+                );
+              })}
+              {filteredRows.length === 0 && <tr><td colSpan={6} style={{ color: T.sub, textAlign: "center" }}>沒有符合條件的紀錄</td></tr>}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -3517,7 +3577,9 @@ function AppShell({ session }) {
       ]);
       let meRow = meRes.data || null;
       if (meRow) {
-        const permissions = meRow.is_shared_pin_account ? KIOSK_PERMISSIONS : (TIER_PERMISSIONS[meRow.access_tier] || {});
+        const permissions = meRow.is_shared_pin_account
+          ? (meRow.access_tier === "dept_manager" ? KIOSK_MANAGER_PERMISSIONS : KIOSK_STAFF_PERMISSIONS)
+          : (TIER_PERMISSIONS[meRow.access_tier] || {});
         meRow = { ...meRow, permissions, isGlobalScope: meRow.access_tier === "super_admin" };
       }
       setMe(meRow);
@@ -3579,6 +3641,7 @@ function AppShell({ session }) {
     ["staff", perm.staff && perm.staff !== "self" ? "人員資料" : "我的資料", "staff"],
     ...(perm.backup && perm.backup !== "none" ? [["backup", "備份", "backup"]] : []),
     ...(perm.permission_admin === "manage" ? [["permissions", "權限管理", "permissions"]] : []),
+    ...(perm.permission_admin === "manage" ? [["audit_log", "異動紀錄", "audit_log"]] : []),
   ];
 
   return (
@@ -3655,6 +3718,7 @@ function AppShell({ session }) {
               : <MyProfilePage me={me} stores={stores} />)}
             {page === "backup" && perm.backup && perm.backup !== "none" && <BackupPage me={me} toast={toast} />}
             {page === "permissions" && perm.permission_admin === "manage" && <PermissionsPage me={me} stores={stores} toast={toast} />}
+            {page === "audit_log" && perm.permission_admin === "manage" && <AuditLogPage stores={stores} />}
           </div>
         </main>
       </div>
