@@ -2389,7 +2389,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
     const [empRes, shiftRes, reqRes, runRes, adjRes] = await Promise.all([
-      sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("active", true).order("name"),
+      sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("active", true).eq("is_shared_pin_account", false).order("name"),
       sb.from("shifts").select("*").in("store_id", scopeStoreIds).gte("work_date", from).lte("work_date", to),
       sb.from("requests").select("*").in("store_id", scopeStoreIds).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
       sb.from("payroll_runs").select("*").in("store_id", scopeStoreIds).eq("year_month", ym),
@@ -2623,7 +2623,7 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
     if (!scopeStoreIds.length) return;
     setLoading(true);
     if (canSeeSensitive) {
-      const { data, error } = await sb.from("employees").select("*").in("store_id", scopeStoreIds).order("active", { ascending: false }).order("name");
+      const { data, error } = await sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("is_shared_pin_account", false).order("active", { ascending: false }).order("name");
       if (error) console.error("staff load", error);
       setRows(data || []);
     } else {
