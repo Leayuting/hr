@@ -837,7 +837,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
   }
 
   async function exportSchedule() {
-    const { main, internal } = splitRosterByPosition(roster);
+    const { main, internal } = splitRosterByPosition(displayRoster);
     await exportScheduleWorkbook({
       title: `PHASE COFFEE ROASTERS・${scopeName}・${ym.slice(0, 4)}年${Number(ym.slice(5, 7))}月排班表`,
       main, internal, dateList, shiftMap,
@@ -908,6 +908,33 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     saveBlackoutDates(blackoutDates.filter((x) => x !== d));
   }
 
+  // 總部人員下場支援：從總部名單挑一個人＋一個日期，用同一個 ShiftEditModal 幫他在目前
+  // 這間店建立第一筆支援班次（store_id 是目前這間店，不是他總部的 store_id）。之後只要
+  // 這個人在這間店的月份範圍內還有班次，就會自動出現在班表上，不用每次都重新加入。
+  const homeIds = useMemo(() => new Set(roster.map((r) => r.id)), [roster]);
+  // 支援人員只在「單一門市」畫面顯示（activeStoreId 有值），避免「全部門市」畫面下
+  // 一個人同時在好幾間店有支援班次時，搞不清楚點哪一格是要改哪一間店的班
+  const supportRoster = useMemo(() => {
+    if (!activeStoreId) return [];
+    const shiftEmployeeIds = new Set(shifts.map((s) => s.employee_id));
+    return hqRoster.filter((r) => !homeIds.has(r.id) && shiftEmployeeIds.has(r.id));
+  }, [hqRoster, homeIds, shifts, activeStoreId]);
+  const displayRoster = useMemo(() => [...roster, ...supportRoster], [roster, supportRoster]);
+  const [addSupportOpen, setAddSupportOpen] = useState(false);
+  const [supportPersonId, setSupportPersonId] = useState("");
+  const [supportDate, setSupportDate] = useState(todayStr());
+  const supportRosterIds = useMemo(() => new Set(supportRoster.map((r) => r.id)), [supportRoster]);
+  const supportCandidates = hqRoster.filter((r) => !homeIds.has(r.id) && !supportRosterIds.has(r.id));
+
+  function addSupportShift() {
+    if (!supportPersonId || !supportDate || !activeStoreId) return;
+    const person = hqRoster.find((r) => r.id === supportPersonId);
+    if (!person) return;
+    setEditing({ employeeId: person.id, employeeName: person.name, employeeStoreId: activeStoreId, storeName: activeStore?.name, date: supportDate, existing: shiftMap[`${person.id}_${supportDate}`] });
+    setAddSupportOpen(false);
+    setSupportPersonId("");
+  }
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 4 }}>
@@ -915,16 +942,31 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
           <p className="ph-eyebrow" style={{ margin: 0 }}>{scopeName}</p>
           <h2 className="ph-serif" style={{ margin: "2px 0 0", fontSize: 26 }}>{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月</h2>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {canEdit && activeStoreId && hqStore && (
+            <button className="ph-btn small" onClick={() => setAddSupportOpen((v) => !v)}>＋新增人員（總部支援）</button>
+          )}
           {canEdit && !kioskMode && (
             <>
               <button className="ph-btn small" disabled={copying} onClick={copyLastMonth}>{copying ? "複製中…" : "複製上月"}</button>
               <button className="ph-btn small primary" onClick={() => setPublishModal(true)}>發布{Number(ym.slice(5, 7))}月班表</button>
             </>
           )}
-          {!loading && roster.length > 0 && <button className="ph-btn small" onClick={exportSchedule}>匯出班表</button>}
+          {!loading && displayRoster.length > 0 && <button className="ph-btn small" onClick={exportSchedule}>匯出班表</button>}
         </div>
       </div>
+      {addSupportOpen && (
+        <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12.5, color: T.sub }}>從總部挑一位人員，加入 {activeStore?.name} 某一天的班表（例如總部下場支援門市）：</div>
+          <select className="ph-input" style={{ width: 160 }} value={supportPersonId} onChange={(e) => setSupportPersonId(e.target.value)}>
+            <option value="">選擇總部人員</option>
+            {supportCandidates.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+          <input className="ph-input" style={{ width: 150 }} type="date" value={supportDate} onChange={(e) => setSupportDate(e.target.value)} />
+          <button className="ph-btn small primary" disabled={!supportPersonId || !supportDate} onClick={addSupportShift}>加入班表</button>
+          {supportCandidates.length === 0 && <span style={{ fontSize: 12, color: T.sub }}>總部目前沒有可加入的人員（可能都已經在此店班表上）</span>}
+        </div>
+      )}
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
         整月排班（{Number(ym.slice(5, 7))}/1–{Number(ym.slice(5, 7))}/{days}）；各門店分開處理，點擊班次即可修改。
       </p>
@@ -993,25 +1035,28 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
               </thead>
               <tbody>
                 {(() => {
-                  const { main, internal } = splitRosterByPosition(roster);
-                  const renderRow = (r, idx) => (
-                    <tr key={r.id}>
-                      <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
-                        <RosterCell r={r} index={idx} showStore={scheduleStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
-                      </td>
-                      {dateList.map((d) => {
-                        const s = shiftMap[`${r.id}_${d}`];
-                        const mine = r.id === me.id;
-                        return (
-                          <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
-                            style={mine ? { background: T.brownSoft } : undefined}
-                            onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, storeName: storeById[r.store_id]?.name, date: d, existing: s })}>
-                            {s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
+                  const { main, internal } = splitRosterByPosition(displayRoster);
+                  const renderRow = (r, idx) => {
+                    const isSupport = !homeIds.has(r.id);
+                    return (
+                      <tr key={r.id}>
+                        <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
+                          <RosterCell r={r} index={idx} showStore={isSupport || scheduleStoreIds.length > 1} storeName={isSupport ? "總部支援" : storeById[r.store_id]?.name} />
+                        </td>
+                        {dateList.map((d) => {
+                          const s = shiftMap[`${r.id}_${d}`];
+                          const mine = r.id === me.id;
+                          return (
+                            <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
+                              style={mine ? { background: T.brownSoft } : undefined}
+                              onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: activeStoreId || r.store_id, storeName: activeStore?.name || storeById[r.store_id]?.name, date: d, existing: s })}>
+                              {s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  };
                   return (
                     <>
                       {main.map((r, idx) => renderRow(r, idx))}
@@ -1022,12 +1067,12 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                     </>
                   );
                 })()}
-                {roster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此範圍尚無在職夥伴</td></tr>}
+                {displayRoster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此範圍尚無在職夥伴</td></tr>}
               </tbody>
             </table>
           </div>
         )}
-        {!loading && roster.length > 0 && (
+        {!loading && displayRoster.length > 0 && (
           <div style={{ marginTop: 10, fontSize: 12.5, color: T.sub, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
             <span>
               本月共 <strong style={{ color: T.ink }}>{totalShiftCount}</strong> 個班次
@@ -1039,7 +1084,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
       </div>
 
       <div className="ph-schedule-preview-mobile">
-        {loading ? <p style={{ color: T.sub }}>載入中…</p> : roster.length === 0 ? (
+        {loading ? <p style={{ color: T.sub }}>載入中…</p> : displayRoster.length === 0 ? (
           <p style={{ color: T.sub, fontSize: 13, textAlign: "center", padding: "24px 0" }}>此範圍尚無在職夥伴</p>
         ) : (
           <div className="ph-card" style={{ padding: 14 }}>
@@ -1050,13 +1095,14 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
             </div>
             {(() => {
               const d = dateList[mobileDayIdx];
-              const { main, internal } = splitRosterByPosition(roster);
+              const { main, internal } = splitRosterByPosition(displayRoster);
               const renderRow = (r, idx) => {
+                const isSupport = !homeIds.has(r.id);
                 const s = shiftMap[`${r.id}_${d}`];
                 return (
                   <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: canEdit ? "pointer" : "default" }}
-                    onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: r.store_id, storeName: storeById[r.store_id]?.name, date: d, existing: s })}>
-                    <RosterCell r={r} index={idx} showStore storeName={storeById[r.store_id]?.name} />
+                    onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: activeStoreId || r.store_id, storeName: activeStore?.name || storeById[r.store_id]?.name, date: d, existing: s })}>
+                    <RosterCell r={r} index={idx} showStore storeName={isSupport ? "總部支援" : storeById[r.store_id]?.name} />
                     <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
                   </div>
                 );
