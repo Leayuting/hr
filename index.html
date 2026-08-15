@@ -741,6 +741,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
   useEffect(() => {
     const ch = sb.channel("schedule_sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, () => load())
+      .on("postgres_changes", { event: "*", schema: "public", table: "employees" }, () => load())
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
@@ -765,6 +766,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     if (!showHqSection) return;
     const ch = sb.channel("schedule_hq_sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, () => loadHq())
+      .on("postgres_changes", { event: "*", schema: "public", table: "employees" }, () => loadHq())
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [showHqSection, loadHq]);
