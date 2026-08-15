@@ -797,6 +797,14 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     load();
   }
 
+  async function clearShift(employeeId, date) {
+    const { error } = await sb.from("shifts").delete().eq("employee_id", employeeId).eq("work_date", date);
+    if (error) { toast("清除失敗：" + (error.message.includes("row-level security") ? "此月份薪資已鎖定或無權限" : error.message)); return; }
+    await logAudit(me.name, "clear_shift", `${employeeId}:${date}`);
+    setEditing(null);
+    load();
+  }
+
   async function copyLastMonth() {
     setCopying(true);
     const prevYm = prevMonthStr(ym);
@@ -1167,7 +1175,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
       )}
 
       {editing && (
-        <ShiftEditModal editing={editing} onClose={() => setEditing(null)} onSave={saveShift} />
+        <ShiftEditModal editing={editing} onClose={() => setEditing(null)} onSave={saveShift} onClear={clearShift} />
       )}
       {publishModal && (
         <Modal title="確認發布班表" onClose={() => setPublishModal(false)}>
@@ -1183,7 +1191,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
   );
 }
 
-function ShiftEditModal({ editing, onClose, onSave }) {
+function ShiftEditModal({ editing, onClose, onSave, onClear }) {
   const ex = editing.existing;
   const [isDayOff, setIsDayOff] = useState(ex ? ex.is_day_off : false);
   const [startTime, setStartTime] = useState(ex?.start_time?.slice(0, 5) || "10:00");
@@ -1212,6 +1220,15 @@ function ShiftEditModal({ editing, onClose, onSave }) {
     setBusy(true);
     try {
       await onSave(editing.employeeId, editing.employeeStoreId, editing.date, { startTime, endTime, isDayOff, note });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleClear() {
+    setBusy(true);
+    try {
+      await onClear(editing.employeeId, editing.date);
     } finally {
       setBusy(false);
     }
@@ -1248,9 +1265,14 @@ function ShiftEditModal({ editing, onClose, onSave }) {
         )}
       </Field>
       <Field label="備註"><input className="ph-input" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-        <button className="ph-btn" onClick={onClose} disabled={busy}>取消</button>
-        <button className="ph-btn primary" disabled={busy} onClick={handleSave}>{busy ? "儲存中…" : "儲存"}</button>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+        {ex && onClear && (
+          <button className="ph-btn small danger" disabled={busy} onClick={handleClear}>{busy ? "處理中…" : "清除（恢復未排班）"}</button>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flex: 1 }}>
+          <button className="ph-btn" onClick={onClose} disabled={busy}>取消</button>
+          <button className="ph-btn primary" disabled={busy} onClick={handleSave}>{busy ? "儲存中…" : "儲存"}</button>
+        </div>
       </div>
     </Modal>
   );
