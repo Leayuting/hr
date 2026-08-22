@@ -3187,12 +3187,15 @@ function MonthlySummaryPage({ me, stores, toast }) {
               <StatTile label="留職停薪" value="—" unit="（尚未支援）" />
             </div>
             <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 12.5 }}>
-              <div>
-                <strong style={{ fontSize: 12.5 }}>各門市在職人數</strong>
-                <div style={{ color: T.sub, marginTop: 4 }}>
-                  {realStores.map((s) => <div key={s.id}>{s.name}：{byStoreCount[s.id] || 0} 人</div>)}
+              {storeFilter === "all" && (
+                <div>
+                  <strong style={{ fontSize: 12.5 }}>各門市在職人數</strong>
+                  <div style={{ color: T.sub, marginTop: 4 }}>
+                    {realStores.map((s) => <div key={s.id}>{s.name}：{byStoreCount[s.id] || 0} 人</div>)}
+                    <div>總部：{byStoreCount[stores.find((s) => s.name === "總部")?.id] || 0} 人</div>
+                  </div>
                 </div>
-              </div>
+              )}
               <div>
                 <strong style={{ fontSize: 12.5 }}>各職務在職人數</strong>
                 <div style={{ color: T.sub, marginTop: 4 }}>
@@ -3213,17 +3216,21 @@ function MonthlySummaryPage({ me, stores, toast }) {
               <StatTile label="尚未排班日期" value={emptyDays.length} unit="筆" />
               <StatTile label="已發布／未發布" value={`${publishedCount}／${unpublishedCount}`} unit="間" />
             </div>
-            <strong style={{ fontSize: 12.5 }}>各門市排定時數</strong>
-            <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginTop: 6 }}>
-              <table className="ph-table">
-                <thead><tr><th>門市</th><th>班次數</th><th>排定時數</th></tr></thead>
-                <tbody>
-                  {realStores.filter((s) => scheduleStoreIds.includes(s.id)).map((s) => (
-                    <tr key={s.id}><td>{s.name}</td><td>{byStoreShifts[s.id]?.count || 0}</td><td>{Math.round(byStoreShifts[s.id]?.hours || 0)}</td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {storeFilter === "all" && (
+              <>
+                <strong style={{ fontSize: 12.5 }}>各門市排定時數</strong>
+                <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginTop: 6 }}>
+                  <table className="ph-table">
+                    <thead><tr><th>門市</th><th>班次數</th><th>排定時數</th></tr></thead>
+                    <tbody>
+                      {realStores.map((s) => (
+                        <tr key={s.id}><td>{s.name}</td><td>{byStoreShifts[s.id]?.count || 0}</td><td>{Math.round(byStoreShifts[s.id]?.hours || 0)}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
             <strong style={{ fontSize: 12.5, display: "block", marginTop: 14 }}>各員工排定班數／排定時數</strong>
             <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginTop: 6, maxHeight: 320, overflowY: "auto" }}>
               <table className="ph-table">
