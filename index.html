@@ -2946,9 +2946,8 @@ function StatTile({ label, value, unit, tone }) {
   );
 }
 
-function MonthlySummaryPage({ me, stores, toast }) {
+function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
   const [ym, setYm] = useState(thisMonthStr());
-  const [storeFilter, setStoreFilter] = useState("all");
   const [loading, setLoading] = useState(true);
   const [headcount, setHeadcount] = useState([]);
   const [shifts, setShifts] = useState([]);
@@ -2960,7 +2959,14 @@ function MonthlySummaryPage({ me, stores, toast }) {
 
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const realStores = useMemo(() => stores.filter((s) => s.name !== "總部"), [stores]);
-  const scheduleStoreIds = useMemo(() => storeFilter === "all" ? realStores.map((s) => s.id) : [storeFilter], [storeFilter, realStores]);
+  const hqStore = useMemo(() => stores.find((s) => s.name === "總部"), [stores]);
+  // 沿用畫面最上方既有的「處理門市」切換器（scope／scopeStoreIds），不在頁面裡另外做一個門市篩選器；
+  // 總部不算門市，排班相關統計要排除（跟 SchedulePage 的 scheduleStoreIds 是同一個道理）
+  const scheduleStoreIds = useMemo(() => scopeStoreIds.filter((sid) => sid !== hqStore?.id), [scopeStoreIds, hqStore]);
+  // 是否為「多間門市」檢視（決定要不要顯示跨店比較表格）：不能只看 scope==='all'，
+  // 因為非總部個人帳號（例如行政專責）本來就被鎖定在自己門市，scope 這個全域切換器對他們
+  // 不生效，一律用 scopeStoreIds 實際解析出來的間數判斷才準確
+  const isMultiStore = scopeStoreIds.length > 1;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2983,12 +2989,12 @@ function MonthlySummaryPage({ me, stores, toast }) {
     setHeadcount(hcRes.data || []);
     setShifts(shiftRes.data || []);
     setRequests(reqRes.data || []);
-    setChanges((changeRes.data || []).filter((c) => scheduleStoreIds.includes(c.employee?.store_id) || storeFilter === "all"));
+    setChanges((changeRes.data || []).filter((c) => scopeStoreIds.includes(c.employee?.store_id)));
     setPublications(pubRes.data || []);
     setLockedStores((lockRes.data || []).map((r) => r.store_id));
     setStaffingTargets(targetRes.data || []);
     setLoading(false);
-  }, [ym, scheduleStoreIds, storeFilter]);
+  }, [ym, scheduleStoreIds, scopeStoreIds]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -3005,7 +3011,7 @@ function MonthlySummaryPage({ me, stores, toast }) {
   const empById = useMemo(() => Object.fromEntries(headcount.map((h) => [h.employee_id, h])), [headcount]);
 
   // ---- 一、每月人力總覽 ----
-  const hcInScope = storeFilter === "all" ? headcount : headcount.filter((h) => h.store_id === storeFilter);
+  const hcInScope = headcount.filter((h) => scopeStoreIds.includes(h.store_id));
   const startCount = hcInScope.filter((h) => h.employed_at_month_start).length;
   const endCount = hcInScope.filter((h) => h.employed_at_month_end).length;
   const hiredCount = hcInScope.filter((h) => h.hired_this_month).length;
@@ -3159,14 +3165,10 @@ function MonthlySummaryPage({ me, stores, toast }) {
         <div>
           <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>MONTHLY SUMMARY</p>
           <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每月人事與排班總結</h2>
-          <p style={{ color: T.sub, fontSize: 12, margin: 0 }}>本頁全部時數／班數皆為系統「排定」資料，不是 POS 實際出勤紀錄。</p>
+          <p style={{ color: T.sub, fontSize: 12, margin: 0 }}>本頁全部時數／班數皆為系統「排定」資料，不是 POS 實際出勤紀錄；門市範圍請用畫面最上方的「處理門市」切換。</p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
-          <select className="ph-input" style={{ width: 130 }} value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)}>
-            <option value="all">全部門市</option>
-            {realStores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
           <button className="ph-btn small" onClick={() => window.print()}>列印／匯出 PDF</button>
         </div>
       </div>
@@ -3187,7 +3189,7 @@ function MonthlySummaryPage({ me, stores, toast }) {
               <StatTile label="留職停薪" value="—" unit="（尚未支援）" />
             </div>
             <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 12.5 }}>
-              {storeFilter === "all" && (
+              {isMultiStore && (
                 <div>
                   <strong style={{ fontSize: 12.5 }}>各門市在職人數</strong>
                   <div style={{ color: T.sub, marginTop: 4 }}>
@@ -3216,7 +3218,7 @@ function MonthlySummaryPage({ me, stores, toast }) {
               <StatTile label="尚未排班日期" value={emptyDays.length} unit="筆" />
               <StatTile label="已發布／未發布" value={`${publishedCount}／${unpublishedCount}`} unit="間" />
             </div>
-            {storeFilter === "all" && (
+            {isMultiStore && (
               <>
                 <strong style={{ fontSize: 12.5 }}>各門市排定時數</strong>
                 <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginTop: 6 }}>
@@ -4531,7 +4533,7 @@ function AppShell({ session }) {
             {page === "staff" && (perm.staff && perm.staff !== "self"
               ? <StaffPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />
               : <MyProfilePage me={me} stores={stores} />)}
-            {page === "monthly_summary" && perm.staff === "edit" && <MonthlySummaryPage me={me} stores={stores} toast={toast} />}
+            {page === "monthly_summary" && perm.staff === "edit" && <MonthlySummaryPage me={me} stores={stores} scope={scope} scopeStoreIds={scopeStoreIds} toast={toast} />}
             {page === "backup" && perm.backup && perm.backup !== "none" && <BackupPage me={me} toast={toast} />}
             {page === "permissions" && perm.permission_admin === "manage" && <PermissionsPage me={me} stores={stores} toast={toast} />}
             {page === "audit_log" && perm.permission_admin === "manage" && <AuditLogPage stores={stores} />}
