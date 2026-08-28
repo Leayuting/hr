@@ -840,17 +840,39 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
   }, [showHqSection, loadHq]);
 
   // 總部人員排休由管理員設定：總部本來就不加入正式排班表（只需要「有沒有休」，不需要
-  // 時間），所以不重用整套 ShiftEditModal，而是比照這個頁面已經有的「禁休日」互動模式
-  // （選日期＋按鈕加入、chip 列表可個別移除），直接呼叫既有的 saveShift/clearShift
-  // （順便沿用衝突檢查——總部的人也可能同時被別間店加為支援人員排在同一天）
+  // 時間），所以不重用整套 ShiftEditModal。新增用「當月日期格子可複選」一次選多天再
+  // 一次送出（比逐天選日期快很多），移除用既有的 chip 列表逐筆刪除。
   const isHqAdmin = me.access_tier === "super_admin";
-  const [hqNewOffDate, setHqNewOffDate] = useState({});
-  async function addHqOffDate(employeeId) {
-    const date = hqNewOffDate[employeeId];
-    if (!date || !hqStore) return;
-    await saveShift(employeeId, hqStore.id, date, { startTime: null, endTime: null, isDayOff: true, note: "" });
-    setHqNewOffDate((m) => ({ ...m, [employeeId]: "" }));
-    loadHq();
+  const [hqPendingDates, setHqPendingDates] = useState({}); // { [employeeId]: date[] }
+  const [hqBatchBusy, setHqBatchBusy] = useState({});
+  function toggleHqPendingDate(employeeId, date) {
+    setHqPendingDates((m) => {
+      const cur = m[employeeId] || [];
+      return { ...m, [employeeId]: cur.includes(date) ? cur.filter((d) => d !== date) : [...cur, date] };
+    });
+  }
+  async function addHqOffDates(employeeId) {
+    const dates = (hqPendingDates[employeeId] || []).slice().sort();
+    if (!dates.length || !hqStore) return;
+    setHqBatchBusy((m) => ({ ...m, [employeeId]: true }));
+    try {
+      const checks = await Promise.all(dates.map((d) => sb.rpc("shift_conflict_check", { p_employee_id: employeeId, p_work_date: d, p_exclude_store_id: hqStore.id })));
+      const conflictDates = dates.filter((d, i) => checks[i].data && checks[i].data.length);
+      const okDates = dates.filter((d) => !conflictDates.includes(d));
+      if (okDates.length) {
+        const rows = okDates.map((d) => ({ employee_id: employeeId, store_id: hqStore.id, work_date: d, start_time: null, end_time: null, is_day_off: true, note: "", updated_by: me.id, updated_at: new Date().toISOString() }));
+        const { error } = await sb.from("shifts").upsert(rows, { onConflict: "employee_id,work_date" });
+        if (error) { toast("加入排休失敗：" + error.message); return; }
+        await logAudit(me.name, "update_shift", `${employeeId}:批次排休`, `新增排休：${okDates.map((d) => `${Number(d.slice(8, 10))}日`).join("、")}`);
+      }
+      setHqPendingDates((m) => ({ ...m, [employeeId]: [] }));
+      toast(conflictDates.length
+        ? `已加入 ${okDates.length} 天排休；${conflictDates.map((d) => `${Number(d.slice(8, 10))}日`).join("、")} 已在其他門市排班，未加入`
+        : `已加入 ${okDates.length} 天排休`);
+      loadHq();
+    } finally {
+      setHqBatchBusy((m) => ({ ...m, [employeeId]: false }));
+    }
   }
   async function removeHqOffDate(employeeId, date) {
     await clearShift(employeeId, date);
@@ -1426,23 +1448,47 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                       <span style={{ fontWeight: 500, minWidth: 70 }}>{r.name}</span>
                       {!isHqAdmin && <span style={{ color: T.sub }}>{offDates.length ? `本月排休：${offDates.map((d) => `${d}日`).join("、")}` : "本月尚無排休登記"}</span>}
                     </div>
-                    {isHqAdmin && (
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, paddingLeft: 42 }}>
-                        <input className="ph-input" style={{ width: 150 }} type="date"
-                          min={`${ym}-01`} max={`${ym}-${pad2(days)}`}
-                          value={hqNewOffDate[r.id] || ""} onChange={(e) => setHqNewOffDate((m) => ({ ...m, [r.id]: e.target.value }))} />
-                        <button className="ph-btn small" disabled={!hqNewOffDate[r.id]} onClick={() => addHqOffDate(r.id)}>加入排休</button>
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {offShifts.map((s) => (
-                            <span key={s.work_date} className="ph-pill" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              {Number(s.work_date.slice(8, 10))}日
-                              <button type="button" onClick={() => removeHqOffDate(r.id, s.work_date)} style={{ border: "none", background: "none", cursor: "pointer", color: T.sub, padding: 0, fontSize: 13 }}>✕</button>
-                            </span>
-                          ))}
-                          {offShifts.length === 0 && <span style={{ fontSize: 12, color: T.sub }}>本月尚無排休登記</span>}
+                    {isHqAdmin && (() => {
+                      const offDateSet = new Set(offShifts.map((s) => s.work_date));
+                      const pending = hqPendingDates[r.id] || [];
+                      const busy = !!hqBatchBusy[r.id];
+                      return (
+                        <div style={{ marginTop: 6, paddingLeft: 42 }}>
+                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+                            {Array.from({ length: days }, (_, i) => i + 1).map((day) => {
+                              const dateStr = `${ym}-${pad2(day)}`;
+                              const isOff = offDateSet.has(dateStr);
+                              const isPending = pending.includes(dateStr);
+                              return (
+                                <button key={day} type="button" disabled={isOff || busy} onClick={() => toggleHqPendingDate(r.id, dateStr)}
+                                  title={isOff ? "已排休" : `${day}日`}
+                                  style={{
+                                    width: 26, height: 26, fontSize: 11, borderRadius: 6, padding: 0,
+                                    border: `1px solid ${isOff ? T.line : isPending ? T.brown : T.line}`,
+                                    background: isOff ? T.subBg : isPending ? T.brown : "#fff",
+                                    color: isOff ? T.sub : isPending ? "#fff" : T.ink,
+                                    cursor: isOff ? "default" : "pointer",
+                                  }}>{day}</button>
+                              );
+                            })}
+                          </div>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                            <button className="ph-btn small primary" disabled={!pending.length || busy} onClick={() => addHqOffDates(r.id)}>
+                              {busy ? "處理中…" : `加入排休${pending.length ? `（${pending.length}天）` : ""}`}
+                            </button>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {offShifts.map((s) => (
+                                <span key={s.work_date} className="ph-pill" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  {Number(s.work_date.slice(8, 10))}日
+                                  <button type="button" onClick={() => removeHqOffDate(r.id, s.work_date)} style={{ border: "none", background: "none", cursor: "pointer", color: T.sub, padding: 0, fontSize: 13 }}>✕</button>
+                                </span>
+                              ))}
+                              {offShifts.length === 0 && <span style={{ fontSize: 12, color: T.sub }}>本月尚無排休登記</span>}
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 );
               })}
