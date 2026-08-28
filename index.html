@@ -361,10 +361,13 @@ const css = `
   .ph-topbar { padding:calc(12px + env(safe-area-inset-top)) 16px 12px; }
   .ph-main-pad { padding-left:16px; padding-right:16px; }
 }
+.ph-dash-grid { display:grid; grid-template-columns:1fr; gap:16px; }
+.ph-dash-grid.wide { grid-template-columns:2fr 1fr; }
 @media (max-width: 720px) {
   .ph-hide-mobile { display:none; }
   .ph-table th, .ph-table td { padding:6px 6px; font-size:12px; }
   .ph-schedule-preview-desktop { display:none; }
+  .ph-dash-grid.wide { grid-template-columns:1fr; }
 }
 @media (min-width: 721px) {
   .ph-schedule-preview-mobile { display:none; }
@@ -4451,7 +4454,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
         )}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: me.isGlobalScope ? "2fr 1fr" : "1fr", gap: 16, marginTop: 22 }}>
+      <div className={me.isGlobalScope ? "ph-dash-grid wide" : "ph-dash-grid"} style={{ marginTop: 22 }}>
         {me.isGlobalScope && (
           <div className="ph-card" style={{ padding: 18 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
