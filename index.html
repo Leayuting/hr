@@ -432,6 +432,16 @@ function templateLabelFor(s, storeName) {
   const t = templates.find((t) => t.label === s.note && t.start === (s.start_time || "").slice(0, 5) && t.end === (s.end_time || "").slice(0, 5));
   return t ? t.label : null;
 }
+// 班表格子的顯示文字：休假＞範本班別名稱＞手動打的備註＞都沒有才顯示時間區間，
+// sep 是時間顯示用的分隔符（桌機格子用換行、手機一行用「–」）
+function shiftCellText(s, storeName, sep) {
+  if (!s) return null;
+  if (s.is_day_off) return "休";
+  const label = templateLabelFor(s, storeName);
+  if (label) return label;
+  if (s.note && s.note.trim()) return s.note.trim();
+  return `${(s.start_time || "").slice(0, 5)}${sep}${(s.end_time || "").slice(0, 5)}`;
+}
 // 班表分區：內場夥伴獨立一區，其餘為外場區；roster 本身已依 store_roster() 的
 // order by hire_date asc（年資由高到低）排序，這裡只切分不重排，維持年資順序
 function splitRosterByPosition(roster) {
@@ -1288,7 +1298,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                             <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}
                               style={mine ? { background: T.brownSoft } : undefined}
                               onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: activeStoreId || r.store_id, storeName: activeStore?.name || storeById[r.store_id]?.name, date: d, existing: s })}>
-                              {s ? (s.is_day_off ? "休" : (templateLabelFor(s, storeById[s.store_id]?.name) || `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`)) : "—"}
+                              {s ? shiftCellText(s, storeById[s.store_id]?.name, "\n") : "—"}
                             </td>
                           );
                         })}
@@ -1342,7 +1352,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                     onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: activeStoreId || r.store_id, storeName: activeStore?.name || storeById[r.store_id]?.name, date: d, existing: s })}>
                     <RosterCell r={r} index={idx} showStore storeName={isSupport ? `${storeById[r.store_id]?.name || ""}支援` : storeById[r.store_id]?.name} />
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : (templateLabelFor(s, storeById[s.store_id]?.name) || `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`)) : "尚未排班"}</div>
+                      <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? shiftCellText(s, storeById[s.store_id]?.name, "–") : "尚未排班"}</div>
                       {isSupport && canEdit && (
                         <button type="button" className="ph-btn small" style={{ padding: "2px 8px", fontSize: 11 }} onClick={(e) => { e.stopPropagation(); removeSupportStaff(r); }}>移出</button>
                       )}
@@ -2379,7 +2389,7 @@ function KioskScheduleView({ store, stores }) {
                       </td>
                       {dateList.map((d) => {
                         const s = shiftMap[`${r.id}_${d}`];
-                        return <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}>{s ? (s.is_day_off ? "休" : (templateLabelFor(s, store?.name) || `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`)) : "—"}</td>;
+                        return <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}>{s ? shiftCellText(s, store?.name, "\n") : "—"}</td>;
                       })}
                     </tr>
                   );
