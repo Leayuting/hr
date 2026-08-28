@@ -830,7 +830,19 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     return sum + shiftHours(s.start_time, s.end_time);
   }, 0);
 
-  async function saveShift(employeeId, employeeStoreId, date, { startTime, endTime, isDayOff, note }) {
+  // 排班衝突檢查：同一人同一天可能已經在別店排班（shifts 表 UNIQUE(employee_id,work_date)
+  // 不分店，直接存會覆蓋別店那筆紀錄），店長權限的人看不到別店班表沒辦法自己發現，
+  // 所以存檔前先呼叫 SECURITY DEFINER RPC 檢查，有衝突才跳出提醒，正常情況完全不會觸發
+  const [conflictModal, setConflictModal] = useState(null); // {employeeName, date, conflict, pendingArgs}
+  async function saveShift(employeeId, employeeStoreId, date, opts) {
+    const { data: conflicts } = await sb.rpc("shift_conflict_check", { p_employee_id: employeeId, p_work_date: date, p_exclude_store_id: employeeStoreId });
+    if (conflicts && conflicts.length) {
+      setConflictModal({ employeeName: editing?.employeeName || "", date, conflict: conflicts[0], pendingArgs: [employeeId, employeeStoreId, date, opts] });
+      return;
+    }
+    await doSaveShift(employeeId, employeeStoreId, date, opts);
+  }
+  async function doSaveShift(employeeId, employeeStoreId, date, { startTime, endTime, isDayOff, note }) {
     const payload = {
       employee_id: employeeId, store_id: employeeStoreId, work_date: date,
       start_time: isDayOff ? null : (startTime || null),
@@ -841,8 +853,13 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     const { error } = await sb.from("shifts").upsert(payload, { onConflict: "employee_id,work_date" });
     if (error) { toast("儲存失敗：" + (error.message.includes("row-level security") ? "此月份薪資已鎖定或無權限" : error.message)); return; }
     await logAudit(me.name, "update_shift", `${employeeId}:${date}`, isDayOff ? "休" : `${startTime}-${endTime}`);
+    setConflictModal(null);
     setEditing(null);
     load();
+  }
+  async function confirmOverwriteShift() {
+    if (!conflictModal) return;
+    await doSaveShift(...conflictModal.pendingArgs);
   }
 
   async function clearShift(employeeId, date) {
@@ -999,9 +1016,9 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
     saveBlackoutDates(blackoutDates.filter((x) => x !== d));
   }
 
-  // 調店／總部支援：從其他門市或總部的名單挑一個人＋一個日期，用同一個 ShiftEditModal
-  // 幫他在目前這間店建立第一筆支援班次（store_id 是目前這間店，不是他原本的 store_id）。
-  // 之後只要這個人在這間店的月份範圍內還有班次，就會自動出現在班表上，不用每次都重新加入。
+  // 調店／總部支援：從其他門市或總部的名單挑一個人，加入目前這間店「這個月的支援名單」
+  // （schedule_support_assignments），跟排班本身分開——加入當下不用馬上決定排哪一天，
+  // 之後直接在班表格線上點格子排班即可。
   const homeIds = useMemo(() => new Set(roster.map((r) => r.id)), [roster]);
   // 候選支援名單（其他門市＋總部的在職人員），只在「單一門市」畫面載入（activeStoreId 有值），
   // 避免「全部門市」畫面下一個人同時在好幾間店有支援班次時，搞不清楚點哪一格是要改哪一間店的班
@@ -1016,30 +1033,77 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
   }, [activeStoreId, canEdit, stores]);
   useEffect(() => { loadSupportPool(); }, [loadSupportPool]);
 
+  const [supportAssignments, setSupportAssignments] = useState([]);
+  const loadSupportAssignments = useCallback(async () => {
+    if (!activeStoreId) { setSupportAssignments([]); return; }
+    const { data, error } = await sb.from("schedule_support_assignments").select("*").eq("store_id", activeStoreId).eq("year_month", ym);
+    if (error) console.error("support assignments", error);
+    setSupportAssignments(data || []);
+  }, [activeStoreId, ym]);
+  useEffect(() => { loadSupportAssignments(); }, [loadSupportAssignments]);
+  useEffect(() => {
+    if (!activeStoreId) return;
+    const ch = sb.channel("schedule_support_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "schedule_support_assignments" }, () => loadSupportAssignments())
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [activeStoreId, loadSupportAssignments]);
+
   const supportRoster = useMemo(() => {
     if (!activeStoreId) return [];
+    // 有正式的支援名單紀錄，或（相容既有資料）這個月在本店已經有班次紀錄，兩者皆算支援人員——
+    // 後者是刻意保留的相容後路，讓這次上線前就已經用舊邏輯加進來的支援班次不會憑空消失
+    const assignedIds = new Set(supportAssignments.map((a) => a.employee_id));
     const shiftEmployeeIds = new Set(shifts.map((s) => s.employee_id));
-    return supportPool.filter((r) => !homeIds.has(r.id) && shiftEmployeeIds.has(r.id));
-  }, [supportPool, homeIds, shifts, activeStoreId]);
+    return supportPool.filter((r) => !homeIds.has(r.id) && (assignedIds.has(r.id) || shiftEmployeeIds.has(r.id)));
+  }, [supportPool, homeIds, shifts, supportAssignments, activeStoreId]);
   const displayRoster = useMemo(() => [...roster, ...supportRoster], [roster, supportRoster]);
   const [addSupportOpen, setAddSupportOpen] = useState(false);
   const [supportPersonId, setSupportPersonId] = useState("");
-  const [supportDate, setSupportDate] = useState(todayStr());
-  const supportRosterIds = useMemo(() => new Set(supportRoster.map((r) => r.id)), [supportRoster]);
-  const supportCandidates = supportPool.filter((r) => !homeIds.has(r.id) && !supportRosterIds.has(r.id));
+  const [supportMonth, setSupportMonth] = useState(ym);
+  const [supportNote, setSupportNote] = useState("");
+  const [supportBusy, setSupportBusy] = useState(false);
+  useEffect(() => { if (addSupportOpen) setSupportMonth(ym); }, [addSupportOpen, ym]);
+  const supportCandidates = supportPool.filter((r) => !homeIds.has(r.id));
   const supportCandidatesByStore = useMemo(() => {
     const groups = {};
     supportCandidates.forEach((r) => { (groups[r.store_id] = groups[r.store_id] || []).push(r); });
     return groups;
   }, [supportCandidates]);
+  const supportPerson = supportPool.find((r) => r.id === supportPersonId);
 
-  function addSupportShift() {
-    if (!supportPersonId || !supportDate || !activeStoreId) return;
-    const person = supportPool.find((r) => r.id === supportPersonId);
-    if (!person) return;
-    setEditing({ employeeId: person.id, employeeName: person.name, employeeStoreId: activeStoreId, storeName: activeStore?.name, date: supportDate, existing: shiftMap[`${person.id}_${supportDate}`] });
-    setAddSupportOpen(false);
-    setSupportPersonId("");
+  async function confirmAddSupport() {
+    if (!supportPersonId || !supportMonth || !activeStoreId) return;
+    setSupportBusy(true);
+    try {
+      const { error } = await sb.from("schedule_support_assignments").upsert({
+        store_id: activeStoreId, employee_id: supportPersonId, year_month: supportMonth,
+        note: supportNote || null, added_by: me.id,
+      }, { onConflict: "store_id,employee_id,year_month" });
+      if (error) { toast("加入失敗：" + error.message); return; }
+      const person = supportPool.find((r) => r.id === supportPersonId);
+      await logAudit(me.name, "add_support_staff", supportPersonId,
+        `${person?.name || ""}加入 ${activeStore?.name} ${supportMonth} 支援名單${supportNote ? `（${supportNote}）` : ""}`);
+      toast(`已將 ${person?.name || "夥伴"} 加入支援名單`);
+      setAddSupportOpen(false);
+      setSupportPersonId("");
+      setSupportNote("");
+      if (supportMonth !== ym) setYm(supportMonth);
+      else loadSupportAssignments();
+    } finally {
+      setSupportBusy(false);
+    }
+  }
+
+  async function removeSupportStaff(person) {
+    const hasShifts = shifts.some((s) => s.employee_id === person.id);
+    if (hasShifts) { toast(`${person.name} 本月已有排班紀錄，請先清除班次後再移出`); return; }
+    const { error } = await sb.from("schedule_support_assignments").delete()
+      .eq("store_id", activeStoreId).eq("employee_id", person.id).eq("year_month", ym);
+    if (error) { toast("移出失敗：" + error.message); return; }
+    await logAudit(me.name, "remove_support_staff", person.id, `${person.name}移出 ${activeStore?.name} ${ym} 支援名單`);
+    toast(`已將 ${person.name} 移出支援名單`);
+    loadSupportAssignments();
   }
 
   return (
@@ -1060,7 +1124,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {canEdit && activeStoreId && (
-            <button className="ph-btn small" onClick={() => setAddSupportOpen((v) => !v)}>＋新增人員（調店／總部支援）</button>
+            <button className="ph-btn small" onClick={() => setAddSupportOpen(true)}>加入支援人員</button>
           )}
           {canEdit && !kioskMode && (
             <>
@@ -1072,20 +1136,37 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
         </div>
       </div>
       {addSupportOpen && (
-        <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <div style={{ fontSize: 12.5, color: T.sub }}>從其他門市或總部挑一位人員，加入 {activeStore?.name} 某一天的班表（例如調店或總部下場支援）：</div>
-          <select className="ph-input" style={{ width: 180 }} value={supportPersonId} onChange={(e) => setSupportPersonId(e.target.value)}>
-            <option value="">選擇支援人員</option>
-            {stores.filter((s) => supportCandidatesByStore[s.id]?.length).map((s) => (
-              <optgroup key={s.id} label={s.name}>
-                {supportCandidatesByStore[s.id].map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-              </optgroup>
-            ))}
-          </select>
-          <input className="ph-input" style={{ width: 150 }} type="date" value={supportDate} onChange={(e) => setSupportDate(e.target.value)} />
-          <button className="ph-btn small primary" disabled={!supportPersonId || !supportDate} onClick={addSupportShift}>加入班表</button>
-          {supportCandidates.length === 0 && <span style={{ fontSize: 12, color: T.sub }}>目前沒有可加入的人員（可能都已經在此店班表上）</span>}
-        </div>
+        <Modal title="加入支援人員" onClose={() => setAddSupportOpen(false)}>
+          <Field label="支援人員">
+            <select className="ph-input" value={supportPersonId} onChange={(e) => setSupportPersonId(e.target.value)}>
+              <option value="">選擇支援人員</option>
+              {stores.filter((s) => supportCandidatesByStore[s.id]?.length).map((s) => (
+                <optgroup key={s.id} label={s.name}>
+                  {supportCandidatesByStore[s.id].map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </Field>
+          {supportPerson && (
+            <Field label="原所屬單位">
+              <div style={{ fontSize: 13.5 }}>{storeById[supportPerson.store_id]?.name}</div>
+            </Field>
+          )}
+          <Field label="支援門市">
+            <div style={{ fontSize: 13.5 }}>{activeStore?.name}</div>
+          </Field>
+          <Field label="支援月份">
+            <input className="ph-input" style={{ width: 150 }} type="month" value={supportMonth} onChange={(e) => setSupportMonth(e.target.value)} />
+          </Field>
+          <Field label="備註（非必填）">
+            <input className="ph-input" value={supportNote} onChange={(e) => setSupportNote(e.target.value)} placeholder="例如支援原因" />
+          </Field>
+          {supportCandidates.length === 0 && <p style={{ fontSize: 12, color: T.sub }}>目前沒有其他門市／總部的在職人員可加入。</p>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+            <button className="ph-btn" onClick={() => setAddSupportOpen(false)} disabled={supportBusy}>取消</button>
+            <button className="ph-btn primary" disabled={supportBusy || !supportPersonId || !supportMonth} onClick={confirmAddSupport}>{supportBusy ? "處理中…" : "確認加入"}</button>
+          </div>
+        </Modal>
       )}
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
         整月排班（{Number(ym.slice(5, 7))}/1–{Number(ym.slice(5, 7))}/{days}）；各門店分開處理，點擊班次即可修改。
@@ -1181,7 +1262,12 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                     return (
                       <tr key={r.id}>
                         <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
-                          <RosterCell r={r} index={idx} showStore={isSupport || scheduleStoreIds.length > 1} storeName={isSupport ? `${storeById[r.store_id]?.name || ""}支援` : storeById[r.store_id]?.name} />
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <RosterCell r={r} index={idx} showStore={isSupport || scheduleStoreIds.length > 1} storeName={isSupport ? `${storeById[r.store_id]?.name || ""}支援` : storeById[r.store_id]?.name} />
+                            {isSupport && canEdit && (
+                              <button type="button" className="ph-btn small" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => removeSupportStaff(r)}>移出</button>
+                            )}
+                          </div>
                         </td>
                         {dateList.map((d) => {
                           const s = shiftMap[`${r.id}_${d}`];
@@ -1243,7 +1329,12 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                   <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: canEdit ? "pointer" : "default" }}
                     onClick={() => canEdit && setEditing({ employeeId: r.id, employeeName: r.name, employeeStoreId: activeStoreId || r.store_id, storeName: activeStore?.name || storeById[r.store_id]?.name, date: d, existing: s })}>
                     <RosterCell r={r} index={idx} showStore storeName={isSupport ? `${storeById[r.store_id]?.name || ""}支援` : storeById[r.store_id]?.name} />
-                    <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "尚未排班"}</div>
+                      {isSupport && canEdit && (
+                        <button type="button" className="ph-btn small" style={{ padding: "2px 8px", fontSize: 11 }} onClick={(e) => { e.stopPropagation(); removeSupportStaff(r); }}>移出</button>
+                      )}
+                    </div>
                   </div>
                 );
               };
@@ -1289,6 +1380,30 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
       {editing && (
         <ShiftEditModal editing={editing} onClose={() => setEditing(null)} onSave={saveShift} onClear={clearShift}
           isPublished={publishedStores.includes(editing.employeeStoreId)} />
+      )}
+      {conflictModal && (
+        <Modal title="排班衝突提醒" onClose={() => setConflictModal(null)}>
+          <p style={{ fontSize: 13.5 }}>
+            <strong>{conflictModal.employeeName}</strong> 在 <strong>{conflictModal.date}</strong> 已於「{conflictModal.conflict.store_name}」排班
+            （{conflictModal.conflict.is_day_off ? "休假" : `${(conflictModal.conflict.start_time || "").slice(0, 5)}–${(conflictModal.conflict.end_time || "").slice(0, 5)}`}）。
+          </p>
+          {me.isGlobalScope ? (
+            <>
+              <p style={{ fontSize: 12.5, color: T.sub }}>儲存將把這筆紀錄覆蓋為本店班次，確定要繼續嗎？</p>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+                <button className="ph-btn" onClick={() => setConflictModal(null)}>取消</button>
+                <button className="ph-btn primary" onClick={confirmOverwriteShift}>確認覆蓋並儲存</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p style={{ fontSize: 12.5, color: T.sub }}>本店權限無法覆蓋別間門市已排定的班次，請先請「{conflictModal.conflict.store_name}」清除原班次，或改排其他日期；如需跨店調整，請洽總部管理者。</p>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+                <button className="ph-btn primary" onClick={() => setConflictModal(null)}>了解</button>
+              </div>
+            </>
+          )}
+        </Modal>
       )}
       {publishModal && (
         <Modal title="確認發布班表" onClose={() => setPublishModal(false)}>
@@ -2140,7 +2255,7 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
             </div>
             {tab === "schedule_view" && (isManager
               ? <SchedulePage me={me} stores={stores} scope={store.id} scopeStoreIds={[store.id]} activeStoreId={store.id} toast={toast} kioskMode />
-              : <KioskScheduleView store={store} />)}
+              : <KioskScheduleView store={store} stores={stores} />)}
             {tab === "daily_report" && <DailyReportDetail me={me} store={store} date={date} onDateChange={setDate} toast={toast} kioskMode />}
             {tab === "self_schedule" && <KioskSelfSchedule store={store} toast={toast} />}
             {tab === "requests_review" && isManager && <KioskRequestsReview me={me} store={store} toast={toast} />}
@@ -2151,29 +2266,42 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
   );
 }
 
-function KioskScheduleView({ store }) {
+function KioskScheduleView({ store, stores }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
   const [shifts, setShifts] = useState([]);
+  const [supportPool, setSupportPool] = useState([]);
+  const [supportAssignments, setSupportAssignments] = useState([]);
   const [loading, setLoading] = useState(true);
+  const storeById = useMemo(() => Object.fromEntries((stores || []).map((s) => [s.id, s])), [stores]);
 
   const load = useCallback(async () => {
     if (!store?.id) return;
     setLoading(true);
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
-    const [rosterRes, shiftRes] = await Promise.all([
+    const otherStores = (stores || []).filter((s) => s.id !== store.id);
+    const [rosterRes, shiftRes, supportPoolResList, supportAssignRes] = await Promise.all([
       sb.rpc("store_roster", { p_store_id: store.id }),
       sb.from("shifts").select("*").eq("store_id", store.id).gte("work_date", from).lte("work_date", to),
+      Promise.all(otherStores.map((s) =>
+        sb.rpc("store_roster", { p_store_id: s.id }).then((r) => (r.data || []).map((row) => ({ ...row, store_id: s.id })))
+      )),
+      sb.from("schedule_support_assignments").select("*").eq("store_id", store.id).eq("year_month", ym),
     ]);
     setRoster((rosterRes.data || []).filter((r) => r.active));
     setShifts(shiftRes.data || []);
+    setSupportPool(supportPoolResList.flat().filter((r) => r.active));
+    setSupportAssignments(supportAssignRes.data || []);
     setLoading(false);
-  }, [store?.id, ym]);
+  }, [store?.id, ym, stores]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    const ch = sb.channel("kiosk_schedule_view_sync").on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, load).subscribe();
+    const ch = sb.channel("kiosk_schedule_view_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "schedule_support_assignments" }, load)
+      .subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
 
@@ -2184,13 +2312,20 @@ function KioskScheduleView({ store }) {
     shifts.forEach((s) => { m[`${s.employee_id}_${s.work_date}`] = s; });
     return m;
   }, [shifts]);
+  const homeIds = useMemo(() => new Set(roster.map((r) => r.id)), [roster]);
+  const supportRoster = useMemo(() => {
+    const assignedIds = new Set(supportAssignments.map((a) => a.employee_id));
+    const shiftEmployeeIds = new Set(shifts.map((s) => s.employee_id));
+    return supportPool.filter((r) => !homeIds.has(r.id) && (assignedIds.has(r.id) || shiftEmployeeIds.has(r.id)));
+  }, [supportPool, homeIds, shifts, supportAssignments]);
+  const displayRoster = useMemo(() => [...roster, ...supportRoster], [roster, supportRoster]);
 
   async function exportSchedule() {
-    const { main, internal } = splitRosterByPosition(roster);
+    const { main, internal } = splitRosterByPosition(displayRoster);
     await exportScheduleWorkbook({
       title: `PHASE COFFEE ROASTERS・${store?.name || ""}・${ym.slice(0, 4)}年${Number(ym.slice(5, 7))}月排班表`,
       main, internal, dateList, shiftMap,
-      showStoreCol: false, storeById: {},
+      showStoreCol: supportRoster.length > 0, storeById,
       filename: `PHASE_排班表_${store?.name || ""}_${ym}.xlsx`,
     });
   }
@@ -2222,18 +2357,21 @@ function KioskScheduleView({ store }) {
             </thead>
             <tbody>
               {(() => {
-                const { main, internal } = splitRosterByPosition(roster);
-                const renderRow = (r, idx) => (
-                  <tr key={r.id}>
-                    <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
-                      <RosterCell r={r} index={idx} />
-                    </td>
-                    {dateList.map((d) => {
-                      const s = shiftMap[`${r.id}_${d}`];
-                      return <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}>{s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}</td>;
-                    })}
-                  </tr>
-                );
+                const { main, internal } = splitRosterByPosition(displayRoster);
+                const renderRow = (r, idx) => {
+                  const isSupport = !homeIds.has(r.id);
+                  return (
+                    <tr key={r.id}>
+                      <td style={{ position: "sticky", left: 0, background: "#fff", minWidth: 140, whiteSpace: "nowrap" }}>
+                        <RosterCell r={r} index={idx} showStore={isSupport} storeName={isSupport ? `${storeById[r.store_id]?.name || ""}支援` : undefined} />
+                      </td>
+                      {dateList.map((d) => {
+                        const s = shiftMap[`${r.id}_${d}`];
+                        return <td key={d} className={"ph-daycell" + (s?.is_day_off ? " off" : "")}>{s ? (s.is_day_off ? "休" : `${(s.start_time || "").slice(0, 5)}\n${(s.end_time || "").slice(0, 5)}`) : "—"}</td>;
+                      })}
+                    </tr>
+                  );
+                };
                 return (
                   <>
                     {main.map((r, idx) => renderRow(r, idx))}
@@ -2244,7 +2382,7 @@ function KioskScheduleView({ store }) {
                   </>
                 );
               })()}
-              {roster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+              {displayRoster.length === 0 && <tr><td colSpan={days + 1} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
             </tbody>
           </table>
         </div>
