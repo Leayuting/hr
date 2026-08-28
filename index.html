@@ -1100,34 +1100,40 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
   }, [supportPool, homeIds, shifts, supportAssignments, activeStoreId]);
   const displayRoster = useMemo(() => [...roster, ...supportRoster], [roster, supportRoster]);
   const [addSupportOpen, setAddSupportOpen] = useState(false);
-  const [supportPersonId, setSupportPersonId] = useState("");
+  const [supportSourceStoreId, setSupportSourceStoreId] = useState("");
+  const [supportPersonIds, setSupportPersonIds] = useState([]);
   const [supportMonth, setSupportMonth] = useState(ym);
   const [supportNote, setSupportNote] = useState("");
   const [supportBusy, setSupportBusy] = useState(false);
-  useEffect(() => { if (addSupportOpen) setSupportMonth(ym); }, [addSupportOpen, ym]);
-  const supportCandidates = supportPool.filter((r) => !homeIds.has(r.id));
-  const supportCandidatesByStore = useMemo(() => {
-    const groups = {};
-    supportCandidates.forEach((r) => { (groups[r.store_id] = groups[r.store_id] || []).push(r); });
-    return groups;
-  }, [supportCandidates]);
-  const supportPerson = supportPool.find((r) => r.id === supportPersonId);
+  useEffect(() => {
+    if (addSupportOpen) { setSupportMonth(ym); setSupportSourceStoreId(""); setSupportPersonIds([]); setSupportNote(""); }
+  }, [addSupportOpen, ym]);
+  // 選單只列「目前這間店以外」的門市（含總部）——本店的人本來就不需要用「支援」的方式加入
+  const sourceStoreOptions = stores.filter((s) => s.id !== activeStoreId);
+  const supportCandidates = supportPool.filter((r) => !homeIds.has(r.id) && r.store_id === supportSourceStoreId);
+  function toggleSupportPerson(id) {
+    setSupportPersonIds((ids) => ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]);
+  }
 
   async function confirmAddSupport() {
-    if (!supportPersonId || !supportMonth || !activeStoreId) return;
+    if (!supportPersonIds.length || !supportMonth || !activeStoreId) return;
     setSupportBusy(true);
     try {
-      const { error } = await sb.from("schedule_support_assignments").upsert({
-        store_id: activeStoreId, employee_id: supportPersonId, year_month: supportMonth,
+      const rows = supportPersonIds.map((pid) => ({
+        store_id: activeStoreId, employee_id: pid, year_month: supportMonth,
         note: supportNote || null, added_by: me.id,
-      }, { onConflict: "store_id,employee_id,year_month" });
+      }));
+      const { error } = await sb.from("schedule_support_assignments").upsert(rows, { onConflict: "store_id,employee_id,year_month" });
       if (error) { toast("加入失敗：" + error.message); return; }
-      const person = supportPool.find((r) => r.id === supportPersonId);
-      await logAudit(me.name, "add_support_staff", supportPersonId,
-        `${person?.name || ""}加入 ${activeStore?.name} ${supportMonth} 支援名單${supportNote ? `（${supportNote}）` : ""}`);
-      toast(`已將 ${person?.name || "夥伴"} 加入支援名單`);
+      const names = supportPersonIds.map((pid) => supportPool.find((r) => r.id === pid)?.name).filter(Boolean);
+      await Promise.all(supportPersonIds.map((pid) =>
+        logAudit(me.name, "add_support_staff", pid,
+          `${supportPool.find((r) => r.id === pid)?.name || ""}加入 ${activeStore?.name} ${supportMonth} 支援名單${supportNote ? `（${supportNote}）` : ""}`)
+      ));
+      toast(`已將 ${names.join("、") || "所選夥伴"} 加入支援名單`);
       setAddSupportOpen(false);
-      setSupportPersonId("");
+      setSupportSourceStoreId("");
+      setSupportPersonIds([]);
       setSupportNote("");
       if (supportMonth !== ym) setYm(supportMonth);
       else loadSupportAssignments();
@@ -1178,19 +1184,27 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
       </div>
       {addSupportOpen && (
         <Modal title="加入支援人員" onClose={() => setAddSupportOpen(false)}>
-          <Field label="支援人員">
-            <select className="ph-input" value={supportPersonId} onChange={(e) => setSupportPersonId(e.target.value)}>
-              <option value="">選擇支援人員</option>
-              {stores.filter((s) => supportCandidatesByStore[s.id]?.length).map((s) => (
-                <optgroup key={s.id} label={s.name}>
-                  {supportCandidatesByStore[s.id].map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-                </optgroup>
-              ))}
+          <Field label="人員所屬單位">
+            <select className="ph-input" value={supportSourceStoreId}
+              onChange={(e) => { setSupportSourceStoreId(e.target.value); setSupportPersonIds([]); }}>
+              <option value="">選擇單位</option>
+              {sourceStoreOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </Field>
-          {supportPerson && (
-            <Field label="原所屬單位">
-              <div style={{ fontSize: 13.5 }}>{storeById[supportPerson.store_id]?.name}</div>
+          {supportSourceStoreId && (
+            <Field label="支援人員姓名（可複選）">
+              {supportCandidates.length === 0 ? (
+                <p style={{ fontSize: 12, color: T.sub, margin: 0 }}>此單位目前沒有可加入的在職人員。</p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto", border: `1px solid ${T.line}`, borderRadius: 6, padding: 8 }}>
+                  {supportCandidates.map((r) => (
+                    <label key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, padding: "4px 2px", cursor: "pointer" }}>
+                      <input type="checkbox" checked={supportPersonIds.includes(r.id)} onChange={() => toggleSupportPerson(r.id)} />
+                      {r.name}{r.position ? `・${r.position}` : ""}
+                    </label>
+                  ))}
+                </div>
+              )}
             </Field>
           )}
           <Field label="支援門市">
@@ -1202,10 +1216,9 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
           <Field label="備註（非必填）">
             <input className="ph-input" value={supportNote} onChange={(e) => setSupportNote(e.target.value)} placeholder="例如支援原因" />
           </Field>
-          {supportCandidates.length === 0 && <p style={{ fontSize: 12, color: T.sub }}>目前沒有其他門市／總部的在職人員可加入。</p>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
             <button className="ph-btn" onClick={() => setAddSupportOpen(false)} disabled={supportBusy}>取消</button>
-            <button className="ph-btn primary" disabled={supportBusy || !supportPersonId || !supportMonth} onClick={confirmAddSupport}>{supportBusy ? "處理中…" : "確認加入"}</button>
+            <button className="ph-btn primary" disabled={supportBusy || !supportPersonIds.length || !supportMonth} onClick={confirmAddSupport}>{supportBusy ? "處理中…" : `確認加入${supportPersonIds.length ? `（${supportPersonIds.length}人）` : ""}`}</button>
           </div>
         </Modal>
       )}
