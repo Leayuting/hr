@@ -3385,6 +3385,55 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
     return () => sb.removeChannel(ch);
   }, [load]);
 
+  const activeRows = rows.filter((r) => r.active);
+  const terminatedRows = rows.filter((r) => !r.active);
+
+  function renderCard(r, idx) {
+    return (
+      <div key={r.id} className="ph-card" style={{ padding: 18, opacity: r.active ? 1 : 0.75 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <RosterAvatar name={r.name} index={idx} />
+            <div style={{ fontWeight: 500 }}>{r.name}</div>
+          </div>
+          <span className="ph-pill">{storeById[r.store_id]?.name}</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 10, columnGap: 8, fontSize: 12.5, paddingTop: 12, borderTop: `1px solid ${T.line}`, marginBottom: 14 }}>
+          <div>
+            <div style={{ color: T.sub, marginBottom: 4 }}>聘僱類型</div>
+            <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "正職" : "兼職"}{r.position ? `／${r.position}` : ""}</div>
+          </div>
+          <div>
+            <div style={{ color: T.sub, marginBottom: 4 }}>計薪方式</div>
+            <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "月薪制" : "時薪制"}</div>
+          </div>
+          <div>
+            <div style={{ color: T.sub, marginBottom: 4 }}>到職日</div>
+            <div style={{ fontWeight: 600 }}>{r.hire_date || "—"}</div>
+          </div>
+          {r.active ? (
+            <div>
+              <div style={{ color: T.sub, marginBottom: 4 }}>狀態</div>
+              <div style={{ fontWeight: 600, color: T.green }}>在職</div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ color: T.sub, marginBottom: 4 }}>離職日</div>
+              <div style={{ fontWeight: 600, color: T.sub }}>{r.termination_date || "—"}</div>
+            </div>
+          )}
+          <div>
+            <div style={{ color: T.sub, marginBottom: 4 }}>特休天數</div>
+            <div style={{ fontWeight: 600 }}>{r.annual_leave_days ?? annualLeaveDaysForSeniority(r.hire_date)} 天{r.annual_leave_days == null ? "（自動計算）" : ""}</div>
+          </div>
+        </div>
+        {me.permissions?.staff === "edit" && (
+          <button className="ph-btn small" style={{ width: "100%" }} onClick={() => setEditing({ ...r })}>查看資料</button>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
@@ -3397,45 +3446,21 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
         )}
       </div>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
-          {rows.map((r, idx) => (
-            <div key={r.id} className="ph-card" style={{ padding: 18 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <RosterAvatar name={r.name} index={idx} />
-                  <div style={{ fontWeight: 500 }}>{r.name}</div>
-                </div>
-                <span className="ph-pill">{storeById[r.store_id]?.name}</span>
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
+            {activeRows.map((r, idx) => renderCard(r, idx))}
+            {activeRows.length === 0 && <div className="ph-card" style={{ padding: 24, color: T.sub, textAlign: "center" }}>此範圍尚無在職夥伴</div>}
+          </div>
+
+          {terminatedRows.length > 0 && (
+            <>
+              <h3 className="ph-serif" style={{ fontSize: 16, margin: "26px 0 10px", color: T.sub }}>離職夥伴</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
+                {terminatedRows.map((r, idx) => renderCard(r, idx))}
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 10, columnGap: 8, fontSize: 12.5, paddingTop: 12, borderTop: `1px solid ${T.line}`, marginBottom: 14 }}>
-                <div>
-                  <div style={{ color: T.sub, marginBottom: 4 }}>聘僱類型</div>
-                  <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "正職" : "兼職"}{r.position ? `／${r.position}` : ""}</div>
-                </div>
-                <div>
-                  <div style={{ color: T.sub, marginBottom: 4 }}>計薪方式</div>
-                  <div style={{ fontWeight: 600 }}>{r.employment_type === "full_time" ? "月薪制" : "時薪制"}</div>
-                </div>
-                <div>
-                  <div style={{ color: T.sub, marginBottom: 4 }}>到職日</div>
-                  <div style={{ fontWeight: 600 }}>{r.hire_date || "—"}</div>
-                </div>
-                <div>
-                  <div style={{ color: T.sub, marginBottom: 4 }}>狀態</div>
-                  <div style={{ fontWeight: 600, color: r.active ? T.green : T.sub }}>{r.active ? "在職" : "停用"}</div>
-                </div>
-                <div>
-                  <div style={{ color: T.sub, marginBottom: 4 }}>特休天數</div>
-                  <div style={{ fontWeight: 600 }}>{r.annual_leave_days ?? annualLeaveDaysForSeniority(r.hire_date)} 天{r.annual_leave_days == null ? "（自動計算）" : ""}</div>
-                </div>
-              </div>
-              {me.permissions?.staff === "edit" && (
-                <button className="ph-btn small" style={{ width: "100%" }} onClick={() => setEditing({ ...r })}>查看資料</button>
-              )}
-            </div>
-          ))}
-          {rows.length === 0 && <div className="ph-card" style={{ padding: 24, color: T.sub, textAlign: "center" }}>此範圍尚無夥伴資料</div>}
-        </div>
+            </>
+          )}
+        </>
       )}
       {editing && (
         <StaffEditModal me={me} stores={stores} editing={editing} onClose={() => setEditing(null)}
