@@ -28,7 +28,7 @@
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
 
-const { useState, useEffect, useMemo, useRef, useCallback } = React;
+const { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle } = React;
 const { createClient } = supabase;
 
 /* ────────────────────────────────────────────
@@ -639,6 +639,116 @@ function Modal({ title, onClose, children, wide }) {
 function Field({ label, children }) {
   return <div className="ph-field"><label>{label}</label>{children}</div>;
 }
+
+// 可重用的電子手寫簽名元件：筆畫存正規化座標（0~1 相對座標），不是直接存點陣圖，
+// 這樣容器尺寸變化（旋轉/縮放）時可以用目前寬高重新換算像素座標重繪，畫布本身改變
+// width/height 屬性會清空內容，用正規化座標＋ResizeObserver 重繪才不會清空/扭曲。
+// 不提供套用上次簽名／自動生成／上傳圖片，只有畫＋清除重簽兩種操作。
+const SignaturePad = forwardRef(function SignaturePad({ height = 160 }, ref) {
+  const containerRef = useRef(null);
+  const canvasRef = useRef(null);
+  const strokesRef = useRef([]); // [[{x,y}, ...], ...] 正規化座標
+  const drawingRef = useRef(false);
+  const [isEmptyState, setIsEmptyState] = useState(true);
+
+  function redraw() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = "#241C16";
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    strokesRef.current.forEach((stroke) => {
+      if (stroke.length < 2) return;
+      ctx.beginPath();
+      stroke.forEach((pt, i) => {
+        const x = pt.x * canvas.width, y = pt.y * canvas.height;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+  }
+
+  function resizeCanvas() {
+    const canvas = canvasRef.current, container = containerRef.current;
+    if (!canvas || !container) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = container.clientWidth, h = height;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    redraw();
+  }
+
+  useEffect(() => {
+    resizeCanvas();
+    const ro = new ResizeObserver(() => resizeCanvas());
+    if (containerRef.current) ro.observe(containerRef.current);
+    return () => ro.disconnect();
+    // eslint-disable-next-line
+  }, []);
+
+  function pointFromEvent(e) {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    return { x: (e.clientX - rect.left) / rect.width, y: (e.clientY - rect.top) / rect.height };
+  }
+
+  function onPointerDown(e) {
+    e.preventDefault();
+    canvasRef.current.setPointerCapture(e.pointerId);
+    drawingRef.current = true;
+    strokesRef.current.push([pointFromEvent(e)]);
+  }
+  function onPointerMove(e) {
+    if (!drawingRef.current) return;
+    strokesRef.current[strokesRef.current.length - 1].push(pointFromEvent(e));
+    redraw();
+  }
+  function onPointerUp() {
+    if (!drawingRef.current) return;
+    drawingRef.current = false;
+    setIsEmptyState(computeIsEmpty());
+  }
+
+  function computeIsEmpty() {
+    // 至少要有一筆畫且有實際移動距離，避免手滑點一下就算數，但完全不做筆跡辨識/身分判定
+    return !strokesRef.current.some((stroke) => {
+      if (stroke.length < 3) return false;
+      const dx = stroke[stroke.length - 1].x - stroke[0].x;
+      const dy = stroke[stroke.length - 1].y - stroke[0].y;
+      return stroke.length >= 6 || Math.hypot(dx, dy) > 0.02;
+    });
+  }
+
+  function clear() {
+    strokesRef.current = [];
+    setIsEmptyState(true);
+    redraw();
+  }
+
+  useImperativeHandle(ref, () => ({
+    isEmpty: () => computeIsEmpty(),
+    clear,
+    exportPng: () => new Promise((resolve) => canvasRef.current.toBlob((blob) => resolve(blob), "image/png")),
+    scrollIntoView: () => containerRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }),
+  }));
+
+  return (
+    <div ref={containerRef} style={{ width: "100%" }}>
+      <canvas ref={canvasRef}
+        style={{ display: "block", width: "100%", height, touchAction: "none", border: `1px solid ${T.line}`, borderRadius: 8, background: "#fff", cursor: "crosshair" }}
+        onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp} />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+        <span style={{ fontSize: 11.5, color: isEmptyState ? T.red : T.green }}>{isEmptyState ? "尚未簽名" : "已簽名"}</span>
+        <button type="button" className="ph-btn small" onClick={clear}>清除重簽</button>
+      </div>
+    </div>
+  );
+});
 
 /* ────────────────────────────────────────────
    登入
@@ -2185,7 +2295,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const [loading, setLoading] = useState(true);
   const [attachmentsComplete, setAttachmentsComplete] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
-  const [managerName, setManagerName] = useState("");
+  const signaturePadRef = useRef(null);
+  const [signatureHistory, setSignatureHistory] = useState(null); // null=未開啟；陣列=已載入
   const [returnModal, setReturnModal] = useState(false);
   const canManageAnomaly = !kioskMode && (me.access_tier === "super_admin" || me.permissions?.daily_report === "all");
 
@@ -2232,14 +2343,26 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const hasAnomaly = Object.values(entries).some((e) => e.late || e.missed_punch || e.leave || e.overtime);
   const canWrite = me.permissions?.daily_report === "fill" && (!report || report.status === "draft" || report.status === "submitted");
 
+  function clearSignatureOnChange() {
+    if (kioskMode && signaturePadRef.current && !signaturePadRef.current.isEmpty()) {
+      signaturePadRef.current.clear();
+      toast("內容已變更，請重新簽名");
+    }
+  }
+
   function updateEntry(employeeId, patch) {
     setEntries((prev) => ({ ...prev, [employeeId]: { ...prev[employeeId], ...patch } }));
+    clearSignatureOnChange();
   }
 
   async function submitReport() {
     if (actionBusy) return;
     if (!posVerified) { toast("請先勾選已完成 POS 出缺勤與加班核對"); return; }
-    if (kioskMode && !managerName) { toast("請先選擇當天主管姓名"); return; }
+    if (kioskMode && signaturePadRef.current?.isEmpty()) {
+      toast("請先完成當日主管簽名");
+      signaturePadRef.current?.scrollIntoView();
+      return;
+    }
     for (const r of roster) {
       const e = entries[r.id];
       const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
@@ -2252,16 +2375,12 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     setActionBusy(true);
     try {
       let reportId = report?.id;
-      const submittedByName = kioskMode ? managerName : null;
+      let expectedUpdatedAt = report?.updated_at || null;
       if (!reportId) {
-        const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), submitted_by_name: submittedByName }).select().single();
+        const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "draft" }).select().single();
         if (error) { toast("送出失敗：" + error.message); return; }
         reportId = data.id;
-      } else {
-        const { data, error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), submitted_by_name: submittedByName, signed_by: null, signed_at: null })
-          .eq("id", reportId).eq("updated_at", report.updated_at).select();
-        if (error) { toast("送出失敗：" + error.message); return; }
-        if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
+        expectedUpdatedAt = data.updated_at;
       }
       for (const r of roster) {
         const e = entries[r.id];
@@ -2277,6 +2396,23 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           missed_punch_fix_end: e.missed_punch ? (e.missed_punch_fix_end || null) : null,
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
         }, { onConflict: "daily_report_id,employee_id" });
+      }
+      if (kioskMode) {
+        const blob = await signaturePadRef.current.exportPng();
+        const path = `${reportId}/signature_${Date.now()}.png`;
+        const { error: upErr } = await sb.storage.from("daily-report-attachments").upload(path, blob, { contentType: "image/png" });
+        if (upErr) { toast("簽名上傳失敗：" + upErr.message); return; }
+        const { error: finErr } = await sb.rpc("finalize_daily_report_submission", {
+          p_store_id: storeId, p_report_date: date, p_report_id: reportId,
+          p_storage_path: path, p_mime_type: "image/png", p_file_size: blob.size,
+          p_pos_verified: true, p_expected_updated_at: expectedUpdatedAt,
+        });
+        if (finErr) { toast((finErr.message.includes("CONFLICT") ? "" : "送出失敗：") + finErr.message); if (finErr.message.includes("CONFLICT")) load(); return; }
+      } else {
+        const { data, error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), signed_by: null, signed_at: null })
+          .eq("id", reportId).eq("updated_at", expectedUpdatedAt).select();
+        if (error) { toast("送出失敗：" + error.message); return; }
+        if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
       }
       await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
       toast("已送出，等待領班簽核");
@@ -2354,6 +2490,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       daily_report_id: reportId, store_id: storeId, storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "application/octet-stream", uploaded_by: me.id,
     });
     if (error) { toast("附件登錄失敗：" + error.message); return; }
+    clearSignatureOnChange();
     load();
   }
 
@@ -2496,15 +2633,15 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
             </div>
           </div>
 
-          {kioskMode && (
+          {kioskMode && canWrite && (
             <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
-              <Field label="送出時當天主管姓名（系統會自動記錄送出時間）">
-                <select className="ph-input" disabled={!canWrite} value={managerName} onChange={(e) => setManagerName(e.target.value)}>
-                  <option value="">請選擇姓名</option>
-                  {roster.map((r) => <option key={r.id} value={r.name}>{r.name}</option>)}
-                </select>
-              </Field>
+              <strong style={{ fontSize: 13 }}>當日主管簽名</strong>
+              <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>請當日主管親自簽署完整姓名，系統將自動記錄送出時間。</p>
+              <SignaturePad ref={signaturePadRef} />
             </div>
+          )}
+          {(report?.current_signature_id || report?.submitted_by_name) && (
+            <ReportSignatureDisplay report={report} toast={toast} onShowHistory={() => setSignatureHistory([])} />
           )}
 
           <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
@@ -2604,7 +2741,80 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       {returnModal && (
         <ReturnReportModal busy={actionBusy} onClose={() => setReturnModal(false)} onConfirm={returnReport} />
       )}
+      {signatureHistory !== null && report && (
+        <SignatureHistoryModal reportId={report.id} onClose={() => setSignatureHistory(null)} />
+      )}
     </div>
+  );
+}
+
+// 送出明細裡的簽名/舊版姓名顯示：有簽名優先顯示簽名圖（限時連結，不是永久公開網址），
+// 沒有簽名但有舊版 submitted_by_name 才顯示「舊版姓名確認」，不生成替代簽名、不要求補簽
+function ReportSignatureDisplay({ report, toast, onShowHistory }) {
+  const [sig, setSig] = useState(null);
+  const [signedUrl, setSignedUrl] = useState(null);
+
+  useEffect(() => {
+    if (!report?.current_signature_id) { setSig(null); setSignedUrl(null); return; }
+    sb.from("daily_report_signatures").select("*").eq("id", report.current_signature_id).maybeSingle().then(({ data }) => {
+      setSig(data || null);
+      if (data?.storage_path) {
+        sb.storage.from("daily-report-attachments").createSignedUrl(data.storage_path, 3600).then(({ data: urlData, error }) => {
+          if (error) { console.error("signature signed url", error); return; }
+          setSignedUrl(urlData?.signedUrl || null);
+        });
+      }
+    });
+  }, [report?.current_signature_id]);
+
+  if (report?.current_signature_id) {
+    return (
+      <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <strong style={{ fontSize: 13 }}>當日主管簽名</strong>
+          <button className="ph-btn small" onClick={onShowHistory}>查看歷程</button>
+        </div>
+        {signedUrl ? (
+          <img src={signedUrl} alt="主管簽名" style={{ maxWidth: 260, border: `1px solid ${T.line}`, borderRadius: 8, background: "#fff" }} />
+        ) : <p style={{ color: T.sub, fontSize: 12.5 }}>載入簽名中…</p>}
+        <p style={{ color: T.sub, fontSize: 12, marginTop: 8, marginBottom: 0 }}>
+          送出帳號：{sig?.submitted_by_name_snapshot || "—"}　送出時間：{fmtTaipei(sig?.submitted_at)}　版本：{sig?.report_version ?? report.version}
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+      <strong style={{ fontSize: 13 }}>當日主管確認</strong>
+      <p style={{ color: T.sub, fontSize: 12, marginTop: 8, marginBottom: 0 }}>
+        舊版姓名確認：{report.submitted_by_name}　送出時間：{fmtTaipei(report.submitted_at)}
+      </p>
+    </div>
+  );
+}
+
+function SignatureHistoryModal({ reportId, onClose }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    sb.from("daily_report_signatures").select("*").eq("daily_report_id", reportId).order("report_version", { ascending: false })
+      .then(({ data }) => { setRows(data || []); setLoading(false); });
+  }, [reportId]);
+  return (
+    <Modal title="簽名歷程" onClose={onClose}>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : rows.length === 0 ? (
+        <p style={{ color: T.sub, fontSize: 12.5 }}>目前沒有簽名紀錄。</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {rows.map((r) => (
+            <div key={r.id} style={{ fontSize: 12.5, borderBottom: `1px solid ${T.line}`, paddingBottom: 8 }}>
+              <div><strong>版本 {r.report_version}</strong>　{fmtTaipei(r.submitted_at)}</div>
+              <div style={{ color: T.sub }}>送出帳號：{r.submitted_by_name_snapshot || "—"}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
   );
 }
 
