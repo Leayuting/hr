@@ -3257,7 +3257,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
     const [empRes, shiftRes, reqRes, runRes, adjRes, ovrRes] = await Promise.all([
-      sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("active", true).eq("is_shared_pin_account", false).order("name"),
+      sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("active", true).eq("is_shared_pin_account", false).eq("is_non_employee_account", false).order("name"),
       sb.from("shifts").select("*").in("store_id", scopeStoreIds).gte("work_date", from).lte("work_date", to),
       sb.from("requests").select("*").in("store_id", scopeStoreIds).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
       sb.from("payroll_runs").select("*").in("store_id", scopeStoreIds).eq("year_month", ym),
@@ -4160,7 +4160,7 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
     if (!scopeStoreIds.length) return;
     setLoading(true);
     if (canSeeSensitive) {
-      const { data, error } = await sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("is_shared_pin_account", false).order("active", { ascending: false }).order("name");
+      const { data, error } = await sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("is_shared_pin_account", false).eq("is_non_employee_account", false).order("active", { ascending: false }).order("name");
       if (error) console.error("staff load", error);
       setRows(data || []);
     } else {
@@ -4523,7 +4523,7 @@ function MyProfilePage({ me, stores }) {
   const [run, setRun] = useState(null);
   const [showPayslip, setShowPayslip] = useState(false);
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
-  const hasPayrollAccess = !!me.permissions?.payroll;
+  const hasPayrollAccess = !!me.permissions?.payroll && !me.is_non_employee_account;
 
   useEffect(() => {
     if (!hasPayrollAccess) return;
@@ -4661,7 +4661,7 @@ function PermissionsPage({ me, stores, toast }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data, error } = await sb.from("employees").select("id,name,access_tier,store_id,active,email,is_shared_pin_account")
+    const { data, error } = await sb.from("employees").select("id,name,access_tier,store_id,active,email,is_shared_pin_account,is_non_employee_account")
       .order("active", { ascending: false }).order("name");
     if (error) console.error("permissions employees", error);
     const all = data || [];
@@ -4730,13 +4730,14 @@ function PermissionsPage({ me, stores, toast }) {
           <h3 className="ph-serif" style={{ fontSize: 16, margin: "0 0 10px" }}>總部人員</h3>
           <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginBottom: 24 }}>
             <table className="ph-table">
-              <thead><tr><th>姓名</th><th>角色</th><th>登入信箱</th><th>狀態</th><th>建立／重設密碼</th></tr></thead>
+              <thead><tr><th>姓名</th><th>帳號類型</th><th>角色</th><th>登入信箱</th><th>啟用狀態</th><th>建立／重設密碼</th></tr></thead>
               <tbody>
                 {hqRows.map((r) => {
                   const hasRealEmail = r.email && !r.email.endsWith("@phasehr-internal.local");
                   return (
                     <tr key={r.id} style={!r.active ? { opacity: 0.5 } : undefined}>
                       <td>{r.name}</td>
+                      <td><Badge tone={r.is_non_employee_account ? "olive" : "sub"}>{r.is_non_employee_account ? "共用管理帳號" : "個人帳號"}</Badge></td>
                       <td>
                         <select className="ph-input" style={{ fontSize: 12, padding: "4px 6px", minWidth: 110 }}
                           value={r.access_tier} disabled={busyKey === r.id} onChange={(e) => updateRole(r.id, e.target.value)}>
@@ -4745,7 +4746,7 @@ function PermissionsPage({ me, stores, toast }) {
                         </select>
                       </td>
                       <td style={{ fontSize: 12, color: T.sub }}>{hasRealEmail ? r.email : "（尚未設定）"}</td>
-                      <td style={{ fontSize: 12, color: T.sub }}>{r.active ? "在職" : "停用"}</td>
+                      <td style={{ fontSize: 12, color: T.sub }}>{r.active ? "啟用中" : "已停用"}</td>
                       <td>
                         {hasRealEmail ? (
                           <div>
@@ -4763,7 +4764,7 @@ function PermissionsPage({ me, stores, toast }) {
                     </tr>
                   );
                 })}
-                {hqRows.length === 0 && <tr><td colSpan={5} style={{ color: T.sub, textAlign: "center" }}>尚無總部人員資料</td></tr>}
+                {hqRows.length === 0 && <tr><td colSpan={6} style={{ color: T.sub, textAlign: "center" }}>尚無總部人員資料</td></tr>}
               </tbody>
             </table>
           </div>
