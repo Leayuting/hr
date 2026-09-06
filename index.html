@@ -2347,6 +2347,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const leaveTypeByCode = useMemo(() => Object.fromEntries(leaveTypeSettings.map((t) => [t.code, t])), [leaveTypeSettings]);
   const [deadlineDays, setDeadlineDays] = useState(null);
   const [leaveProofModal, setLeaveProofModal] = useState(null); // { entry, employeeName } | null
+  const rowRefsDesktop = useRef({}); // employeeId -> 桌面表格列 DOM node
+  const rowRefsMobile = useRef({}); // employeeId -> 手機卡片 DOM node（桌面/手機兩份 DOM 同時存在，用 CSS 切換顯示，各自要有自己的 ref 才能在對應版面捲動）
+  const [errorTarget, setErrorTarget] = useState(null); // { employeeId, field } | null
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -2395,6 +2398,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   useEffect(() => { load(); }, [load]);
 
   const hasAnomaly = Object.values(entries).some((e) => e.late || e.missed_punch || e.leave || e.overtime);
+  // 漏打卡不再要求附件：只有遲到/請假/加班存在時才需要「附件已完整上傳」的簽核前把關
+  const attachmentRelevantAnomaly = Object.values(entries).some((e) => e.late || e.leave || e.overtime);
   const canWrite = me.permissions?.daily_report === "fill" && (!report || report.status === "draft" || report.status === "submitted");
   const canUploadProof = me.permissions?.daily_report === "fill"; // 補件不受回報流程狀態限制
 
@@ -2408,14 +2413,26 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   function updateEntry(employeeId, patch) {
     setEntries((prev) => ({ ...prev, [employeeId]: { ...prev[employeeId], ...patch } }));
     clearSignatureOnChange();
+    setErrorTarget((prev) => (prev?.employeeId === employeeId ? null : prev));
   }
 
-  // 取消勾選異常時，若這位員工這個項目已經有附件，不能靜默取消——附件本身不會被刪除，
-  // 但畫面上會從「目前異常」移到「歷史附件」，先跟操作者確認過再繼續
+  // 取消勾選前檢查這位員工這個項目是否已經有填寫內容或上傳附件，不能靜默取消——
+  // 內容/附件本身不會被刪除，只是展開區跟著隱藏，先跟操作者確認過再繼續
+  function hasTypedContent(e, field) {
+    if (field === "late") return !!String(e.late_minutes || "").trim();
+    if (field === "missed_punch") return !!(e.missed_punch_reason?.trim() || e.missed_punch_error_start || e.missed_punch_error_end || e.missed_punch_fix_start || e.missed_punch_fix_end);
+    if (field === "leave") return !!(String(e.leave_hours || "").trim() || e.leave_type || e.leave_proof_deferred_reason?.trim());
+    if (field === "overtime") return !!String(e.overtime_hours || "").trim();
+    return false;
+  }
+
   function toggleAnomalyFlag(employeeId, field, checked) {
     if (!checked) {
-      const hasAtt = attachments.some((a) => a.employee_id === employeeId && a.anomaly_type === field);
-      if (hasAtt && !window.confirm("此項目已上傳附件，取消勾選不會刪除附件，附件會改列在「歷史附件」中仍可查閱。確定要取消勾選嗎？")) return;
+      const e = entries[employeeId] || {};
+      // 漏打卡已不再要求附件，取消時不需要考慮附件（但仍要考慮已填的事由/時間）
+      const hasAtt = field !== "missed_punch" && attachments.some((a) => a.employee_id === employeeId && a.anomaly_type === field);
+      if ((hasAtt || hasTypedContent(e, field)) &&
+          !window.confirm("此項目已填寫內容或已上傳附件，取消勾選不會刪除已填內容或附件，仍可查閱。確定要取消勾選嗎？")) return;
     }
     updateEntry(employeeId, { [field]: checked });
   }
@@ -2503,19 +2520,28 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       signaturePadRef.current?.scrollIntoView();
       return;
     }
+    function failValidation(employeeId, field, message) {
+      setErrorTarget({ employeeId, field });
+      toast(message);
+      requestAnimationFrame(() => {
+        rowRefsDesktop.current[employeeId]?.scrollIntoView({ behavior: "smooth", block: "center" });
+        rowRefsMobile.current[employeeId]?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    }
     for (const r of roster) {
       const e = entries[r.id];
       const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
-      if (anomaly && !e.reason?.trim()) { toast(`${r.name}的異常須填寫「其他異常／補充」說明`); return; }
-      if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { toast(`${r.name}的加班時數須以 0.5 小時為單位`); return; }
-      if (e.late && !(Number.isInteger(Number(e.late_minutes)) && Number(e.late_minutes) > 0)) { toast(`${r.name}的遲到分鐘數須為正整數`); return; }
-      if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { toast(`${r.name}的請假時數須以 0.5 小時為單位`); return; }
-      if (e.leave && !e.leave_type) { toast(`請選擇${r.name}的請假假別`); return; }
+      if (anomaly && !e.reason?.trim()) { failValidation(r.id, "reason", `${r.name}的異常須填寫「其他異常／補充」說明`); return; }
+      if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { failValidation(r.id, "overtime_hours", `${r.name}的加班時數須以 0.5 小時為單位`); return; }
+      if (e.late && !(Number.isInteger(Number(e.late_minutes)) && Number(e.late_minutes) > 0)) { failValidation(r.id, "late_minutes", `${r.name}的遲到分鐘數須為正整數`); return; }
+      if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { failValidation(r.id, "leave_hours", `${r.name}的請假時數須以 0.5 小時為單位`); return; }
+      if (e.leave && !e.leave_type) { failValidation(r.id, "leave_type", `請選擇${r.name}的請假假別`); return; }
       if (e.leave && leaveTypeByCode[e.leave_type]?.requires_proof && !e.leave_proof_status) {
-        toast(`${r.name}的請假需要提供證明或選擇待補`); return;
+        failValidation(r.id, "leave_proof_status", `${r.name}的請假需要提供證明或選擇待補`); return;
       }
-      if (e.missed_punch && !e.missed_punch_reason?.trim()) { toast(`${r.name}的補打卡單須填寫事由`); return; }
+      if (e.missed_punch && !e.missed_punch_reason?.trim()) { failValidation(r.id, "missed_punch_reason", `${r.name}的補打卡單須填寫事由`); return; }
     }
+    setErrorTarget(null);
     const pendingProofCount = roster.filter((r) => ["pending", "needs_resubmit"].includes(entries[r.id]?.leave_proof_status)).length;
     setActionBusy(true);
     try {
@@ -2573,7 +2599,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
 
   async function signReport() {
     if (actionBusy) return;
-    if (hasAnomaly && (!attachments.length || !attachmentsComplete)) { toast("請先上傳所有相關附件並勾選確認"); return; }
+    if (attachmentRelevantAnomaly && (!attachments.length || !attachmentsComplete)) { toast("請先上傳所有相關附件並勾選確認"); return; }
     setActionBusy(true);
     try {
       const { data, error } = await sb.from("daily_reports").update({ status: "signed", signed_by: me.id, signed_at: new Date().toISOString() })
@@ -2622,6 +2648,85 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     const { error } = await sb.rpc("set_anomaly_status", { p_entry_id: entryId, p_status: status });
     if (error) { toast("更新失敗：" + error.message); return; }
     load();
+  }
+
+  // 單一員工的異常明細（漏打卡表單、請假憑證、遲到/加班附件），桌面展開列與手機卡片
+  // 共用同一份，沒有勾選任何異常時回傳 null（不佔版面）
+  function renderAnomalyDetail(r) {
+    const e = entries[r.id] || {};
+    const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
+    if (!anomaly) return null;
+    const dis = !canWrite;
+    const byType = (type) => attachments.filter((a) => a.employee_id === r.id && a.anomaly_type === type);
+    const errField = (field) => errorTarget?.employeeId === r.id && errorTarget?.field === field;
+    return (
+      <div style={{ padding: 12 }}>
+        <strong style={{ fontSize: 12.5 }}>{r.name}｜異常明細</strong>
+
+        {e.late && (
+          <div style={{ marginTop: 8 }}>
+            <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>遲到</p>
+            <AttachmentTypeBlock label="遲到附件（選填）" attachments={byType("late")} dis={dis}
+              onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "late", file)} />
+          </div>
+        )}
+
+        {e.missed_punch && (
+          <div style={{ marginTop: 8 }}>
+            <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>補打卡單</p>
+            <textarea className="ph-input" rows={2} disabled={dis} placeholder="事由（如去客戶／廠商端出差，請填寫客戶／廠商名稱）"
+              value={e.missed_punch_reason || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_reason: ev.target.value })}
+              style={!e.missed_punch_reason?.trim() || errField("missed_punch_reason") ? { borderColor: T.red } : undefined} />
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8 }}>
+              <div>
+                <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>錯誤時間</p>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                    value={e.missed_punch_error_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_start: ev.target.value })} />
+                  <span style={{ color: T.sub, fontSize: 12 }}>至</span>
+                  <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                    value={e.missed_punch_error_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_end: ev.target.value })} />
+                </div>
+              </div>
+              <div>
+                <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>修正時間</p>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                    value={e.missed_punch_fix_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_start: ev.target.value })} />
+                  <span style={{ color: T.sub, fontSize: 12 }}>至</span>
+                  <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                    value={e.missed_punch_fix_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_end: ev.target.value })} />
+                </div>
+              </div>
+            </div>
+            <p style={{ color: T.sub, fontSize: 11, margin: "6px 0 0" }}>
+              請於二日內申請補卡；若當月個人因忘記打卡事由累計達 3 次（含）以上，扣除全勤獎金。嚴禁代打卡，若有發生此情形連坐罰各記一支大過。不需要另外上傳附件。
+            </p>
+          </div>
+        )}
+
+        {e.leave && (
+          <div style={{ marginTop: 8 }}>
+            <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>請假</p>
+            <LeaveProofBlock
+              e={e} leaveTypeSettings={leaveTypeSettings} leaveTypeByCode={leaveTypeByCode}
+              attachments={byType("leave")} dis={dis} deadlineDays={deadlineDays}
+              onChooseType={(type) => chooseLeaveType(r.id, type)}
+              onUploadNow={(file) => uploadTypedAttachment(r.id, e.id || null, "leave", file)}
+              onDefer={(reason) => (e.id ? postSubmitDeferLeaveProof(e.id, reason) : deferLeaveProofDraft(r.id, reason))}
+            />
+          </div>
+        )}
+
+        {e.overtime && (
+          <div style={{ marginTop: 8 }}>
+            <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>加班</p>
+            <AttachmentTypeBlock label="加班單（選填）" attachments={byType("overtime")} dis={dis}
+              onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "overtime", file)} />
+          </div>
+        )}
+      </div>
+    );
   }
 
   const anomalyCount = roster.filter((r) => {
@@ -2678,43 +2783,55 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                     const dis = !canWrite;
                     const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
                     return (
-                      <tr key={r.id}>
-                        <td><RosterCell r={r} index={idx} /></td>
-                        <td>
-                          <input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => toggleAnomalyFlag(r.id, "late", ev.target.checked)} />
-                          {e.late && (
-                            <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="1" min="1" placeholder="分鐘"
-                              disabled={dis} value={e.late_minutes} onChange={(ev) => updateEntry(r.id, { late_minutes: ev.target.value })} />
-                          )}
-                        </td>
-                        <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => toggleAnomalyFlag(r.id, "missed_punch", ev.target.checked)} /></td>
-                        <td>
-                          <input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => toggleAnomalyFlag(r.id, "leave", ev.target.checked)} />
-                          {e.leave && (
-                            <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="0.5" min="0.5" placeholder="時數"
-                              disabled={dis} value={e.leave_hours} onChange={(ev) => updateEntry(r.id, { leave_hours: ev.target.value })} />
-                          )}
-                        </td>
-                        <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => toggleAnomalyFlag(r.id, "overtime", ev.target.checked)} /></td>
-                        <td style={{ minWidth: 240 }}>
-                          {e.overtime && (
-                            <input className="ph-input" style={{ width: 90, marginBottom: 6 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
-                              disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })} />
-                          )}
-                          <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
-                            value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
-                            style={anomaly && !e.reason?.trim() ? { borderColor: T.red } : undefined} />
-                        </td>
-                        <td>
-                          {!anomaly ? "—" : canManageAnomaly && e.id ? (
-                            <select className="ph-input" style={{ width: 100 }} value={e.anomaly_status || "pending"} onChange={(ev) => changeEntryAnomalyStatus(e.id, ev.target.value)}>
-                              {Object.entries(ANOMALY_STATUS_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
-                            </select>
-                          ) : (
-                            <Badge tone={ANOMALY_STATUS_TONE[e.anomaly_status || "pending"]}>{ANOMALY_STATUS_LABEL[e.anomaly_status || "pending"]}</Badge>
-                          )}
-                        </td>
-                      </tr>
+                      <React.Fragment key={r.id}>
+                        <tr ref={(el) => (rowRefsDesktop.current[r.id] = el)}>
+                          <td><RosterCell r={r} index={idx} /></td>
+                          <td>
+                            <input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => toggleAnomalyFlag(r.id, "late", ev.target.checked)} />
+                            {e.late && (
+                              <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="1" min="1" placeholder="分鐘"
+                                disabled={dis} value={e.late_minutes} onChange={(ev) => updateEntry(r.id, { late_minutes: ev.target.value })}
+                                style={errorTarget?.employeeId === r.id && errorTarget?.field === "late_minutes" ? { borderColor: T.red } : undefined} />
+                            )}
+                          </td>
+                          <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => toggleAnomalyFlag(r.id, "missed_punch", ev.target.checked)} /></td>
+                          <td>
+                            <input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => toggleAnomalyFlag(r.id, "leave", ev.target.checked)} />
+                            {e.leave && (
+                              <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="0.5" min="0.5" placeholder="時數"
+                                disabled={dis} value={e.leave_hours} onChange={(ev) => updateEntry(r.id, { leave_hours: ev.target.value })}
+                                style={errorTarget?.employeeId === r.id && errorTarget?.field === "leave_hours" ? { borderColor: T.red } : undefined} />
+                            )}
+                          </td>
+                          <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => toggleAnomalyFlag(r.id, "overtime", ev.target.checked)} /></td>
+                          <td style={{ minWidth: 240 }}>
+                            {e.overtime && (
+                              <input className="ph-input" style={{ width: 90, marginBottom: 6 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
+                                disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })}
+                                style={errorTarget?.employeeId === r.id && errorTarget?.field === "overtime_hours" ? { borderColor: T.red } : undefined} />
+                            )}
+                            <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
+                              value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
+                              style={(anomaly && !e.reason?.trim()) || (errorTarget?.employeeId === r.id && errorTarget?.field === "reason") ? { borderColor: T.red } : undefined} />
+                          </td>
+                          <td>
+                            {!anomaly ? "—" : canManageAnomaly && e.id ? (
+                              <select className="ph-input" style={{ width: 100 }} value={e.anomaly_status || "pending"} onChange={(ev) => changeEntryAnomalyStatus(e.id, ev.target.value)}>
+                                {Object.entries(ANOMALY_STATUS_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                              </select>
+                            ) : (
+                              <Badge tone={ANOMALY_STATUS_TONE[e.anomaly_status || "pending"]}>{ANOMALY_STATUS_LABEL[e.anomaly_status || "pending"]}</Badge>
+                            )}
+                          </td>
+                        </tr>
+                        {anomaly && (
+                          <tr>
+                            <td colSpan={7} style={{ background: T.bg, padding: 0, borderTop: "none" }}>
+                              {renderAnomalyDetail(r)}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
                     );
                   })}
                   {roster.length === 0 && <tr><td colSpan={7} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
@@ -2727,7 +2844,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                 const dis = !canWrite;
                 const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
                 return (
-                  <div key={r.id} style={{ padding: "12px 0", borderBottom: `1px solid ${T.line}` }}>
+                  <div key={r.id} ref={(el) => (rowRefsMobile.current[r.id] = el)} style={{ padding: "12px 0", borderBottom: `1px solid ${T.line}` }}>
                     <RosterCell r={r} index={idx} />
                     <div style={{ display: "flex", gap: 14, margin: "10px 0", flexWrap: "wrap" }}>
                       <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => toggleAnomalyFlag(r.id, "late", ev.target.checked)} /> 遲到</label>
@@ -2738,23 +2855,31 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                       {e.late && (
                         <input className="ph-input" style={{ width: 90 }} type="number" step="1" min="1" placeholder="遲到分鐘"
-                          disabled={dis} value={e.late_minutes} onChange={(ev) => updateEntry(r.id, { late_minutes: ev.target.value })} />
+                          disabled={dis} value={e.late_minutes} onChange={(ev) => updateEntry(r.id, { late_minutes: ev.target.value })}
+                          style={errorTarget?.employeeId === r.id && errorTarget?.field === "late_minutes" ? { borderColor: T.red } : undefined} />
                       )}
                       {e.leave && (
                         <input className="ph-input" style={{ width: 90 }} type="number" step="0.5" min="0.5" placeholder="請假時數"
-                          disabled={dis} value={e.leave_hours} onChange={(ev) => updateEntry(r.id, { leave_hours: ev.target.value })} />
+                          disabled={dis} value={e.leave_hours} onChange={(ev) => updateEntry(r.id, { leave_hours: ev.target.value })}
+                          style={errorTarget?.employeeId === r.id && errorTarget?.field === "leave_hours" ? { borderColor: T.red } : undefined} />
                       )}
                       {e.overtime && (
                         <input className="ph-input" style={{ width: 90 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
-                          disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })} />
+                          disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })}
+                          style={errorTarget?.employeeId === r.id && errorTarget?.field === "overtime_hours" ? { borderColor: T.red } : undefined} />
                       )}
                     </div>
                     <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
                       value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
-                      style={anomaly && !e.reason?.trim() ? { borderColor: T.red } : undefined} />
+                      style={(anomaly && !e.reason?.trim()) || (errorTarget?.employeeId === r.id && errorTarget?.field === "reason") ? { borderColor: T.red } : undefined} />
                     {anomaly && (
                       <div style={{ marginTop: 6 }}>
                         <Badge tone={ANOMALY_STATUS_TONE[e.anomaly_status || "pending"]}>{ANOMALY_STATUS_LABEL[e.anomaly_status || "pending"]}</Badge>
+                      </div>
+                    )}
+                    {anomaly && (
+                      <div style={{ marginTop: 8, background: T.bg, borderRadius: 8 }}>
+                        {renderAnomalyDetail(r)}
                       </div>
                     )}
                   </div>
@@ -2799,109 +2924,39 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           )}
 
           <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
-            <strong style={{ fontSize: 13 }}>相關附件</strong>
-            <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>依員工與異常項目個別上傳；請假憑證可選擇立即上傳或待補證明。支援 PDF 與圖片，單檔上限 10MB。</p>
+            <strong style={{ fontSize: 13 }}>附件與歷史紀錄</strong>
+            <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>
+              漏打卡不需要上傳附件；遲到／加班附件選填、請假依假別決定是否需要憑證，皆已移到上方對應員工列下方操作。
+            </p>
 
-            {!report?.id && !canWrite ? (
-              <p style={{ color: T.sub, fontSize: 12.5, background: T.bg, padding: "8px 12px", borderRadius: 6 }}>目前尚無日總表資料。</p>
-            ) : (
-              <>
-                {!hasAnomaly && <p style={{ color: T.sub, fontSize: 12.5 }}>目前沒有勾選任何異常項目，不需要附件。</p>}
+            {(() => {
+              const legacy = attachments.filter((a) => !a.employee_id);
+              const orphaned = attachments.filter((a) =>
+                a.anomaly_type === "missed_punch" ||
+                (a.employee_id && !entries[a.employee_id]?.[a.anomaly_type])
+              );
+              if (!legacy.length && !orphaned.length) return <p style={{ color: T.sub, fontSize: 12.5 }}>目前沒有歷史附件。</p>;
+              return (
+                <div>
+                  <strong style={{ fontSize: 12.5 }}>歷史附件</strong>
+                  <p style={{ color: T.sub, fontSize: 11.5, margin: "4px 0" }}>
+                    改版前未區分員工／異常項目的舊附件、已取消勾選異常項目後保留下來的附件，以及已移除功能的漏打卡附件，僅供查閱。
+                  </p>
+                  <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
+                    {legacy.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
+                    {orphaned.map((a) => (
+                      <li key={a.id}>{roster.find((r) => r.id === a.employee_id)?.name || "（已離職／不在名單）"}・{ANOMALY_TYPE_LABEL[a.anomaly_type] || a.anomaly_type}：{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })()}
 
-                {roster.filter((r) => { const e = entries[r.id] || {}; return e.late || e.missed_punch || e.leave || e.overtime; }).map((r) => {
-                  const e = entries[r.id] || {};
-                  const dis = !canWrite;
-                  const byType = (type) => attachments.filter((a) => a.employee_id === r.id && a.anomaly_type === type);
-                  return (
-                    <div key={r.id} style={{ border: `1px solid ${T.line}`, borderRadius: 8, padding: 12, marginBottom: 10, background: T.bg }}>
-                      <strong style={{ fontSize: 12.5 }}>{r.name}</strong>
-
-                      {e.late && (
-                        <AttachmentTypeBlock label="遲到" attachments={byType("late")} dis={dis}
-                          onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "late", file)} />
-                      )}
-
-                      {e.missed_punch && (
-                        <div style={{ marginTop: 8 }}>
-                          <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>補打卡單</p>
-                          <textarea className="ph-input" rows={2} disabled={dis} placeholder="事由（如去客戶／廠商端出差，請填寫客戶／廠商名稱）"
-                            value={e.missed_punch_reason || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_reason: ev.target.value })}
-                            style={!e.missed_punch_reason?.trim() ? { borderColor: T.red } : undefined} />
-                          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8 }}>
-                            <div>
-                              <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>錯誤時間</p>
-                              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                                <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
-                                  value={e.missed_punch_error_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_start: ev.target.value })} />
-                                <span style={{ color: T.sub, fontSize: 12 }}>至</span>
-                                <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
-                                  value={e.missed_punch_error_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_end: ev.target.value })} />
-                              </div>
-                            </div>
-                            <div>
-                              <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>修正時間</p>
-                              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                                <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
-                                  value={e.missed_punch_fix_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_start: ev.target.value })} />
-                                <span style={{ color: T.sub, fontSize: 12 }}>至</span>
-                                <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
-                                  value={e.missed_punch_fix_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_end: ev.target.value })} />
-                              </div>
-                            </div>
-                          </div>
-                          <p style={{ color: T.sub, fontSize: 11, margin: "6px 0 0" }}>
-                            請於二日內申請補卡；若當月個人因忘記打卡事由累計達 3 次（含）以上，扣除全勤獎金。嚴禁代打卡，若有發生此情形連坐罰各記一支大過。
-                          </p>
-                          <AttachmentTypeBlock label="補打卡單附件" attachments={byType("missed_punch")} dis={dis}
-                            onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "missed_punch", file)} />
-                        </div>
-                      )}
-
-                      {e.leave && (
-                        <LeaveProofBlock
-                          e={e} leaveTypeSettings={leaveTypeSettings} leaveTypeByCode={leaveTypeByCode}
-                          attachments={byType("leave")} dis={dis} deadlineDays={deadlineDays}
-                          onChooseType={(type) => chooseLeaveType(r.id, type)}
-                          onUploadNow={(file) => uploadTypedAttachment(r.id, e.id || null, "leave", file)}
-                          onDefer={(reason) => (e.id ? postSubmitDeferLeaveProof(e.id, reason) : deferLeaveProofDraft(r.id, reason))}
-                        />
-                      )}
-
-                      {e.overtime && (
-                        <AttachmentTypeBlock label="加班單" attachments={byType("overtime")} dis={dis}
-                          onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "overtime", file)} />
-                      )}
-                    </div>
-                  );
-                })}
-
-                {(() => {
-                  const legacy = attachments.filter((a) => !a.employee_id);
-                  const orphaned = attachments.filter((a) => a.employee_id && !entries[a.employee_id]?.[a.anomaly_type]);
-                  if (!legacy.length && !orphaned.length) return null;
-                  return (
-                    <div style={{ marginTop: 8 }}>
-                      <strong style={{ fontSize: 12.5 }}>歷史附件</strong>
-                      <p style={{ color: T.sub, fontSize: 11.5, margin: "4px 0" }}>
-                        改版前未區分員工／異常項目的舊附件，以及已取消勾選異常項目後保留下來的附件，僅供查閱。
-                      </p>
-                      <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
-                        {legacy.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
-                        {orphaned.map((a) => (
-                          <li key={a.id}>{roster.find((r) => r.id === a.employee_id)?.name || "（已離職／不在名單）"}・{ANOMALY_TYPE_LABEL[a.anomaly_type] || a.anomaly_type}：{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>
-                        ))}
-                      </ul>
-                    </div>
-                  );
-                })()}
-
-                {hasAnomaly && (
-                  <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12.5 }}>
-                    <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || me.permissions?.daily_report !== "fill"} />
-                    確認附件已完整上傳
-                  </label>
-                )}
-              </>
+            {attachmentRelevantAnomaly && (
+              <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12.5 }}>
+                <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || me.permissions?.daily_report !== "fill"} />
+                確認附件已完整上傳
+              </label>
             )}
           </div>
 
