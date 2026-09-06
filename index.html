@@ -294,14 +294,16 @@ function applyManualOverrides(base, overrides) {
   const bonusOverridden = !!(bonusOverride && bonusOverride.manual_value !== null);
   const effectiveFullAttendanceBonus = bonusOverridden ? Number(bonusOverride.manual_value) : systemFullAttendanceBonus;
   const effectiveBonusProrateDeduction = bonusOverridden ? 0 : base.bonusProrateDeduction;
+  // 全勤獎金比例扣除（普通傷病假）不再於主表/CSV獨立列一欄，併入「請假扣款」顯示
+  const effectiveAttendanceDeduction = base.attendanceDeduction + effectiveBonusProrateDeduction;
   const effectiveGrossPay = base.basePay + base.mealAllowance + base.positionAllowance + effectiveOvertimePay + effectiveFullAttendanceBonus + base.adjustmentsTotal;
   const effectiveTaxableIncome = effectiveGrossPay - base.mealAllowance - (base.adjustmentsTotal - base.empAdjustments.filter((a) => a.taxable).reduce((s, a) => s + Number(a.amount), 0));
-  const effectiveTotalDeduction = base.attendanceDeduction + effectiveBonusProrateDeduction + base.laborInsuranceFee + base.healthInsuranceFee + base.incomeTax;
+  const effectiveTotalDeduction = effectiveAttendanceDeduction + base.laborInsuranceFee + base.healthInsuranceFee + base.incomeTax;
   const effectiveTotal = effectiveGrossPay - effectiveTotalDeduction;
   return {
     ...base,
     systemFullAttendanceBonus, bonusOverride, overtimeOverride,
-    effectiveOvertimePay, effectiveFullAttendanceBonus, effectiveBonusProrateDeduction,
+    effectiveOvertimePay, effectiveFullAttendanceBonus, effectiveBonusProrateDeduction, effectiveAttendanceDeduction,
     effectiveGrossPay, effectiveTaxableIncome, effectiveTotalDeduction, effectiveTotal,
   };
 }
@@ -4307,11 +4309,10 @@ function PayslipModal({ store, ym, periodLabel, row, locked, onClose, onGotoRequ
                 <PayslipRow key={a.id} label={a.label} value={-a.amount} />
               ))}
               {row.personalLeaveDeduction > 0 && <PayslipRow label="事假扣款（不給工資）" value={row.personalLeaveDeduction} />}
-              {row.sickLeaveDeduction > 0 && <PayslipRow label="普通傷病假扣款（工資折半）" value={row.sickLeaveDeduction} />}
-              {row.bonusProrateDeduction > 0 && (
+              {(row.sickLeaveDeduction > 0 || row.effectiveBonusProrateDeduction > 0) && (
                 <PayslipRow
-                  label={"全勤獎金比例扣除（普通傷病假）" + (row.bonusOverride?.manual_value != null ? `－原系統扣除 NT$ ${money(row.bonusProrateDeduction)}，人工採用全勤獎金後不再扣除` : "")}
-                  value={row.effectiveBonusProrateDeduction} />
+                  label={"普通傷病假扣款（工資折半＋全勤獎金比例扣除）" + (row.bonusOverride?.manual_value != null ? `－原系統全勤獎金扣除 NT$ ${money(row.bonusProrateDeduction)}，人工採用全勤獎金後不再扣除` : "")}
+                  value={row.sickLeaveDeduction + row.effectiveBonusProrateDeduction} />
               )}
               <PayslipRow label="勞保費" value={row.laborInsuranceFee} />
               <PayslipRow label="健保費" value={row.healthInsuranceFee} />
@@ -4471,13 +4472,13 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   }
 
   function exportCsv() {
-    const head = ["姓名", "到職日", "計薪方式", "基本薪資", "伙食費", "職務津貼", "加班費", "全勤獎金", "本月調整項", "應發總額", "請假扣款", "全勤獎金比例扣除", "勞保費", "健保費", "所得稅", "應稅所得", "應減總額", "實發金額"];
+    const head = ["姓名", "到職日", "計薪方式", "基本薪資", "伙食費", "職務津貼", "加班費", "全勤獎金", "本月調整項", "應發總額", "請假扣款", "勞保費", "健保費", "所得稅", "應稅所得", "應減總額", "實發金額"];
     const lines = [head.join(",")].concat(rows.map((r) => [
       r.emp.name, r.emp.hire_date || "", r.emp.employment_type === "full_time" ? "全職" : "兼職",
       Math.round(r.basePay), Math.round(r.mealAllowance), Math.round(r.positionAllowance), Math.round(r.effectiveOvertimePay), Math.round(r.effectiveFullAttendanceBonus),
       `"${Math.round(r.adjustmentsTotal)}${r.empAdjustments.length ? ` (${r.empAdjustments.map((a) => a.label).join("／")})` : ""}"`,
       Math.round(r.effectiveGrossPay),
-      Math.round(r.attendanceDeduction), Math.round(r.effectiveBonusProrateDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.effectiveTaxableIncome), Math.round(r.effectiveTotalDeduction),
+      Math.round(r.effectiveAttendanceDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.effectiveTaxableIncome), Math.round(r.effectiveTotalDeduction),
       Math.round(r.effectiveTotal),
     ].join(",")));
     const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
@@ -4587,14 +4588,14 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                 <th rowSpan={2} className="ph-hide-mobile">計薪方式</th>
                 <th colSpan={3} style={{ textAlign: "center" }}>薪資結構</th>
                 <th colSpan={3} style={{ textAlign: "center" }}>薪資科目加項</th>
-                <th colSpan={5} style={{ textAlign: "center" }}>薪資科目扣項</th>
+                <th colSpan={4} style={{ textAlign: "center" }}>薪資科目扣項</th>
                 <th colSpan={4} style={{ textAlign: "center" }}>薪資總計</th>
                 <th rowSpan={2}>個人明細</th>
               </tr>
               <tr>
                 <th>基本薪資</th><th>伙食費</th><th>職務津貼</th>
                 <th>加班費</th><th>全勤獎金</th><th>本月調整</th>
-                <th>請假扣款</th><th>全勤獎金比例扣除</th><th>勞保費</th><th>健保費</th><th>所得稅</th>
+                <th>請假扣款</th><th>勞保費</th><th>健保費</th><th>所得稅</th>
                 <th>應稅所得</th><th>應發總額</th><th>應減總額</th><th>實發金額</th>
               </tr>
             </thead>
@@ -4619,8 +4620,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                       r.adjustmentsTotal !== 0 ? `${r.adjustmentsTotal > 0 ? "+" : ""}${money(r.adjustmentsTotal)}` : "—"
                     )}
                   </td>
-                  <td>{money(r.attendanceDeduction)}</td>
-                  <td>{money(r.effectiveBonusProrateDeduction)}</td>
+                  <td>{money(r.effectiveAttendanceDeduction)}</td>
                   <td>{money(r.laborInsuranceFee)}</td>
                   <td>{money(r.healthInsuranceFee)}</td>
                   <td>{money(r.incomeTax)}</td>
@@ -4631,7 +4631,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                   <td><button className="ph-btn small" onClick={() => setPayslipRow(r)}>薪資明細 →</button></td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={19} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={18} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
             </tbody>
           </table>
         </div>
