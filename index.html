@@ -71,7 +71,7 @@ const KIOSK_STAFF_PERMISSIONS = { schedule: "unit", daily_report: "fill" };
 const KIOSK_MANAGER_PERMISSIONS = { schedule: "edit", daily_report: "fill", requests: "first_review" };
 const REQ_TYPE_LABEL = {
   annual_leave: "特休", personal_leave: "事假", marriage_leave: "婚假", bereavement_leave: "喪假",
-  sick_leave: "普通傷病假", official_leave: "公假", injury_leave: "公傷病假", overtime: "加班",
+  sick_leave: "普通傷病假", official_leave: "公假", injury_leave: "公傷病假", family_care_leave: "家庭照顧假", overtime: "加班",
 };
 const REQ_TYPE_PILL = {
   annual_leave: { bg: "#E7EAE1", fg: "#4B5530" },
@@ -82,6 +82,7 @@ const REQ_TYPE_PILL = {
   sick_leave: { bg: "#DCEAF0", fg: "#2E6A82" },
   official_leave: { bg: "#EDEBDA", fg: "#7A6A2A" },
   injury_leave: { bg: "#F0DEDA", fg: "#8A4030" },
+  family_care_leave: { bg: "#DEE8E3", fg: "#2E6B52" },
 };
 // 假別的薪資規則（依勞工請假規則）：工資是否照給、是否影響全勤獎金
 // full＝工資照給不扣款；half＝工資折半（普通傷病假）；unpaid＝不給工資（事假）
@@ -94,6 +95,7 @@ const LEAVE_PAY_RULES = {
   sick_leave: { wage: "half", bonus: "prorate" },
   official_leave: { wage: "full", bonus: "protected" },
   injury_leave: { wage: "full", bonus: "protected" },
+  family_care_leave: { wage: "unpaid", bonus: "unaffected" },
 };
 const REQ_STATUS_LABEL = { pending: "待審核", approved: "已核准", rejected: "已拒絕" };
 const REPORT_STATUS_LABEL = { draft: "未送出", submitted: "待簽核", signed: "待人資交接", hr_received: "已完成" };
