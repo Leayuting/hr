@@ -2126,6 +2126,7 @@ const SYSTEM_LAUNCH_DATE = "2026-08-08";
 const REPORT_DAY_LABEL = { not_applicable: "不適用", not_yet_due: "尚未到期", overdue: "逾期未繳", submitted_no_anomaly: "已繳・無異常", submitted_has_anomaly: "已繳・有異常" };
 const REPORT_DAY_TONE = { not_applicable: "sub", not_yet_due: "sub", overdue: "red", submitted_no_anomaly: "green", submitted_has_anomaly: "yellow" };
 const ANOMALY_STATUS_LABEL = { pending: "待確認", follow_up: "待補件", resolved: "已結案" };
+const DAILY_REPORT_STATUS_LABEL = { not_submitted: "未繳交", draft: "草稿（尚未送出）", submitted: "已送出，待領班簽核", signed: "已簽核，待人資交接", hr_received: "已完成（人資已收）" };
 const ANOMALY_STATUS_TONE = { pending: "yellow", follow_up: "red", resolved: "green" };
 const ANOMALY_TYPE_LABEL = { late: "遲到", missed_punch: "漏打卡", leave: "請假", overtime: "加班" };
 // row 是 daily_report_overview_matrix 某一格（store_id/report_date/report_id/status/
@@ -2214,7 +2215,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
         <div>
           <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>DAILY OPERATIONS REPORT</p>
           <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每日異常回報</h2>
-          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>跨日期檢視繳交狀況與異常結案進度；門市填報流程請洽門市 PIN 頁面。</p>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>跨日期檢視繳交狀況與異常結案進度；門市可用 PIN 現場填報，管理者也可點擊下方儲存格直接補填或更正歷史回報，不需要切換門市 PIN。</p>
         </div>
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
@@ -2495,6 +2496,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const [overtimeLinkByEntry, setOvertimeLinkByEntry] = useState({}); // entryId -> 連結的加班申請（requests 表精簡欄位）
   const [corrections, setCorrections] = useState([]); // daily_report_entry_corrections，這份回報全部異常明細的更正歷程
   const [correctModal, setCorrectModal] = useState(null); // { r, e } | null
+  const [adminReason, setAdminReason] = useState(""); // 管理者更正已送出回報時的必填修改原因
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -2567,6 +2569,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
 
   const hasAnomaly = Object.values(entries).some((e) => e.late || e.missed_punch || e.leave || e.overtime);
   const canWrite = me.permissions?.daily_report === "fill" && (!report || report.status === "draft" || report.status === "submitted");
+  // 管理者用自己的登入權限直接補填/更正歷史回報，不受報告狀態或日期限制，
+  // 也不需要切換門市 PIN；簽核/交接仍只有 canWrite（門市 PIN）能做，這裡只
+  // 開放「填寫內容」的能力。canManageAnomaly 跟這裡要的判斷完全一樣
+  // （super_admin 或 daily_report='all'、且不是 kiosk），直接沿用不重複定義
+  const canAdminEdit = canManageAnomaly;
+  const effectiveCanWrite = canWrite || canAdminEdit;
+  const isAdminCorrection = canAdminEdit && !canWrite && report && report.status !== "draft";
   const canUploadProof = me.permissions?.daily_report === "fill"; // 補件不受回報流程狀態限制
 
   function clearSignatureOnChange() {
@@ -2688,14 +2697,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     load();
   }
 
-  async function submitReport() {
-    if (actionBusy) return;
-    if (!posVerified) { toast("請先勾選已完成 POS 出缺勤與加班核對"); return; }
-    if (kioskMode && signaturePadRef.current?.isEmpty()) {
-      toast("請先完成當日主管簽名");
-      signaturePadRef.current?.scrollIntoView();
-      return;
-    }
+  // 共用驗證：門市 PIN 送出（submitReport）跟管理者直接補填/更正
+  // （adminSaveReport）都走同一套檢查，不寫兩份容易失去同步的規則
+  function validateReportEntries() {
     function failValidation(employeeId, field, message) {
       setErrorTarget({ employeeId, field });
       toast(message);
@@ -2708,24 +2712,36 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       const e = entries[r.id];
       // 遲到／加班已各自有必填欄位（分鐘數；原定/實際時間＋原因），不再借用共用的「其他異常／補充」
       const reasonRequired = e.missed_punch || e.leave;
-      if (reasonRequired && !e.reason?.trim()) { failValidation(r.id, "reason", `${r.name}的異常須填寫「其他異常／補充」說明`); return; }
-      if (e.late && !(Number.isInteger(Number(e.late_minutes)) && Number(e.late_minutes) > 0)) { failValidation(r.id, "late_minutes", `${r.name}的遲到分鐘數須為正整數`); return; }
+      if (reasonRequired && !e.reason?.trim()) { failValidation(r.id, "reason", `${r.name}的異常須填寫「其他異常／補充」說明`); return false; }
+      if (e.late && !(Number.isInteger(Number(e.late_minutes)) && Number(e.late_minutes) > 0)) { failValidation(r.id, "late_minutes", `${r.name}的遲到分鐘數須為正整數`); return false; }
       if (e.overtime) {
-        if (!e.overtime_scheduled_time) { failValidation(r.id, "overtime_scheduled_time", `請填寫${r.name}的原定下班時間`); return; }
-        if (!e.overtime_actual_time) { failValidation(r.id, "overtime_actual_time", `請填寫${r.name}的實際離開時間`); return; }
-        if (!e.overtime_reason?.trim()) { failValidation(r.id, "overtime_reason", `請填寫${r.name}的加班原因`); return; }
+        if (!e.overtime_scheduled_time) { failValidation(r.id, "overtime_scheduled_time", `請填寫${r.name}的原定下班時間`); return false; }
+        if (!e.overtime_actual_time) { failValidation(r.id, "overtime_actual_time", `請填寫${r.name}的實際離開時間`); return false; }
+        if (!e.overtime_reason?.trim()) { failValidation(r.id, "overtime_reason", `請填寫${r.name}的加班原因`); return false; }
         const schEnd = combineOvertimeDateTime(date, e.overtime_scheduled_time, false);
         const actEnd = combineOvertimeDateTime(date, e.overtime_actual_time, e.overtime_actual_next_day);
-        if (new Date(actEnd) <= new Date(schEnd)) { failValidation(r.id, "overtime_actual_time", `${r.name}的實際離開時間須晚於原定下班時間`); return; }
+        if (new Date(actEnd) <= new Date(schEnd)) { failValidation(r.id, "overtime_actual_time", `${r.name}的實際離開時間須晚於原定下班時間`); return false; }
       }
-      if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { failValidation(r.id, "leave_hours", `${r.name}的請假時數須以 0.5 小時為單位`); return; }
-      if (e.leave && !e.leave_type) { failValidation(r.id, "leave_type", `請選擇${r.name}的請假假別`); return; }
+      if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { failValidation(r.id, "leave_hours", `${r.name}的請假時數須以 0.5 小時為單位`); return false; }
+      if (e.leave && !e.leave_type) { failValidation(r.id, "leave_type", `請選擇${r.name}的請假假別`); return false; }
       if (e.leave && leaveTypeByCode[e.leave_type]?.requires_proof && !e.leave_proof_status) {
-        failValidation(r.id, "leave_proof_status", `${r.name}的請假需要提供證明或選擇待補`); return;
+        failValidation(r.id, "leave_proof_status", `${r.name}的請假需要提供證明或選擇待補`); return false;
       }
-      if (e.missed_punch && !e.missed_punch_reason?.trim()) { failValidation(r.id, "missed_punch_reason", `${r.name}的補打卡單須填寫事由`); return; }
+      if (e.missed_punch && !e.missed_punch_reason?.trim()) { failValidation(r.id, "missed_punch_reason", `${r.name}的補打卡單須填寫事由`); return false; }
     }
     setErrorTarget(null);
+    return true;
+  }
+
+  async function submitReport() {
+    if (actionBusy) return;
+    if (!posVerified) { toast("請先勾選已完成 POS 出缺勤與加班核對"); return; }
+    if (kioskMode && signaturePadRef.current?.isEmpty()) {
+      toast("請先完成當日主管簽名");
+      signaturePadRef.current?.scrollIntoView();
+      return;
+    }
+    if (!validateReportEntries()) return;
     const pendingProofCount = roster.filter((r) => ["pending", "needs_resubmit"].includes(entries[r.id]?.leave_proof_status)).length;
     setActionBusy(true);
     try {
@@ -2785,6 +2801,59 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       }
       await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
       toast(pendingProofCount > 0 ? `已送出，等待領班簽核（本次有 ${pendingProofCount} 筆請假證明待補，送出後仍可補交）` : "已送出，等待領班簽核");
+      load();
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  // 管理者直接補填/更正：不受回報狀態或日期限制，不需要門市 PIN。報告本來不存在
+  // 就是「補填」，直接建立成 submitted（submitted_at 是真正呼叫當下的時間，不
+  // 偽裝成當日準時）；報告已經送出過就是「更正」，後端會要求填更正原因、寫入
+  // daily_report_entry_corrections、把版本+1 並退回 submitted 待重新簽核（舊
+  // 簽名保留在歷史，不會被冒用）。共用 validateReportEntries() 沿用同一套規則。
+  async function adminSaveReport() {
+    if (actionBusy) return;
+    if (isAdminCorrection && !adminReason.trim()) { toast("更正已送出的回報須填寫修改原因"); return; }
+    if (!validateReportEntries()) return;
+    setActionBusy(true);
+    try {
+      const p_entries = roster.map((r) => {
+        const e = entries[r.id];
+        return {
+          employee_id: r.id,
+          late: e.late, late_minutes: e.late ? Number(e.late_minutes) : null,
+          missed_punch: e.missed_punch, leave: e.leave, leave_hours: e.leave ? Number(e.leave_hours) : null,
+          leave_type: e.leave ? (e.leave_type || null) : null,
+          leave_proof_status: e.leave ? (e.leave_proof_status || null) : null,
+          leave_proof_deferred_reason: e.leave && e.leave_proof_status === "pending" ? (e.leave_proof_deferred_reason || "") : null,
+          leave_proof_deadline: e.leave && e.leave_proof_status === "pending" ? (e.leave_proof_deadline || null) : null,
+          overtime: e.overtime,
+          overtime_scheduled_end: e.overtime ? combineOvertimeDateTime(date, e.overtime_scheduled_time, false) : null,
+          overtime_actual_end: e.overtime ? combineOvertimeDateTime(date, e.overtime_actual_time, e.overtime_actual_next_day) : null,
+          overtime_reason: e.overtime ? (e.overtime_reason || "") : null,
+          overtime_category: e.overtime ? (e.overtime_category || "workday") : null,
+          missed_punch_reason: e.missed_punch ? (e.missed_punch_reason || "") : null,
+          missed_punch_error_start: e.missed_punch ? (e.missed_punch_error_start || null) : null,
+          missed_punch_error_end: e.missed_punch ? (e.missed_punch_error_end || null) : null,
+          missed_punch_fix_start: e.missed_punch ? (e.missed_punch_fix_start || null) : null,
+          missed_punch_fix_end: e.missed_punch ? (e.missed_punch_fix_end || null) : null,
+          reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
+        };
+      });
+      const { error } = await sb.rpc("admin_save_daily_report", {
+        p_store_id: storeId, p_date: date, p_pos_verified: posVerified, p_entries,
+        p_reason: isAdminCorrection ? adminReason.trim() : null,
+        p_expected_updated_at: report?.updated_at || null,
+      });
+      if (error) {
+        toast((error.message.includes("CONFLICT") ? "" : "儲存失敗：") + error.message);
+        if (error.message.includes("CONFLICT")) load();
+        return;
+      }
+      await logAudit(me.name, isAdminCorrection ? "admin_correct_daily_report" : "admin_fill_daily_report", `${storeId}:${date}`);
+      toast(isAdminCorrection ? "已保存更正，回報已退回待重新簽核" : "已補填回報");
+      setAdminReason("");
       load();
     } finally {
       setActionBusy(false);
@@ -2858,7 +2927,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   function renderAnomalyDetail(r) {
     const e = entries[r.id] || {};
     if (!hasAnomalyDetail(e)) return null;
-    const dis = !canWrite;
+    const dis = !effectiveCanWrite;
     const byType = (type) => attachments.filter((a) => a.employee_id === r.id && a.anomaly_type === type);
     const errField = (field) => errorTarget?.employeeId === r.id && errorTarget?.field === field;
     const myCorrections = e.id ? corrections.filter((c) => c.entry_id === e.id) : [];
@@ -3057,6 +3126,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       {!loading && (
         <div className="ph-card" style={{ padding: "14px 18px", margin: "16px 0", display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12 }}>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>處理門店</p><p style={{ fontWeight: 600, margin: 0 }}>{store?.name}</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>回報日期</p><p style={{ fontWeight: 600, margin: 0 }}>{date}</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>目前狀態</p><p style={{ fontWeight: 600, margin: 0 }}>{DAILY_REPORT_STATUS_LABEL[report?.status || "not_submitted"]}</p></div>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>POS 核對</p><p style={{ fontWeight: 600, margin: 0, color: posVerified ? T.green : T.brown }}>{posVerified ? "已確認" : "待確認"}</p></div>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>異常人數</p><p style={{ fontWeight: 600, margin: 0 }}>{anomalyCount} 人</p></div>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>領班簽核</p><p style={{ fontWeight: 600, margin: 0, color: signDone ? T.green : T.brown }}>{signDone ? "已完成" : "尚未完成"}</p></div>
@@ -3077,7 +3148,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         <>
           <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
             <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-              <input type="checkbox" style={{ marginTop: 3 }} disabled={!canWrite} checked={posVerified} onChange={(e) => setPosVerified(e.target.checked)} />
+              <input type="checkbox" style={{ marginTop: 3 }} disabled={!effectiveCanWrite} checked={posVerified} onChange={(e) => setPosVerified(e.target.checked)} />
               <span>
                 <strong>已完成 POS 出缺勤核對</strong>
                 <p style={{ color: T.sub, fontSize: 12.5, margin: "2px 0 0" }}>領班已核對當日所有夥伴的打卡、漏打卡、請假與實際加班紀錄。</p>
@@ -3092,7 +3163,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                 <tbody>
                   {roster.map((r, idx) => {
                     const e = entries[r.id] || {};
-                    const dis = !canWrite;
+                    const dis = !effectiveCanWrite;
                     const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
                     return (
                       <React.Fragment key={r.id}>
@@ -3148,7 +3219,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
             <div className="ph-schedule-preview-mobile" style={{ padding: 14 }}>
               {roster.map((r, idx) => {
                 const e = entries[r.id] || {};
-                const dis = !canWrite;
+                const dis = !effectiveCanWrite;
                 const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
                 return (
                   <div key={r.id} ref={(el) => (rowRefsMobile.current[r.id] = el)} style={{ padding: "12px 0", borderBottom: `1px solid ${T.line}` }}>
@@ -3255,6 +3326,16 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
             })()}
           </div>
 
+          {isAdminCorrection && (
+            <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+              <strong style={{ fontSize: 13 }}>更正原因（必填）</strong>
+              <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>
+                此回報已經送出，管理者直接更正會保留完整前後紀錄與版本，並讓回報退回待重新簽核——原簽名保留在歷史版本，不會被冒用或沿用來代表新內容。
+              </p>
+              <textarea className="ph-input" rows={2} placeholder="請說明這次更正的原因" value={adminReason} onChange={(e) => setAdminReason(e.target.value)} />
+            </div>
+          )}
+
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
             <p style={{ color: T.brown, fontSize: 12, margin: 0, maxWidth: 480 }}>
               <strong>正式電子日總表：</strong>完成 POS 核對、異常內容、附件、領班簽核與人資交接後，即完成當日流程，不再另填紙本。
@@ -3265,6 +3346,11 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
               )}
               {(!report || report.status === "draft" || report.status === "submitted") && canWrite && (
                 <button className="ph-btn primary" disabled={actionBusy} onClick={submitReport}>{actionBusy ? "處理中…" : "儲存並送出"}</button>
+              )}
+              {canAdminEdit && !canWrite && (
+                <button className="ph-btn primary" disabled={actionBusy || (isAdminCorrection && !adminReason.trim())} onClick={adminSaveReport}>
+                  {actionBusy ? "處理中…" : (!report ? "補填回報" : (isAdminCorrection ? "儲存更正" : "儲存並送出"))}
+                </button>
               )}
               {report?.status === "submitted" && canWrite && (
                 <button className="ph-btn primary" disabled={actionBusy} onClick={signReport}>{actionBusy ? "處理中…" : "領班簽核"}</button>
