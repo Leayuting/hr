@@ -1868,59 +1868,93 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
 const DAILY_HUB_LABEL = { missing: "未繳交", submitted: "已提交", signed: "已提交", hr_received: "已提交", needs_attach: "需補件" };
 const DAILY_HUB_TONE = { missing: "sub", submitted: "olive", signed: "olive", hr_received: "olive", needs_attach: "red" };
 
+// 每日回報管理者總覽共用：應繳範圍以系統上線日為準，之前一律「不適用」（三間店天天營業，
+// 沒有公休日曆，不用另外查營運日期規則）；今天以後（含今天還沒過完）是「尚未到期」，不算逾期
+const SYSTEM_LAUNCH_DATE = "2026-08-08";
+const REPORT_DAY_LABEL = { not_applicable: "不適用", not_yet_due: "尚未到期", overdue: "逾期未繳", submitted_no_anomaly: "已繳・無異常", submitted_has_anomaly: "已繳・有異常" };
+const REPORT_DAY_TONE = { not_applicable: "sub", not_yet_due: "sub", overdue: "red", submitted_no_anomaly: "green", submitted_has_anomaly: "yellow" };
+const ANOMALY_STATUS_LABEL = { pending: "待確認", follow_up: "待補件", resolved: "已結案" };
+const ANOMALY_STATUS_TONE = { pending: "yellow", follow_up: "red", resolved: "green" };
+const ANOMALY_TYPE_LABEL = { late: "遲到", missed_punch: "漏打卡", leave: "請假", overtime: "加班" };
+// row 是 daily_report_overview_matrix 某一格（store_id/report_date/report_id/status/
+// anomaly_person_count...），總表格子、異常清單、KPI 數字都呼叫同一支，不各自判斷一次
+function classifyReportDay(row, dateStr, today, launch) {
+  if (dateStr < launch) return "not_applicable";
+  if (dateStr > today) return "not_yet_due";
+  const hasReport = row && row.report_id && row.status !== "draft";
+  if (!hasReport) return dateStr === today ? "not_yet_due" : "overdue";
+  return row.anomaly_person_count > 0 ? "submitted_has_anomaly" : "submitted_no_anomaly";
+}
+
+// 管理者/行政專責的每日回報跨日總覽（daily_report='all' 才會走到這頁——共用 PIN 的門市
+// kiosk 完全走另一條路 DailyReportKioskShell→DailyReportDetail，從不會出現在這裡，
+// 所以這裡不用再保留「填寫」分支，整頁直接就是管理者視角）
 function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
-  const [date, setDate] = useState(todayStr());
-  const [reports, setReports] = useState([]);
-  const [anomalyCounts, setAnomalyCounts] = useState({});
-  const [attachCounts, setAttachCounts] = useState({});
-  const [nameById, setNameById] = useState({});
+  const [tab, setTab] = useState("matrix"); // 'matrix' | 'anomalies'
+  const [dateMode, setDateMode] = useState("week");
+  const [customFrom, setCustomFrom] = useState(todayStr());
+  const [customTo, setCustomTo] = useState(todayStr());
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [matrix, setMatrix] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [openStoreId, setOpenStoreId] = useState(null);
+  const [loadError, setLoadError] = useState(false);
+  const [detail, setDetail] = useState(null); // { storeId, date }
 
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const visibleStores = stores.filter((s) => scopeStoreIds.includes(s.id));
+  const filterStoreIds = storeFilter === "all" ? scopeStoreIds : [storeFilter];
+  const today = todayStr();
+
+  const { from, to } = useMemo(() => {
+    if (dateMode === "today") return { from: today, to: today };
+    if (dateMode === "week") { const wk = weekDatesContaining(today); return { from: wk[0], to: wk[6] }; }
+    if (dateMode === "month") { const ym = today.slice(0, 7); return { from: `${ym}-01`, to: `${ym}-${pad2(monthDays(ym))}` }; }
+    return { from: customFrom, to: customTo };
+  }, [dateMode, customFrom, customTo, today]);
 
   const load = useCallback(async () => {
-    if (!scopeStoreIds.length) return;
-    setLoading(true);
-    const repRes = await sb.from("daily_reports").select("*").in("store_id", scopeStoreIds).eq("report_date", date);
-    if (repRes.error) console.error("daily_reports", repRes.error);
-    // 非「填寫」層級（例如人資、管理者的跨店檢視）只看得到已最終送出的日總表，未送出的草稿視同尚未繳交
-    const canFill = me.permissions?.daily_report === "fill";
-    const reps = (repRes.data || []).filter((r) => canFill || r.status !== "draft");
-    setReports(reps);
-    const reportIds = reps.map((r) => r.id);
-    const [entriesRes, attachRes, rosterResList] = await Promise.all([
-      reportIds.length ? sb.from("daily_report_entries").select("daily_report_id,late,missed_punch,leave,overtime") .in("daily_report_id", reportIds) : Promise.resolve({ data: [] }),
-      reportIds.length ? sb.from("daily_report_attachments").select("daily_report_id").in("daily_report_id", reportIds) : Promise.resolve({ data: [] }),
-      Promise.all(scopeStoreIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid }))),
-    ]);
-    const aCounts = {};
-    (entriesRes.data || []).forEach((e) => {
-      if (e.late || e.missed_punch || e.leave || e.overtime) aCounts[e.daily_report_id] = (aCounts[e.daily_report_id] || 0) + 1;
-    });
-    const fCounts = {};
-    (attachRes.data || []).forEach((a) => { fCounts[a.daily_report_id] = (fCounts[a.daily_report_id] || 0) + 1; });
-    setAnomalyCounts(aCounts);
-    setAttachCounts(fCounts);
-    setNameById(Object.fromEntries(rosterResList.flatMap((r) => r.data || []).map((e) => [e.id, e.name])));
+    if (!filterStoreIds.length || from > to) return;
+    setLoading(true); setLoadError(false);
+    const { data, error } = await sb.rpc("daily_report_overview_matrix", { p_store_ids: filterStoreIds, p_date_from: from, p_date_to: to });
+    if (error) { console.error("daily_report_overview_matrix", error); setLoadError(true); setLoading(false); return; }
+    setMatrix(data || []);
     setLoading(false);
-  }, [scopeStoreIds, date, me.permissions?.daily_report]);
+  }, [scopeStoreIds, storeFilter, from, to]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    const ch = sb.channel("daily_report_hub_sync")
+    const ch = sb.channel("daily_report_overview_sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "daily_reports" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "daily_report_entries" }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "daily_report_attachments" }, load)
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
 
-  if (openStoreId) {
-    const store = storeById[openStoreId];
-    return <DailyReportDetail me={me} store={store} date={date} onDateChange={setDate} toast={toast} onBack={() => setOpenStoreId(null)} />;
-  }
+  const dateList = useMemo(() => {
+    const list = []; let d = from;
+    while (d <= to) { list.push(d); d = addDaysStr(d, 1); }
+    return list;
+  }, [from, to]);
+
+  const rowsByStore = useMemo(() => {
+    const map = {};
+    matrix.forEach((r) => { (map[r.store_id] = map[r.store_id] || {})[r.report_date] = r; });
+    return map;
+  }, [matrix]);
+
+  const kpi = useMemo(() => {
+    let due = 0, submitted = 0, overdue = 0, openAnomalies = 0;
+    matrix.forEach((r) => {
+      const bucket = classifyReportDay(r, r.report_date, today, SYSTEM_LAUNCH_DATE);
+      if (bucket !== "not_applicable" && bucket !== "not_yet_due") due++;
+      if (bucket === "submitted_no_anomaly" || bucket === "submitted_has_anomaly") submitted++;
+      if (bucket === "overdue") overdue++;
+      openAnomalies += r.pending_count + r.follow_up_count;
+    });
+    return { due, submitted, overdue, openAnomalies };
+  }, [matrix, today]);
+
+  function closeDetail() { setDetail(null); load(); }
 
   return (
     <div>
@@ -1928,50 +1962,214 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast }) {
         <div>
           <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>DAILY OPERATIONS REPORT</p>
           <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每日異常回報</h2>
-          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>本頁為正式電子日總表，完整取代紙本；無論有無異常，每間門店每天都要完成。</p>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>跨日期檢視繳交狀況與異常結案進度；門市填報流程請洽門市 PIN 頁面。</p>
         </div>
-        <label style={{ fontSize: 12.5, color: T.sub }}>
-          回報日期<br />
-          <input className="ph-input" style={{ width: 160, marginTop: 4 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-        </label>
       </div>
-      <div style={{ marginTop: 18 }} />
-      {loading ? <p style={{ color: T.sub }}>載入中…</p> : visibleStores.length === 0 ? (
-        <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>沒有可查看的門市</p>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
-          {visibleStores.map((s) => {
-            const canFill = me.permissions?.daily_report === "fill";
-            const rep = reports.find((r) => r.store_id === s.id);
-            const anomalyCount = rep ? (anomalyCounts[rep.id] || 0) : 0;
-            const attachCount = rep ? (attachCounts[rep.id] || 0) : 0;
-            const needsAttach = !!rep && anomalyCount > 0 && attachCount === 0;
-            const key = !rep ? "missing" : needsAttach ? "needs_attach" : rep.status;
-            const submitterName = rep?.submitted_by ? nameById[rep.submitted_by] : null;
-            return (
-              <div key={s.id} className="ph-card" style={{ padding: 18, cursor: "pointer" }} onClick={() => setOpenStoreId(s.id)}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                  <h3 className="ph-serif" style={{ margin: 0, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ width: 7, height: 7, borderRadius: "999px", background: T[DAILY_HUB_TONE[key]], flexShrink: 0 }} />
-                    {s.name}
-                  </h3>
-                  <Badge tone={DAILY_HUB_TONE[key]}>{DAILY_HUB_LABEL[key]}</Badge>
-                </div>
-                <p style={{ fontSize: 13, color: T.sub, margin: "0 0 6px" }}>{anomalyCount} 位夥伴有異常紀錄</p>
-                {rep ? (
-                  <p style={{ fontSize: 12, color: T.sub, margin: "0 0 14px" }}>
-                    提交人：{submitterName || "—"}　提交時間：{rep.submitted_at ? fmtTaipei(rep.submitted_at) : "—"}
-                  </p>
-                ) : (
-                  <p style={{ fontSize: 12, color: T.sub, margin: "0 0 14px" }}>今日尚未送出每日回報</p>
-                )}
-                <button className={"ph-btn small" + (canFill ? " primary" : "")} onClick={(e) => { e.stopPropagation(); setOpenStoreId(s.id); }}>
-                  {rep ? "查看回報 →" : canFill ? "前往填寫 →" : "核對資料 →"}
-                </button>
-              </div>
-            );
-          })}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
+        {[["today", "今日"], ["week", "本週"], ["month", "本月"], ["custom", "自訂"]].map(([k, label]) => (
+          <button key={k} className={"ph-btn small" + (dateMode === k ? " primary" : "")} onClick={() => setDateMode(k)}>{label}</button>
+        ))}
+        {dateMode === "custom" && (
+          <>
+            <input className="ph-input" style={{ width: 150 }} type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} />
+            <span style={{ color: T.sub }}>～</span>
+            <input className="ph-input" style={{ width: 150 }} type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} />
+          </>
+        )}
+        <select className="ph-input" style={{ width: 160 }} value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)}>
+          <option value="all">全部門市</option>
+          {visibleStores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      </div>
+      <p style={{ color: T.sub, fontSize: 12, marginTop: 6, marginBottom: 14 }}>
+        區間：{from} ～ {to}（{SYSTEM_LAUNCH_DATE} 之前一律「不適用」；今天以後尚未到期，不算逾期）
+      </p>
+      {loadError ? (
+        <div className="ph-card" style={{ padding: 24, textAlign: "center" }}>
+          <p style={{ color: T.red, marginBottom: 10 }}>查詢失敗，請重試。</p>
+          <button className="ph-btn small" onClick={load}>重新查詢</button>
         </div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 18 }}>
+            <StatTile label={`應繳（${from}~${to}，不含不適用/尚未到期）`} value={loading ? "…" : kpi.due} unit="天次" />
+            <StatTile label="已繳" value={loading ? "…" : kpi.submitted} unit="天次" tone="green" />
+            <StatTile label="逾期未繳" value={loading ? "…" : kpi.overdue} unit="天次" tone={kpi.overdue > 0 ? "red" : undefined} />
+            <StatTile label="未結案異常（待確認＋待補件）" value={loading ? "…" : kpi.openAnomalies} unit="人次" tone={kpi.openAnomalies > 0 ? "yellow" : undefined} />
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <button className={"ph-btn small" + (tab === "matrix" ? " primary" : "")} onClick={() => setTab("matrix")}>繳交總表</button>
+            <button className={"ph-btn small" + (tab === "anomalies" ? " primary" : "")} onClick={() => setTab("anomalies")}>異常清單</button>
+          </div>
+          {loading ? <p style={{ color: T.sub }}>載入中…</p> : tab === "matrix" ? (
+            <DailyReportMatrixTab visibleStores={storeFilter === "all" ? visibleStores : visibleStores.filter((s) => s.id === storeFilter)}
+              dateList={dateList} rowsByStore={rowsByStore} today={today} onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
+          ) : (
+            <DailyReportAnomalyTab me={me} storeIds={filterStoreIds} storeById={storeById} from={from} to={to} toast={toast}
+              onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
+          )}
+        </>
+      )}
+      {detail && (
+        <Modal title={`${storeById[detail.storeId]?.name || ""}・${detail.date}`} onClose={closeDetail} wide>
+          <DailyReportDetail me={me} store={storeById[detail.storeId]} date={detail.date} onDateChange={() => {}} toast={toast} onBack={closeDetail} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function DailyReportMatrixTab({ visibleStores, dateList, rowsByStore, today, onOpenDetail }) {
+  if (visibleStores.length === 0) return <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>沒有可查看的門市</p>;
+  return (
+    <div className="ph-card" style={{ overflowX: "auto" }}>
+      <table className="ph-table">
+        <thead>
+          <tr>
+            <th style={{ position: "sticky", left: 0, background: "#FCFAF6", zIndex: 1, minWidth: 120 }}>門市</th>
+            {dateList.map((d) => <th key={d} style={{ whiteSpace: "nowrap" }}>{d.slice(5)}<br /><span style={{ fontWeight: 400 }}>週{weekdayZh(d)}</span></th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {visibleStores.map((s) => (
+            <tr key={s.id}>
+              <td style={{ position: "sticky", left: 0, background: "#fff", fontWeight: 500 }}>{s.name}</td>
+              {dateList.map((d) => {
+                const row = (rowsByStore[s.id] || {})[d];
+                const bucket = classifyReportDay(row, d, today, SYSTEM_LAUNCH_DATE);
+                const clickable = bucket !== "not_applicable" && bucket !== "not_yet_due";
+                return (
+                  <td key={d} style={{ textAlign: "center", cursor: clickable ? "pointer" : "default" }} onClick={() => clickable && onOpenDetail(s.id, d)}>
+                    <Badge tone={REPORT_DAY_TONE[bucket]}>{REPORT_DAY_LABEL[bucket]}</Badge>
+                    {row && (row.pending_count + row.follow_up_count) > 0 && (
+                      <div style={{ fontSize: 11, color: T.red, marginTop: 2 }}>{row.pending_count + row.follow_up_count} 人未結案</div>
+                    )}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpenDetail }) {
+  const [statusFilter, setStatusFilter] = useState(["pending", "follow_up"]);
+  const [storeSub, setStoreSub] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [employeeFilter, setEmployeeFilter] = useState("all");
+  const [roster, setRoster] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const PAGE_SIZE = 50;
+
+  useEffect(() => {
+    Promise.all(storeIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid })))
+      .then((resList) => setRoster(resList.flatMap((r) => r.data || [])));
+  }, [storeIds.join(",")]);
+
+  const activeStoreIds = storeSub === "all" ? storeIds : [storeSub];
+
+  const load = useCallback(async (nextOffset) => {
+    setLoading(true); setLoadError(false);
+    const { data, error } = await sb.rpc("daily_report_anomaly_list", {
+      p_store_ids: activeStoreIds, p_date_from: from, p_date_to: to,
+      p_status: statusFilter.length ? statusFilter : null,
+      p_employee_id: employeeFilter === "all" ? null : employeeFilter,
+      p_type: typeFilter === "all" ? null : typeFilter,
+      p_limit: PAGE_SIZE, p_offset: nextOffset,
+    });
+    if (error) { console.error("daily_report_anomaly_list", error); setLoadError(true); setLoading(false); return; }
+    setRows((prev) => nextOffset === 0 ? (data || []) : [...prev, ...(data || [])]);
+    setTotal(data?.[0]?.total_count || 0);
+    setOffset(nextOffset);
+    setLoading(false);
+  }, [activeStoreIds.join(","), from, to, statusFilter.join(","), employeeFilter, typeFilter]);
+
+  useEffect(() => { load(0); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("daily_report_anomaly_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_report_entries" }, () => load(0))
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_reports" }, () => load(0))
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
+
+  function toggleStatus(s) {
+    setStatusFilter((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
+  }
+
+  async function changeStatus(row, status) {
+    const { error } = await sb.rpc("set_anomaly_status", { p_entry_id: row.entry_id, p_status: status, p_note: row.anomaly_resolution_note || null });
+    if (error) { toast("更新失敗：" + error.message); return; }
+    toast("已更新處理狀態");
+    load(0);
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        {Object.entries(ANOMALY_STATUS_LABEL).map(([k, label]) => (
+          <label key={k} style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 4 }}>
+            <input type="checkbox" checked={statusFilter.includes(k)} onChange={() => toggleStatus(k)} /> {label}
+          </label>
+        ))}
+        <select className="ph-input" style={{ width: 130 }} value={storeSub} onChange={(e) => setStoreSub(e.target.value)}>
+          <option value="all">全部門市</option>
+          {storeIds.map((sid) => <option key={sid} value={sid}>{storeById[sid]?.name}</option>)}
+        </select>
+        <select className="ph-input" style={{ width: 130 }} value={employeeFilter} onChange={(e) => setEmployeeFilter(e.target.value)}>
+          <option value="all">全部人員</option>
+          {roster.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+        </select>
+        <select className="ph-input" style={{ width: 110 }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <option value="all">全部類型</option>
+          {Object.entries(ANOMALY_TYPE_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+        </select>
+      </div>
+      {loadError ? (
+        <div className="ph-card" style={{ padding: 24, textAlign: "center" }}>
+          <p style={{ color: T.red, marginBottom: 10 }}>查詢失敗，請重試。</p>
+          <button className="ph-btn small" onClick={() => load(0)}>重新查詢</button>
+        </div>
+      ) : loading && rows.length === 0 ? <p style={{ color: T.sub }}>載入中…</p> : rows.length === 0 ? (
+        <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>此區間沒有符合條件的異常紀錄</p>
+      ) : (
+        <>
+          <div className="ph-card" style={{ overflowX: "auto" }}>
+            <table className="ph-table">
+              <thead>
+                <tr><th>日期</th><th>門市</th><th>員工</th><th>類型</th><th>處理狀態</th><th>說明</th><th></th></tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.entry_id}>
+                    <td>{r.report_date}</td>
+                    <td>{r.store_name}</td>
+                    <td>{r.employee_name}</td>
+                    <td>{[r.late && "遲到", r.missed_punch && "漏打卡", r.leave && "請假", r.overtime && "加班"].filter(Boolean).join("、")}</td>
+                    <td>
+                      <select className="ph-input" style={{ width: 100 }} value={r.anomaly_status || "pending"} onChange={(e) => changeStatus(r, e.target.value)}>
+                        {Object.entries(ANOMALY_STATUS_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                      </select>
+                    </td>
+                    <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reason}</td>
+                    <td><button className="ph-btn small" onClick={() => onOpenDetail(r.store_id, r.report_date)}>明細 →</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, fontSize: 12.5, color: T.sub }}>
+            <span>共 {total} 筆</span>
+            {rows.length < total && <button className="ph-btn small" disabled={loading} onClick={() => load(offset + PAGE_SIZE)}>{loading ? "載入中…" : "載入更多"}</button>}
+          </div>
+        </>
       )}
     </div>
   );
@@ -1988,6 +2186,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const [attachmentsComplete, setAttachmentsComplete] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [managerName, setManagerName] = useState("");
+  const [returnModal, setReturnModal] = useState(false);
+  const canManageAnomaly = !kioskMode && (me.access_tier === "super_admin" || me.permissions?.daily_report === "all");
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -2058,8 +2258,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         if (error) { toast("送出失敗：" + error.message); return; }
         reportId = data.id;
       } else {
-        const { error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), submitted_by_name: submittedByName, signed_by: null, signed_at: null }).eq("id", reportId);
+        const { data, error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), submitted_by_name: submittedByName, signed_by: null, signed_at: null })
+          .eq("id", reportId).eq("updated_at", report.updated_at).select();
         if (error) { toast("送出失敗：" + error.message); return; }
+        if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
       }
       for (const r of roster) {
         const e = entries[r.id];
@@ -2089,8 +2291,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     if (hasAnomaly && (!attachments.length || !attachmentsComplete)) { toast("請先上傳所有相關附件並勾選確認"); return; }
     setActionBusy(true);
     try {
-      const { error } = await sb.from("daily_reports").update({ status: "signed", signed_by: me.id, signed_at: new Date().toISOString() }).eq("id", report.id);
+      const { data, error } = await sb.from("daily_reports").update({ status: "signed", signed_by: me.id, signed_at: new Date().toISOString() })
+        .eq("id", report.id).eq("updated_at", report.updated_at).select();
       if (error) { toast("簽核失敗：" + error.message); return; }
+      if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
       await logAudit(me.name, "sign_daily_report", report.id);
       toast("已完成領班簽核");
       load();
@@ -2103,14 +2307,36 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     if (actionBusy) return;
     setActionBusy(true);
     try {
-      const { error } = await sb.from("daily_reports").update({ status: "hr_received", hr_received_by: me.id, hr_received_at: new Date().toISOString() }).eq("id", report.id);
+      const { data, error } = await sb.from("daily_reports").update({ status: "hr_received", hr_received_by: me.id, hr_received_at: new Date().toISOString() })
+        .eq("id", report.id).eq("updated_at", report.updated_at).select();
       if (error) { toast("交接失敗：" + error.message); return; }
+      if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
       await logAudit(me.name, "handoff_daily_report", report.id);
       toast("已完成人資交接");
       load();
     } finally {
       setActionBusy(false);
     }
+  }
+
+  async function returnReport(reason) {
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      const { error } = await sb.rpc("return_daily_report", { p_report_id: report.id, p_reason: reason });
+      if (error) { toast("退回失敗：" + error.message); return; }
+      toast("已退回");
+      setReturnModal(false);
+      load();
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function changeEntryAnomalyStatus(entryId, status) {
+    const { error } = await sb.rpc("set_anomaly_status", { p_entry_id: entryId, p_status: status });
+    if (error) { toast("更新失敗：" + error.message); return; }
+    load();
   }
 
   async function uploadFile(file) {
@@ -2178,7 +2404,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           <div className="ph-card" style={{ padding: 0, marginBottom: 14, overflow: "hidden" }}>
             <div className="ph-schedule-preview-desktop" style={{ overflowX: "auto" }}>
               <table className="ph-table">
-                <thead><tr><th>姓名</th><th>遲到</th><th>漏打卡</th><th>請假</th><th>加班</th><th>其他異常／補充</th></tr></thead>
+                <thead><tr><th>姓名</th><th>遲到</th><th>漏打卡</th><th>請假</th><th>加班</th><th>其他異常／補充</th><th>異常處理狀態</th></tr></thead>
                 <tbody>
                   {roster.map((r, idx) => {
                     const e = entries[r.id] || {};
@@ -2212,10 +2438,19 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                             value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
                             style={anomaly && !e.reason?.trim() ? { borderColor: T.red } : undefined} />
                         </td>
+                        <td>
+                          {!anomaly ? "—" : canManageAnomaly && e.id ? (
+                            <select className="ph-input" style={{ width: 100 }} value={e.anomaly_status || "pending"} onChange={(ev) => changeEntryAnomalyStatus(e.id, ev.target.value)}>
+                              {Object.entries(ANOMALY_STATUS_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                            </select>
+                          ) : (
+                            <Badge tone={ANOMALY_STATUS_TONE[e.anomaly_status || "pending"]}>{ANOMALY_STATUS_LABEL[e.anomaly_status || "pending"]}</Badge>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
-                  {roster.length === 0 && <tr><td colSpan={6} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
+                  {roster.length === 0 && <tr><td colSpan={7} style={{ color: T.sub, textAlign: "center" }}>此門市尚無在職夥伴</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -2250,6 +2485,11 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                     <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
                       value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
                       style={anomaly && !e.reason?.trim() ? { borderColor: T.red } : undefined} />
+                    {anomaly && (
+                      <div style={{ marginTop: 6 }}>
+                        <Badge tone={ANOMALY_STATUS_TONE[e.anomaly_status || "pending"]}>{ANOMALY_STATUS_LABEL[e.anomaly_status || "pending"]}</Badge>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -2354,11 +2594,31 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
               )}
               {report?.status === "signed" && !(!kioskMode && (me.access_tier === "super_admin" || me.permissions?.daily_report === "fill")) && <span style={{ color: T.sub, fontSize: 12.5 }}>✓ 已完成領班簽核，等待人資交接</span>}
               {report?.status === "hr_received" && <span style={{ color: T.green, fontSize: 12.5 }}>✓ 領班與人資流程皆已完成</span>}
+              {canManageAnomaly && report && ["signed", "hr_received"].includes(report.status) && (
+                <button className="ph-btn danger" disabled={actionBusy} onClick={() => setReturnModal(true)}>退回</button>
+              )}
             </div>
           </div>
         </>
       )}
+      {returnModal && (
+        <ReturnReportModal busy={actionBusy} onClose={() => setReturnModal(false)} onConfirm={returnReport} />
+      )}
     </div>
+  );
+}
+
+function ReturnReportModal({ busy, onClose, onConfirm }) {
+  const [reason, setReason] = useState("");
+  return (
+    <Modal title="退回這筆回報" onClose={onClose}>
+      <p style={{ fontSize: 12.5, color: T.sub, marginTop: -6 }}>退回後狀態會回到上一步（已完成→待人資交接、待人資交接→待簽核），請填寫退回原因。</p>
+      <Field label="退回原因"><textarea className="ph-input" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+        <button className="ph-btn" onClick={onClose} disabled={busy}>取消</button>
+        <button className="ph-btn primary" disabled={busy || !reason.trim()} onClick={() => onConfirm(reason.trim())}>{busy ? "處理中…" : "確認退回"}</button>
+      </div>
+    </Modal>
   );
 }
 
