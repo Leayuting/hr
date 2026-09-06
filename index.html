@@ -1800,6 +1800,7 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [decidingId, setDecidingId] = useState(null);
+  const [hoursEdit, setHoursEdit] = useState({}); // requestId -> 核准/確認更正時可調整的時數字串
   const [truncated, setTruncated] = useState(false);
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -1841,6 +1842,23 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
       if (error) { toast("操作失敗：" + error.message); return; }
       await logAudit(me.name, decision, `request:${id}`);
       toast(decision === "approved" ? "已核准" : "已拒絕");
+    } finally {
+      setDecidingId(null);
+    }
+  }
+
+  // 加班申請（含每日回報自動建立的，以及已核准後又被更正待審的）走這支 RPC，
+  // 才能支援核准時調整時數／確認或駁回更正待審值
+  async function reviewOvertime(id, decision, hours, note) {
+    if (decidingId) return;
+    setDecidingId(id);
+    try {
+      const { error } = await sb.rpc("review_overtime_request", { p_request_id: id, p_decision: decision, p_hours: hours ?? null, p_note: note || null });
+      if (error) {
+        toast((error.message.includes("CONFLICT_LOCKED") ? "" : "操作失敗：") + error.message.replace("CONFLICT_LOCKED：", ""));
+        return;
+      }
+      toast(decision === "confirm" ? "已核准" : "已駁回");
     } finally {
       setDecidingId(null);
     }
@@ -1902,21 +1920,45 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
                   {r.type === "overtime" && r.overtime_type && (
                     <div style={{ fontSize: 11, color: T.sub, marginTop: 4 }}>{OVERTIME_TYPE_LABEL[r.overtime_type]}</div>
                   )}
+                  {r.source_daily_report_entry_id && (
+                    <div style={{ fontSize: 11, color: T.sub, marginTop: 4 }}>來源：每日回報</div>
+                  )}
                 </div>
                 <div style={{ minWidth: 110 }}>
                   <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>日期</div>
                   <div style={{ fontWeight: 600, fontSize: 13.5 }}>{fmtDateShort(r.start_at)}</div>
                 </div>
-                <div style={{ minWidth: 70 }}>
+                <div style={{ minWidth: 90 }}>
                   <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>時數</div>
-                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{r.hours} 小時</div>
+                  {r.type === "overtime" && r.status === "pending" && canReview && r.pending_hours === null ? (
+                    <input className="ph-input" style={{ width: 70 }} type="number" step="0.5" min="0.5"
+                      value={hoursEdit[r.id] ?? r.hours} onChange={(ev) => setHoursEdit((p) => ({ ...p, [r.id]: ev.target.value }))} />
+                  ) : (
+                    <div style={{ fontWeight: 600, fontSize: 13.5 }}>{r.hours} 小時</div>
+                  )}
+                  {r.pending_hours !== null && (
+                    <div style={{ fontSize: 11, color: T.brown, marginTop: 2 }}>更正待審：{r.pending_hours} 小時</div>
+                  )}
                 </div>
-                <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-                  {r.status === "pending" && canReview ? (
+                <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  {r.pending_blocked_by_lock && <Badge tone="red">已鎖定薪資，需人資處理</Badge>}
+                  {r.pending_hours !== null && canReview ? (
                     <>
-                      <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => decide(r.id, "rejected")}>退回</button>
-                      <button className="ph-btn small" style={{ background: T.olive, borderColor: T.olive, color: "#fff" }} disabled={decidingId === r.id} onClick={() => decide(r.id, "approved")}>{decidingId === r.id ? "處理中…" : "核准"}</button>
+                      <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => reviewOvertime(r.id, "reject")}>駁回更正</button>
+                      <button className="ph-btn small" style={{ background: T.olive, borderColor: T.olive, color: "#fff" }} disabled={decidingId === r.id} onClick={() => reviewOvertime(r.id, "confirm")}>{decidingId === r.id ? "處理中…" : "確認更正"}</button>
                     </>
+                  ) : r.status === "pending" && canReview ? (
+                    r.type === "overtime" ? (
+                      <>
+                        <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => reviewOvertime(r.id, "reject")}>退回</button>
+                        <button className="ph-btn small" style={{ background: T.olive, borderColor: T.olive, color: "#fff" }} disabled={decidingId === r.id} onClick={() => reviewOvertime(r.id, "confirm", Number(hoursEdit[r.id] ?? r.hours))}>{decidingId === r.id ? "處理中…" : "核准"}</button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => decide(r.id, "rejected")}>退回</button>
+                        <button className="ph-btn small" style={{ background: T.olive, borderColor: T.olive, color: "#fff" }} disabled={decidingId === r.id} onClick={() => decide(r.id, "approved")}>{decidingId === r.id ? "處理中…" : "核准"}</button>
+                      </>
+                    )
                   ) : (
                     <Badge tone={r.status === "approved" ? "green" : r.status === "rejected" ? "red" : "yellow"}>{REQ_STATUS_LABEL[r.status]}</Badge>
                   )}
@@ -2376,6 +2418,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const rowRefsMobile = useRef({}); // employeeId -> 手機卡片 DOM node（桌面/手機兩份 DOM 同時存在，用 CSS 切換顯示，各自要有自己的 ref 才能在對應版面捲動）
   const [errorTarget, setErrorTarget] = useState(null); // { employeeId, field } | null
   const [shiftEndByEmployee, setShiftEndByEmployee] = useState({}); // employeeId -> "HH:mm" | null，用來預填加班的原定下班時間
+  const [overtimeLinkByEntry, setOvertimeLinkByEntry] = useState({}); // entryId -> 連結的加班申請（requests 表精簡欄位）
+  const [corrections, setCorrections] = useState([]); // daily_report_entry_corrections，這份回報全部異常明細的更正歷程
+  const [correctModal, setCorrectModal] = useState(null); // { r, e } | null
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -2401,6 +2446,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     setPosVerified(rep?.pos_verified || false);
     let entryMap = {};
     let attachRows = [];
+    let overtimeLinkMap = {};
+    let corrections = [];
     if (rep) {
       const [entriesRes, attachRes] = await Promise.all([
         sb.from("daily_report_entries").select("*").eq("daily_report_id", rep.id),
@@ -2408,7 +2455,18 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       ]);
       (entriesRes.data || []).forEach((e) => { entryMap[e.employee_id] = e; });
       attachRows = attachRes.data || [];
+      const entryIds = (entriesRes.data || []).map((e) => e.id);
+      if (entryIds.length) {
+        const [linkRes, corrRes] = await Promise.all([
+          sb.from("requests").select("id,source_daily_report_entry_id,status,hours,pending_hours,pending_blocked_by_lock").in("source_daily_report_entry_id", entryIds),
+          sb.from("daily_report_entry_corrections").select("*").in("entry_id", entryIds).order("created_at", { ascending: false }),
+        ]);
+        (linkRes.data || []).forEach((l) => { overtimeLinkMap[l.source_daily_report_entry_id] = l; });
+        corrections = corrRes.data || [];
+      }
     }
+    setOvertimeLinkByEntry(overtimeLinkMap);
+    setCorrections(corrections);
     const draft = {};
     rosterActive.forEach((r) => {
       const e = entryMap[r.id];
@@ -2419,7 +2477,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         overtime_scheduled_time: scheduled.time, overtime_actual_time: actual.time, overtime_actual_next_day: actual.nextDay,
       } : {
         late: false, late_minutes: "", missed_punch: false, leave: false, leave_hours: "", overtime: false,
-        overtime_scheduled_time: "", overtime_actual_time: "", overtime_actual_next_day: false, overtime_reason: "",
+        overtime_scheduled_time: "", overtime_actual_time: "", overtime_actual_next_day: false, overtime_reason: "", overtime_category: "workday",
         missed_punch_reason: "", missed_punch_error_start: "", missed_punch_error_end: "", missed_punch_fix_start: "", missed_punch_fix_end: "",
         reason: "", improvement: "", note: "",
         leave_type: "", leave_proof_status: null, leave_proof_deferred_reason: "", leave_proof_deadline: null,
@@ -2607,7 +2665,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       }
       for (const r of roster) {
         const e = entries[r.id];
-        await sb.from("daily_report_entries").upsert({
+        const { data: entryRow, error: entryErr } = await sb.from("daily_report_entries").upsert({
           daily_report_id: reportId, store_id: storeId, employee_id: r.id,
           late: e.late, late_minutes: e.late ? Number(e.late_minutes) : null,
           missed_punch: e.missed_punch, leave: e.leave, leave_hours: e.leave ? Number(e.leave_hours) : null,
@@ -2619,13 +2677,20 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           overtime_scheduled_end: e.overtime ? combineOvertimeDateTime(date, e.overtime_scheduled_time, false) : null,
           overtime_actual_end: e.overtime ? combineOvertimeDateTime(date, e.overtime_actual_time, e.overtime_actual_next_day) : null,
           overtime_reason: e.overtime ? (e.overtime_reason || "") : null,
+          overtime_category: e.overtime ? (e.overtime_category || "workday") : null,
           missed_punch_reason: e.missed_punch ? (e.missed_punch_reason || "") : null,
           missed_punch_error_start: e.missed_punch ? (e.missed_punch_error_start || null) : null,
           missed_punch_error_end: e.missed_punch ? (e.missed_punch_error_end || null) : null,
           missed_punch_fix_start: e.missed_punch ? (e.missed_punch_fix_start || null) : null,
           missed_punch_fix_end: e.missed_punch ? (e.missed_punch_fix_end || null) : null,
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
-        }, { onConflict: "daily_report_id,employee_id" });
+        }, { onConflict: "daily_report_id,employee_id" }).select("id").single();
+        // 每日回報的加班連動薪資：不論這次是否勾加班都呼叫，RPC 內部自己判斷
+        // 建立/更新/撤回連結的加班申請，未勾加班且沒有既有連結時是安全的no-op
+        if (!entryErr && entryRow) {
+          const { error: linkErr } = await sb.rpc("submit_daily_report_overtime_link", { p_entry_id: entryRow.id });
+          if (linkErr) console.error("submit_daily_report_overtime_link", linkErr);
+        }
       }
       if (kioskMode) {
         const blob = await signaturePadRef.current.exportPng();
@@ -2704,6 +2769,16 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     load();
   }
 
+  // 管理者更正歷史回報明細：不受 canWrite／報告狀態限制，內容變更會讓報告版本+1
+  // 並退回 submitted 要求重新簽核（舊簽名留在歷史裡，不代表對新內容的確認）
+  async function correctEntry(entryId, patch, reason) {
+    const { error } = await sb.rpc("correct_daily_report_entry", { p_entry_id: entryId, p_patch: patch, p_reason: reason });
+    if (error) { toast("更正失敗：" + error.message); return false; }
+    toast("已保存更正，回報已退回待重新簽核");
+    load();
+    return true;
+  }
+
   // 單一員工的異常明細（漏打卡表單、請假憑證、遲到/加班附件），桌面展開列與手機卡片
   // 共用同一份，沒有勾選任何異常時回傳 null（不佔版面）
   function renderAnomalyDetail(r) {
@@ -2712,9 +2787,15 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     const dis = !canWrite;
     const byType = (type) => attachments.filter((a) => a.employee_id === r.id && a.anomaly_type === type);
     const errField = (field) => errorTarget?.employeeId === r.id && errorTarget?.field === field;
+    const myCorrections = e.id ? corrections.filter((c) => c.entry_id === e.id) : [];
     return (
       <div style={{ padding: 12 }}>
-        <strong style={{ fontSize: 12.5 }}>{r.name}｜異常明細</strong>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          <strong style={{ fontSize: 12.5 }}>{r.name}｜異常明細</strong>
+          {canManageAnomaly && e.id && (
+            <button className="ph-btn small" onClick={() => setCorrectModal({ r, e })}>更正（不受回報狀態限制）</button>
+          )}
+        </div>
 
         {e.missed_punch && (
           <div style={{ marginTop: 8 }}>
@@ -2779,6 +2860,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
               )}
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
                 <div>
+                  <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>加班類型（依勞基法計算加班費）</p>
+                  <select className="ph-input" style={{ width: 200 }} disabled={dis} value={e.overtime_category || "workday"}
+                    onChange={(ev) => updateEntry(r.id, { overtime_category: ev.target.value })}>
+                    {Object.entries(OVERTIME_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                </div>
+                <div>
                   <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>原定下班時間</p>
                   <input className="ph-input" style={{ width: 130 }} type="time" disabled={dis}
                     value={e.overtime_scheduled_time || ""} onChange={(ev) => updateEntry(r.id, { overtime_scheduled_time: ev.target.value })}
@@ -2809,9 +2897,34 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                   value={e.overtime_reason || ""} onChange={(ev) => updateEntry(r.id, { overtime_reason: ev.target.value })}
                   style={!e.overtime_reason?.trim() || errField("overtime_reason") ? { borderColor: T.red } : undefined} />
               </div>
+              {(() => {
+                const link = e.id ? overtimeLinkByEntry[e.id] : null;
+                if (e.overtime_link_status === "conflict") return <p style={{ marginTop: 6 }}><Badge tone="red">待人工核對（已有獨立加班申請，未自動建立）</Badge></p>;
+                if (e.overtime_link_status === "locked_pending") return <p style={{ marginTop: 6 }}><Badge tone="brown">待處理（薪資已鎖定，需人資處理）</Badge></p>;
+                if (!link) return null;
+                if (link.pending_hours !== null) return <p style={{ marginTop: 6 }}><Badge tone="brown">更正待審，目前仍採用已核准 {link.hours} 小時{link.pending_blocked_by_lock ? "（涉及已鎖定薪資，需人資處理）" : ""}</Badge></p>;
+                if (link.status === "approved") return <p style={{ marginTop: 6 }}><Badge tone="green">已核准，已納入薪資（{link.hours} 小時）</Badge></p>;
+                if (link.status === "pending") return <p style={{ marginTop: 6 }}><Badge tone="yellow">待核准（建議 {link.hours} 小時）</Badge></p>;
+                if (link.status === "rejected") return <p style={{ marginTop: 6 }}><Badge tone="red">已拒絕，未納入薪資</Badge></p>;
+                return null;
+              })()}
             </div>
           );
         })()}
+
+        {myCorrections.length > 0 && (
+          <div style={{ marginTop: 10, borderTop: `1px solid ${T.line}`, paddingTop: 8 }}>
+            <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>更正歷程</p>
+            <ul style={{ fontSize: 11.5, color: T.sub, paddingLeft: 18, margin: 0 }}>
+              {myCorrections.map((c) => (
+                <li key={c.id}>
+                  {fmtDateTimeShort(c.created_at)}・{c.actor_name_snapshot}・{c.reason}
+                  {c.payroll_locked && "（當時薪資已鎖定）"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     );
   }
@@ -3072,7 +3185,93 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           onClose={() => setLeaveProofModal(null)}
         />
       )}
+      {correctModal && (
+        <CorrectEntryModal r={correctModal.r} e={correctModal.e} date={date}
+          onSave={(patch, reason) => correctEntry(correctModal.e.id, patch, reason).then((ok) => { if (ok) setCorrectModal(null); })}
+          onClose={() => setCorrectModal(null)}
+        />
+      )}
     </div>
+  );
+}
+
+// 管理者更正歷史回報明細：不受回報狀態/日期限制，任何時間都能開；只暴露這次
+// 會用到的欄位（遲到分鐘、加班時間/原因/類型），送出時才組成 correct_daily_report_entry
+// 需要的 patch 物件——patch 只放「這次要改的欄位」，其餘欄位維持原值不動
+function CorrectEntryModal({ r, e, date, onSave, onClose }) {
+  const [lateMinutes, setLateMinutes] = useState(e.late_minutes ?? "");
+  const [schTime, setSchTime] = useState(e.overtime_scheduled_time || "");
+  const [actTime, setActTime] = useState(e.overtime_actual_time || "");
+  const [actNextDay, setActNextDay] = useState(!!e.overtime_actual_next_day);
+  const [otReason, setOtReason] = useState(e.overtime_reason || "");
+  const [otCategory, setOtCategory] = useState(e.overtime_category || "workday");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function save() {
+    setErr("");
+    if (!reason.trim()) { setErr("請填寫更正原因"); return; }
+    const patch = {};
+    if (e.late && String(lateMinutes) !== String(e.late_minutes ?? "")) {
+      if (!(Number.isInteger(Number(lateMinutes)) && Number(lateMinutes) > 0)) { setErr("遲到分鐘數須為正整數"); return; }
+      patch.late_minutes = Number(lateMinutes);
+    }
+    if (e.overtime) {
+      const schEnd = combineOvertimeDateTime(date, schTime, false);
+      const actEnd = combineOvertimeDateTime(date, actTime, actNextDay);
+      if (schEnd !== combineOvertimeDateTime(date, e.overtime_scheduled_time || "", false)) patch.overtime_scheduled_end = schEnd;
+      if (actEnd !== combineOvertimeDateTime(date, e.overtime_actual_time || "", !!e.overtime_actual_next_day)) patch.overtime_actual_end = actEnd;
+      if (otReason !== (e.overtime_reason || "")) patch.overtime_reason = otReason;
+      if (otCategory !== (e.overtime_category || "workday")) patch.overtime_category = otCategory;
+      if (patch.overtime_scheduled_end || patch.overtime_actual_end) {
+        if (!schTime || !actTime) { setErr("加班時間須完整填寫"); return; }
+        if (new Date(combineOvertimeDateTime(date, actTime, actNextDay)) <= new Date(combineOvertimeDateTime(date, schTime, false))) {
+          setErr("實際離開時間須晚於原定下班時間"); return;
+        }
+      }
+    }
+    if (!Object.keys(patch).length) { setErr("沒有欄位被更改"); return; }
+    setBusy(true);
+    const ok = await onSave(patch, reason.trim());
+    setBusy(false);
+    if (!ok) setErr("更正失敗，請重試");
+  }
+
+  return (
+    <Modal title={`更正 ${r.name} 的異常明細`} onClose={onClose}>
+      <p style={{ color: T.sub, fontSize: 12, margin: "0 0 10px" }}>
+        更正會保留完整前後紀錄，並讓這份回報退回待重新簽核（原簽名保留在歷史版本，不代表對新內容的確認）。
+      </p>
+      {e.late && (
+        <Field label="遲到分鐘數">
+          <input className="ph-input" type="number" step="1" min="1" value={lateMinutes} onChange={(ev) => setLateMinutes(ev.target.value)} />
+        </Field>
+      )}
+      {e.overtime && (
+        <>
+          <Field label="加班類型">
+            <select className="ph-input" value={otCategory} onChange={(ev) => setOtCategory(ev.target.value)}>
+              {Object.entries(OVERTIME_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </Field>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Field label="原定下班時間"><input className="ph-input" type="time" value={schTime} onChange={(ev) => setSchTime(ev.target.value)} /></Field>
+            <Field label="實際離開時間"><input className="ph-input" type="time" value={actTime} onChange={(ev) => setActTime(ev.target.value)} /></Field>
+          </div>
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, margin: "0 0 10px" }}>
+            <input type="checkbox" checked={actNextDay} onChange={(ev) => setActNextDay(ev.target.checked)} /> 實際離開時間為隔天
+          </label>
+          <Field label="加班原因"><textarea className="ph-input" rows={2} value={otReason} onChange={(ev) => setOtReason(ev.target.value)} /></Field>
+        </>
+      )}
+      <Field label="更正原因（必填）"><textarea className="ph-input" rows={2} value={reason} onChange={(ev) => setReason(ev.target.value)} /></Field>
+      {err && <div className="ph-err">{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button className="ph-btn" onClick={onClose}>取消</button>
+        <button className="ph-btn primary" disabled={busy} onClick={save}>{busy ? "儲存中…" : "儲存更正"}</button>
+      </div>
+    </Modal>
   );
 }
 
