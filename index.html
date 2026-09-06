@@ -164,6 +164,32 @@ function annualLeaveDaysForSeniority(hireDateStr, asOfDateStr) {
   return Math.min(30, 15 + (years - 9));
 }
 function isHalfHourStep(n) { return Number.isFinite(n) && n > 0 && Math.round(n * 2) === n * 2; }
+// 遲到現在完全沒有額外欄位（只有主列的分鐘數），所以「異常明細」展開區只在漏打卡/請假/加班
+// 其中之一存在時才需要渲染，避免只勾遲到卻展開一個空區塊
+function hasAnomalyDetail(e) { return !!(e.missed_punch || e.leave || e.overtime); }
+// 加班「原定下班／實際離開」時間：資料庫存完整 timestamptz，畫面上拆成「時間字串＋是否隔天」比較好編輯
+function splitOvertimeTimestamp(iso, reportDate) {
+  if (!iso) return { time: "", nextDay: false };
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  const localDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return { time: `${pad(d.getHours())}:${pad(d.getMinutes())}`, nextDay: localDate !== reportDate };
+}
+function combineOvertimeDateTime(reportDate, timeStr, nextDay) {
+  if (!timeStr) return null;
+  const base = new Date(`${reportDate}T00:00:00`);
+  if (nextDay) base.setDate(base.getDate() + 1);
+  const [h, m] = timeStr.split(":").map(Number);
+  base.setHours(h, m, 0, 0);
+  return base.toISOString();
+}
+function formatMinutesDuration(min) {
+  if (!Number.isFinite(min)) return "";
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h > 0 && m > 0) return `${h} 小時 ${m} 分`;
+  if (h > 0) return `${h} 小時`;
+  return `${m} 分`;
+}
 function shiftHours(startTime, endTime) {
   if (!startTime || !endTime) return 0;
   const [sh, sm] = startTime.split(":").map(Number);
@@ -2337,7 +2363,6 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const [attachments, setAttachments] = useState([]);
   const [posVerified, setPosVerified] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [attachmentsComplete, setAttachmentsComplete] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const signaturePadRef = useRef(null);
   const [signatureHistory, setSignatureHistory] = useState(null); // null=未開啟；陣列=已載入
@@ -2350,15 +2375,17 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const rowRefsDesktop = useRef({}); // employeeId -> 桌面表格列 DOM node
   const rowRefsMobile = useRef({}); // employeeId -> 手機卡片 DOM node（桌面/手機兩份 DOM 同時存在，用 CSS 切換顯示，各自要有自己的 ref 才能在對應版面捲動）
   const [errorTarget, setErrorTarget] = useState(null); // { employeeId, field } | null
+  const [shiftEndByEmployee, setShiftEndByEmployee] = useState({}); // employeeId -> "HH:mm" | null，用來預填加班的原定下班時間
 
   const load = useCallback(async () => {
     if (!storeId) return;
     setLoading(true);
-    const [rosterRes, reportRes, leaveTypeRes, deadlineRes] = await Promise.all([
+    const [rosterRes, reportRes, leaveTypeRes, deadlineRes, shiftRes] = await Promise.all([
       sb.rpc("store_roster", { p_store_id: storeId }),
       sb.from("daily_reports").select("*").eq("store_id", storeId).eq("report_date", date).maybeSingle(),
       sb.from("leave_type_settings").select("*").order("sort_order"),
       sb.from("app_settings").select("value").eq("key", "leave_proof_deadline_days").maybeSingle(),
+      sb.from("shifts").select("employee_id,end_time,is_day_off").eq("store_id", storeId).eq("work_date", date),
     ]);
     setDeadlineDays(deadlineRes.data?.value ?? null);
     if (rosterRes.error) console.error("store_roster", rosterRes.error);
@@ -2366,6 +2393,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     const rosterActive = (rosterRes.data || []).filter((r) => r.active);
     setRoster(rosterActive);
     setLeaveTypeSettings(leaveTypeRes.data || []);
+    const shiftMap = {};
+    (shiftRes.data || []).forEach((s) => { shiftMap[s.employee_id] = !s.is_day_off && s.end_time ? s.end_time.slice(0, 5) : null; });
+    setShiftEndByEmployee(shiftMap);
     const rep = reportRes.data;
     setReport(rep);
     setPosVerified(rep?.pos_verified || false);
@@ -2382,8 +2412,14 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     const draft = {};
     rosterActive.forEach((r) => {
       const e = entryMap[r.id];
-      draft[r.id] = e ? { ...e } : {
-        late: false, late_minutes: "", missed_punch: false, leave: false, leave_hours: "", overtime: false, overtime_hours: "",
+      const scheduled = splitOvertimeTimestamp(e?.overtime_scheduled_end, date);
+      const actual = splitOvertimeTimestamp(e?.overtime_actual_end, date);
+      draft[r.id] = e ? {
+        ...e,
+        overtime_scheduled_time: scheduled.time, overtime_actual_time: actual.time, overtime_actual_next_day: actual.nextDay,
+      } : {
+        late: false, late_minutes: "", missed_punch: false, leave: false, leave_hours: "", overtime: false,
+        overtime_scheduled_time: "", overtime_actual_time: "", overtime_actual_next_day: false, overtime_reason: "",
         missed_punch_reason: "", missed_punch_error_start: "", missed_punch_error_end: "", missed_punch_fix_start: "", missed_punch_fix_end: "",
         reason: "", improvement: "", note: "",
         leave_type: "", leave_proof_status: null, leave_proof_deferred_reason: "", leave_proof_deadline: null,
@@ -2398,8 +2434,6 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   useEffect(() => { load(); }, [load]);
 
   const hasAnomaly = Object.values(entries).some((e) => e.late || e.missed_punch || e.leave || e.overtime);
-  // 漏打卡不再要求附件：只有遲到/請假/加班存在時才需要「附件已完整上傳」的簽核前把關
-  const attachmentRelevantAnomaly = Object.values(entries).some((e) => e.late || e.leave || e.overtime);
   const canWrite = me.permissions?.daily_report === "fill" && (!report || report.status === "draft" || report.status === "submitted");
   const canUploadProof = me.permissions?.daily_report === "fill"; // 補件不受回報流程狀態限制
 
@@ -2416,23 +2450,33 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     setErrorTarget((prev) => (prev?.employeeId === employeeId ? null : prev));
   }
 
+  // 遲到／漏打卡／加班都不再有附件；只有請假還有憑證概念，所以只有這個 field 需要考慮附件
+  function hasAnomalyAttachment(employeeId, field) {
+    return field === "leave" && attachments.some((a) => a.employee_id === employeeId && a.anomaly_type === field);
+  }
+
   // 取消勾選前檢查這位員工這個項目是否已經有填寫內容或上傳附件，不能靜默取消——
   // 內容/附件本身不會被刪除，只是展開區跟著隱藏，先跟操作者確認過再繼續
   function hasTypedContent(e, field) {
     if (field === "late") return !!String(e.late_minutes || "").trim();
     if (field === "missed_punch") return !!(e.missed_punch_reason?.trim() || e.missed_punch_error_start || e.missed_punch_error_end || e.missed_punch_fix_start || e.missed_punch_fix_end);
     if (field === "leave") return !!(String(e.leave_hours || "").trim() || e.leave_type || e.leave_proof_deferred_reason?.trim());
-    if (field === "overtime") return !!String(e.overtime_hours || "").trim();
+    if (field === "overtime") return !!(e.overtime_scheduled_time || e.overtime_actual_time || e.overtime_reason?.trim());
     return false;
   }
 
   function toggleAnomalyFlag(employeeId, field, checked) {
     if (!checked) {
       const e = entries[employeeId] || {};
-      // 漏打卡已不再要求附件，取消時不需要考慮附件（但仍要考慮已填的事由/時間）
-      const hasAtt = field !== "missed_punch" && attachments.some((a) => a.employee_id === employeeId && a.anomaly_type === field);
-      if ((hasAtt || hasTypedContent(e, field)) &&
+      if ((hasAnomalyAttachment(employeeId, field) || hasTypedContent(e, field)) &&
           !window.confirm("此項目已填寫內容或已上傳附件，取消勾選不會刪除已填內容或附件，仍可查閱。確定要取消勾選嗎？")) return;
+      updateEntry(employeeId, { [field]: checked });
+      return;
+    }
+    // 第一次勾選加班時，若當店當日班表有可靠的下班時間，先預填原定下班時間（仍可更正）
+    if (field === "overtime" && !entries[employeeId]?.overtime_scheduled_time && shiftEndByEmployee[employeeId]) {
+      updateEntry(employeeId, { overtime: checked, overtime_scheduled_time: shiftEndByEmployee[employeeId] });
+      return;
     }
     updateEntry(employeeId, { [field]: checked });
   }
@@ -2530,10 +2574,18 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     }
     for (const r of roster) {
       const e = entries[r.id];
-      const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
-      if (anomaly && !e.reason?.trim()) { failValidation(r.id, "reason", `${r.name}的異常須填寫「其他異常／補充」說明`); return; }
-      if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { failValidation(r.id, "overtime_hours", `${r.name}的加班時數須以 0.5 小時為單位`); return; }
+      // 遲到／加班已各自有必填欄位（分鐘數；原定/實際時間＋原因），不再借用共用的「其他異常／補充」
+      const reasonRequired = e.missed_punch || e.leave;
+      if (reasonRequired && !e.reason?.trim()) { failValidation(r.id, "reason", `${r.name}的異常須填寫「其他異常／補充」說明`); return; }
       if (e.late && !(Number.isInteger(Number(e.late_minutes)) && Number(e.late_minutes) > 0)) { failValidation(r.id, "late_minutes", `${r.name}的遲到分鐘數須為正整數`); return; }
+      if (e.overtime) {
+        if (!e.overtime_scheduled_time) { failValidation(r.id, "overtime_scheduled_time", `請填寫${r.name}的原定下班時間`); return; }
+        if (!e.overtime_actual_time) { failValidation(r.id, "overtime_actual_time", `請填寫${r.name}的實際離開時間`); return; }
+        if (!e.overtime_reason?.trim()) { failValidation(r.id, "overtime_reason", `請填寫${r.name}的加班原因`); return; }
+        const schEnd = combineOvertimeDateTime(date, e.overtime_scheduled_time, false);
+        const actEnd = combineOvertimeDateTime(date, e.overtime_actual_time, e.overtime_actual_next_day);
+        if (new Date(actEnd) <= new Date(schEnd)) { failValidation(r.id, "overtime_actual_time", `${r.name}的實際離開時間須晚於原定下班時間`); return; }
+      }
       if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { failValidation(r.id, "leave_hours", `${r.name}的請假時數須以 0.5 小時為單位`); return; }
       if (e.leave && !e.leave_type) { failValidation(r.id, "leave_type", `請選擇${r.name}的請假假別`); return; }
       if (e.leave && leaveTypeByCode[e.leave_type]?.requires_proof && !e.leave_proof_status) {
@@ -2563,7 +2615,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           leave_proof_status: e.leave ? (e.leave_proof_status || null) : null,
           leave_proof_deferred_reason: e.leave && e.leave_proof_status === "pending" ? (e.leave_proof_deferred_reason || "") : null,
           leave_proof_deadline: e.leave && e.leave_proof_status === "pending" ? (e.leave_proof_deadline || null) : null,
-          overtime: e.overtime, overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
+          overtime: e.overtime,
+          overtime_scheduled_end: e.overtime ? combineOvertimeDateTime(date, e.overtime_scheduled_time, false) : null,
+          overtime_actual_end: e.overtime ? combineOvertimeDateTime(date, e.overtime_actual_time, e.overtime_actual_next_day) : null,
+          overtime_reason: e.overtime ? (e.overtime_reason || "") : null,
           missed_punch_reason: e.missed_punch ? (e.missed_punch_reason || "") : null,
           missed_punch_error_start: e.missed_punch ? (e.missed_punch_error_start || null) : null,
           missed_punch_error_end: e.missed_punch ? (e.missed_punch_error_end || null) : null,
@@ -2599,7 +2654,6 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
 
   async function signReport() {
     if (actionBusy) return;
-    if (attachmentRelevantAnomaly && (!attachments.length || !attachmentsComplete)) { toast("請先上傳所有相關附件並勾選確認"); return; }
     setActionBusy(true);
     try {
       const { data, error } = await sb.from("daily_reports").update({ status: "signed", signed_by: me.id, signed_at: new Date().toISOString() })
@@ -2654,22 +2708,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   // 共用同一份，沒有勾選任何異常時回傳 null（不佔版面）
   function renderAnomalyDetail(r) {
     const e = entries[r.id] || {};
-    const anomaly = e.late || e.missed_punch || e.leave || e.overtime;
-    if (!anomaly) return null;
+    if (!hasAnomalyDetail(e)) return null;
     const dis = !canWrite;
     const byType = (type) => attachments.filter((a) => a.employee_id === r.id && a.anomaly_type === type);
     const errField = (field) => errorTarget?.employeeId === r.id && errorTarget?.field === field;
     return (
       <div style={{ padding: 12 }}>
         <strong style={{ fontSize: 12.5 }}>{r.name}｜異常明細</strong>
-
-        {e.late && (
-          <div style={{ marginTop: 8 }}>
-            <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>遲到</p>
-            <AttachmentTypeBlock label="遲到附件（選填）" attachments={byType("late")} dis={dis}
-              onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "late", file)} />
-          </div>
-        )}
 
         {e.missed_punch && (
           <div style={{ marginTop: 8 }}>
@@ -2718,13 +2763,55 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           </div>
         )}
 
-        {e.overtime && (
-          <div style={{ marginTop: 8 }}>
-            <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>加班</p>
-            <AttachmentTypeBlock label="加班單（選填）" attachments={byType("overtime")} dis={dis}
-              onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "overtime", file)} />
-          </div>
-        )}
+        {e.overtime && (() => {
+          const isLegacy = !e.overtime_scheduled_time && !e.overtime_actual_time && e.overtime_hours;
+          const schEnd = combineOvertimeDateTime(date, e.overtime_scheduled_time, false);
+          const actEnd = combineOvertimeDateTime(date, e.overtime_actual_time, e.overtime_actual_next_day);
+          const minutes = schEnd && actEnd ? Math.round((new Date(actEnd) - new Date(schEnd)) / 60000) : null;
+          const timeInvalid = minutes !== null && minutes <= 0;
+          return (
+            <div style={{ marginTop: 8 }}>
+              <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>加班資料</p>
+              {isLegacy && (
+                <p style={{ color: T.brown, fontSize: 11.5, margin: "0 0 6px" }}>
+                  舊版資料：加班 {e.overtime_hours} 小時（無時間紀錄，如需更正請填寫下方欄位）
+                </p>
+              )}
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                <div>
+                  <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>原定下班時間</p>
+                  <input className="ph-input" style={{ width: 130 }} type="time" disabled={dis}
+                    value={e.overtime_scheduled_time || ""} onChange={(ev) => updateEntry(r.id, { overtime_scheduled_time: ev.target.value })}
+                    style={!e.overtime_scheduled_time || errField("overtime_scheduled_time") ? { borderColor: T.red } : undefined} />
+                </div>
+                <div>
+                  <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>實際離開時間</p>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <input className="ph-input" style={{ width: 130 }} type="time" disabled={dis}
+                      value={e.overtime_actual_time || ""} onChange={(ev) => updateEntry(r.id, { overtime_actual_time: ev.target.value })}
+                      style={!e.overtime_actual_time || timeInvalid || errField("overtime_actual_time") ? { borderColor: T.red } : undefined} />
+                    <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                      <input type="checkbox" disabled={dis} checked={!!e.overtime_actual_next_day}
+                        onChange={(ev) => updateEntry(r.id, { overtime_actual_next_day: ev.target.checked })} /> 隔天
+                    </label>
+                  </div>
+                  {timeInvalid && <p style={{ color: T.red, fontSize: 11.5, margin: "4px 0 0" }}>實際離開時間須晚於原定下班時間</p>}
+                </div>
+              </div>
+              {minutes !== null && !timeInvalid && (
+                <p style={{ color: T.sub, fontSize: 12, margin: "8px 0 0" }}>
+                  原定 {e.overtime_scheduled_time}／實際 {e.overtime_actual_next_day ? "翌日 " : ""}{e.overtime_actual_time}／延長時間 {formatMinutesDuration(minutes)}
+                </p>
+              )}
+              <div style={{ marginTop: 8 }}>
+                <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>加班原因</p>
+                <textarea className="ph-input" rows={2} disabled={dis} placeholder="請說明加班原因"
+                  value={e.overtime_reason || ""} onChange={(ev) => updateEntry(r.id, { overtime_reason: ev.target.value })}
+                  style={!e.overtime_reason?.trim() || errField("overtime_reason") ? { borderColor: T.red } : undefined} />
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   }
@@ -2805,14 +2892,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                           </td>
                           <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => toggleAnomalyFlag(r.id, "overtime", ev.target.checked)} /></td>
                           <td style={{ minWidth: 240 }}>
-                            {e.overtime && (
-                              <input className="ph-input" style={{ width: 90, marginBottom: 6 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
-                                disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })}
-                                style={errorTarget?.employeeId === r.id && errorTarget?.field === "overtime_hours" ? { borderColor: T.red } : undefined} />
-                            )}
-                            <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
+                            <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…（選填）"
                               value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
-                              style={(anomaly && !e.reason?.trim()) || (errorTarget?.employeeId === r.id && errorTarget?.field === "reason") ? { borderColor: T.red } : undefined} />
+                              style={((e.missed_punch || e.leave) && !e.reason?.trim()) || (errorTarget?.employeeId === r.id && errorTarget?.field === "reason") ? { borderColor: T.red } : undefined} />
                           </td>
                           <td>
                             {!anomaly ? "—" : canManageAnomaly && e.id ? (
@@ -2824,7 +2906,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                             )}
                           </td>
                         </tr>
-                        {anomaly && (
+                        {hasAnomalyDetail(e) && (
                           <tr>
                             <td colSpan={7} style={{ background: T.bg, padding: 0, borderTop: "none" }}>
                               {renderAnomalyDetail(r)}
@@ -2863,21 +2945,16 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                           disabled={dis} value={e.leave_hours} onChange={(ev) => updateEntry(r.id, { leave_hours: ev.target.value })}
                           style={errorTarget?.employeeId === r.id && errorTarget?.field === "leave_hours" ? { borderColor: T.red } : undefined} />
                       )}
-                      {e.overtime && (
-                        <input className="ph-input" style={{ width: 90 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
-                          disabled={dis} value={e.overtime_hours} onChange={(ev) => updateEntry(r.id, { overtime_hours: ev.target.value })}
-                          style={errorTarget?.employeeId === r.id && errorTarget?.field === "overtime_hours" ? { borderColor: T.red } : undefined} />
-                      )}
                     </div>
-                    <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…"
+                    <textarea className="ph-input" rows={2} disabled={dis} placeholder="設備、客訴或其他營運異常…（選填）"
                       value={e.reason || ""} onChange={(ev) => updateEntry(r.id, { reason: ev.target.value, improvement: ev.target.value })}
-                      style={(anomaly && !e.reason?.trim()) || (errorTarget?.employeeId === r.id && errorTarget?.field === "reason") ? { borderColor: T.red } : undefined} />
+                      style={((e.missed_punch || e.leave) && !e.reason?.trim()) || (errorTarget?.employeeId === r.id && errorTarget?.field === "reason") ? { borderColor: T.red } : undefined} />
                     {anomaly && (
                       <div style={{ marginTop: 6 }}>
                         <Badge tone={ANOMALY_STATUS_TONE[e.anomaly_status || "pending"]}>{ANOMALY_STATUS_LABEL[e.anomaly_status || "pending"]}</Badge>
                       </div>
                     )}
-                    {anomaly && (
+                    {hasAnomalyDetail(e) && (
                       <div style={{ marginTop: 8, background: T.bg, borderRadius: 8 }}>
                         {renderAnomalyDetail(r)}
                       </div>
@@ -2926,13 +3003,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
             <strong style={{ fontSize: 13 }}>附件與歷史紀錄</strong>
             <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>
-              漏打卡不需要上傳附件；遲到／加班附件選填、請假依假別決定是否需要憑證，皆已移到上方對應員工列下方操作。
+              遲到、漏打卡、加班皆不需要附件；請假依假別決定是否需要憑證，已移到上方對應員工列下方操作。
             </p>
 
             {(() => {
               const legacy = attachments.filter((a) => !a.employee_id);
               const orphaned = attachments.filter((a) =>
-                a.anomaly_type === "missed_punch" ||
+                a.anomaly_type === "missed_punch" || a.anomaly_type === "late" || a.anomaly_type === "overtime" ||
                 (a.employee_id && !entries[a.employee_id]?.[a.anomaly_type])
               );
               if (!legacy.length && !orphaned.length) return <p style={{ color: T.sub, fontSize: 12.5 }}>目前沒有歷史附件。</p>;
@@ -2940,7 +3017,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                 <div>
                   <strong style={{ fontSize: 12.5 }}>歷史附件</strong>
                   <p style={{ color: T.sub, fontSize: 11.5, margin: "4px 0" }}>
-                    改版前未區分員工／異常項目的舊附件、已取消勾選異常項目後保留下來的附件，以及已移除功能的漏打卡附件，僅供查閱。
+                    改版前未區分員工／異常項目的舊附件、已取消勾選異常項目後保留下來的附件，以及已移除上傳功能的遲到／漏打卡／加班附件，僅供查閱。
                   </p>
                   <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
                     {legacy.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
@@ -2951,13 +3028,6 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                 </div>
               );
             })()}
-
-            {attachmentRelevantAnomaly && (
-              <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12.5 }}>
-                <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || me.permissions?.daily_report !== "fill"} />
-                確認附件已完整上傳
-              </label>
-            )}
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
