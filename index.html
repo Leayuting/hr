@@ -1798,19 +1798,28 @@ function ShiftEditModal({ editing, onClose, onSave, onClear, isPublished }) {
    請假／加班申請
 ──────────────────────────────────────────── */
 
-function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
+function RequestsPage({ me, stores, storeId, scopeStoreIds, toast, focus, onFocusConsumed }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [decidingId, setDecidingId] = useState(null);
-  const [hoursEdit, setHoursEdit] = useState({}); // requestId -> 核准/確認更正時可調整的時數字串
+  const [hoursEdit, setHoursEdit] = useState({}); // requestId -> 核准/確認更正時可調整的分鐘數或時數字串
   const [truncated, setTruncated] = useState(false);
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [monthFilter, setMonthFilter] = useState("");
+  const [monthFilter, setMonthFilter] = useState(() => focus?.month || "");
+  // 從薪資明細/每日回報帶進來的「聚焦」某位員工，避免進到整份清單還要重新找
+  const [focusEmployeeId, setFocusEmployeeId] = useState(() => focus?.employeeId || null);
   const canReview = me.permissions?.requests && me.permissions.requests !== "submit";
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const [nameById, setNameById] = useState({});
+
+  useEffect(() => {
+    if (!focus) return;
+    if (focus.employeeId) setFocusEmployeeId(focus.employeeId);
+    if (focus.month) setMonthFilter(focus.month);
+    onFocusConsumed?.();
+  }, [focus]);
 
   const load = useCallback(async () => {
     if (!scopeStoreIds.length) { setRows([]); setLoading(false); return; }
@@ -1852,11 +1861,13 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
 
   // 加班申請（含每日回報自動建立的，以及已核准後又被更正待審的）走這支 RPC，
   // 才能支援核准時調整時數／確認或駁回更正待審值
-  async function reviewOvertime(id, decision, hours, note) {
+  async function reviewOvertime(id, decision, { hours, approvedMinutes, note } = {}) {
     if (decidingId) return;
     setDecidingId(id);
     try {
-      const { error } = await sb.rpc("review_overtime_request", { p_request_id: id, p_decision: decision, p_hours: hours ?? null, p_note: note || null });
+      const { error } = await sb.rpc("review_overtime_request", {
+        p_request_id: id, p_decision: decision, p_hours: hours ?? null, p_approved_minutes: approvedMinutes ?? null, p_note: note || null,
+      });
       if (error) {
         toast((error.message.includes("CONFLICT_LOCKED") ? "" : "操作失敗：") + error.message.replace("CONFLICT_LOCKED：", ""));
         return;
@@ -1869,6 +1880,7 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
 
   const pendingRevisionCount = rows.filter((r) => r.pending_submitted_at).length;
   const filteredRows = rows.filter((r) => {
+    if (focusEmployeeId && r.employee_id !== focusEmployeeId) return false;
     if (statusFilter === "revision_pending") return !!r.pending_submitted_at;
     if (typeFilter !== "all" && r.type !== typeFilter) return false;
     if (statusFilter !== "all" && r.status !== statusFilter) return false;
@@ -1887,6 +1899,12 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast }) {
         </div>
         <button className="ph-btn primary" onClick={() => setShowForm(true)}>＋ 送出申請</button>
       </div>
+      {focusEmployeeId && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 0" }}>
+          <Badge tone="brown">只顯示 {nameById[focusEmployeeId] || "該員工"} 的申請</Badge>
+          <button className="ph-btn small" onClick={() => setFocusEmployeeId(null)}>清除篩選，顯示全部</button>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", margin: "18px 0 14px" }}>
         <select className="ph-input" style={{ width: 130 }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
           <option value="all">全部類型</option>
@@ -1999,9 +2017,14 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
 function RequestRow({ r, idx, nameById, storeById, canReview, decidingId, hoursEdit, setHoursEdit, onDecide, onReviewOvertime }) {
   const pill = REQ_TYPE_PILL[r.type];
   const isRevisionPending = !!r.pending_submitted_at;
-  const needsHoursInput = r.hours === null && !isRevisionPending;
-  const enteredHours = hoursEdit[r.id] ?? (r.hours ?? "");
-  const canConfirmFirstReview = !needsHoursInput || (enteredHours !== "" && Number(enteredHours) > 0);
+  const isFromReport = r.source_minutes != null; // 每日回報連結的申請：分鐘為準，不借用小時輸入
+  const editVal = hoursEdit[r.id];
+  // 每日回報連結：預設值＝原始分鐘數（更正待審時＝提議分鐘數），主管可調整但不強制捨入
+  const defaultMinutes = isRevisionPending ? r.pending_minutes : r.source_minutes;
+  const needsFirstReviewInput = isFromReport ? r.approved_minutes === null && !isRevisionPending : r.hours === null && !isRevisionPending;
+  const enteredVal = editVal ?? (isFromReport ? (defaultMinutes ?? "") : (r.hours ?? ""));
+  const canConfirmFirstReview = !needsFirstReviewInput || (enteredVal !== "" && Number(enteredVal) > 0);
+  const legacyApprovedMinutes = r.approved_minutes ?? (r.hours != null ? Math.round(Number(r.hours) * 60) : null); // 舊資料換算供顯示，不寫回
   return (
     <div className="ph-card" style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 190, flex: 1 }}>
@@ -2026,21 +2049,31 @@ function RequestRow({ r, idx, nameById, storeById, canReview, decidingId, hoursE
         <div style={{ fontWeight: 600, fontSize: 13.5 }}>{fmtDateShort(r.start_at)}</div>
         {r.type === "overtime" && r.reason && <div style={{ fontSize: 11, color: T.sub, marginTop: 2, maxWidth: 180 }}>{r.reason}</div>}
       </div>
-      <div style={{ minWidth: 100 }}>
-        <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>時數</div>
+      <div style={{ minWidth: 110 }}>
+        <div style={{ fontSize: 11, color: T.sub, marginBottom: 4 }}>{isFromReport ? "核准分鐘數" : "時數"}</div>
         {r.type === "overtime" && ((r.status === "pending" && canReview && !isRevisionPending) || (isRevisionPending && canReview)) ? (
-          <input className="ph-input" style={{ width: 70 }} type="number" step="0.5" min="0.5"
-            placeholder={needsHoursInput || (isRevisionPending && r.pending_hours === null) ? "請輸入" : undefined}
-            value={hoursEdit[r.id] ?? (isRevisionPending ? (r.pending_hours ?? "") : (r.hours ?? ""))}
-            onChange={(ev) => setHoursEdit((p) => ({ ...p, [r.id]: ev.target.value }))} />
+          isFromReport ? (
+            <input className="ph-input" style={{ width: 80 }} type="number" step="1" min="1"
+              placeholder={defaultMinutes != null ? String(defaultMinutes) : "請輸入"}
+              value={editVal ?? ""} onChange={(ev) => setHoursEdit((p) => ({ ...p, [r.id]: ev.target.value }))} />
+          ) : (
+            <input className="ph-input" style={{ width: 70 }} type="number" step="0.5" min="0.5"
+              value={hoursEdit[r.id] ?? (r.hours ?? "")}
+              onChange={(ev) => setHoursEdit((p) => ({ ...p, [r.id]: ev.target.value }))} />
+          )
         ) : (
-          <div style={{ fontWeight: 600, fontSize: 13.5 }}>{r.hours != null ? `${r.hours} 小時` : "尚未核定"}</div>
+          <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+            {isFromReport
+              ? (legacyApprovedMinutes != null ? `${legacyApprovedMinutes} 分鐘` : "尚未核定")
+              : (r.hours != null ? `${r.hours} 小時` : "尚未核定")}
+          </div>
         )}
-        {r.type === "overtime" && r.source_minutes != null && (
+        {isFromReport && r.hours != null && <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>＝{Number(r.hours).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} 小時計薪</div>}
+        {r.type === "overtime" && r.source_minutes != null && !isRevisionPending && (
           <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>原始 {r.source_minutes} 分鐘</div>
         )}
         {isRevisionPending && (
-          <div style={{ fontSize: 11, color: T.brown, marginTop: 2 }}>更正待審：{r.pending_hours ?? "尚未核定"} 小時</div>
+          <div style={{ fontSize: 11, color: T.brown, marginTop: 2 }}>更正待審：提議 {r.pending_minutes ?? "尚未核定"} 分鐘（原核准 {legacyApprovedMinutes ?? "—"} 分鐘）</div>
         )}
       </div>
       <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -2049,8 +2082,8 @@ function RequestRow({ r, idx, nameById, storeById, canReview, decidingId, hoursE
           <>
             <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => onReviewOvertime(r.id, "reject")}>駁回更正</button>
             <button className="ph-btn small" style={{ background: T.olive, borderColor: T.olive, color: "#fff" }}
-              disabled={decidingId === r.id || (r.pending_hours === null && !hoursEdit[r.id])}
-              onClick={() => onReviewOvertime(r.id, "confirm", r.pending_hours === 0 ? undefined : Number(hoursEdit[r.id] ?? r.pending_hours))}>
+              disabled={decidingId === r.id || (r.pending_minutes === null && !hoursEdit[r.id])}
+              onClick={() => onReviewOvertime(r.id, "confirm", { approvedMinutes: r.pending_minutes === 0 ? 0 : Number(hoursEdit[r.id] ?? r.pending_minutes) })}>
               {decidingId === r.id ? "處理中…" : "確認更正"}
             </button>
           </>
@@ -2060,7 +2093,9 @@ function RequestRow({ r, idx, nameById, storeById, canReview, decidingId, hoursE
               <button className="ph-btn small" disabled={decidingId === r.id} onClick={() => onReviewOvertime(r.id, "reject")}>退回</button>
               <button className="ph-btn small" style={{ background: T.olive, borderColor: T.olive, color: "#fff" }}
                 disabled={decidingId === r.id || !canConfirmFirstReview}
-                onClick={() => onReviewOvertime(r.id, "confirm", Number(hoursEdit[r.id] ?? r.hours))}>
+                onClick={() => onReviewOvertime(r.id, "confirm", isFromReport
+                  ? { approvedMinutes: Number(hoursEdit[r.id] ?? defaultMinutes) }
+                  : { hours: Number(hoursEdit[r.id] ?? r.hours) })}>
                 {decidingId === r.id ? "處理中…" : "核准"}
               </button>
             </>
@@ -2497,7 +2532,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       const entryIds = (entriesRes.data || []).map((e) => e.id);
       if (entryIds.length) {
         const [linkRes, corrRes] = await Promise.all([
-          sb.from("requests").select("id,source_daily_report_entry_id,status,hours,source_minutes,pending_hours,pending_submitted_at,pending_blocked_by_lock").in("source_daily_report_entry_id", entryIds),
+          sb.from("requests").select("id,source_daily_report_entry_id,status,hours,source_minutes,approved_minutes,pending_minutes,pending_submitted_at,pending_blocked_by_lock").in("source_daily_report_entry_id", entryIds),
           sb.from("daily_report_entry_corrections").select("*").in("entry_id", entryIds).order("created_at", { ascending: false }),
         ]);
         (linkRes.data || []).forEach((l) => { overtimeLinkMap[l.source_daily_report_entry_id] = l; });
@@ -2940,6 +2975,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                 const link = e.id ? overtimeLinkByEntry[e.id] : null;
                 const rawMinutes = link?.source_minutes ?? e.overtime_minutes;
                 const rawNote = rawMinutes != null ? `（原始 ${rawMinutes} 分鐘）` : "";
+                const legacyApprovedMinutes = link?.approved_minutes ?? (link?.hours != null ? Math.round(Number(link.hours) * 60) : null);
                 if (e.overtime_link_status === "conflict") return <p style={{ marginTop: 6 }}><Badge tone="red">待人工核對（已有獨立加班申請，未自動建立）</Badge></p>;
                 if (e.overtime_link_status === "locked_pending") return <p style={{ marginTop: 6 }}><Badge tone="brown">待處理（薪資已鎖定，需人資處理）{rawNote}</Badge></p>;
                 if (!link) return null;
@@ -2947,18 +2983,18 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                   return (
                     <p style={{ marginTop: 6 }}>
                       <Badge tone="brown">
-                        更正待審，目前仍採用已核准 {link.hours ?? "—"} 小時 → 提議 {link.pending_hours ?? "未核定"} 小時{rawNote}
+                        更正待審，目前仍採用已核准 {legacyApprovedMinutes ?? "—"} 分鐘 → 提議 {link.pending_minutes ?? "未核定"} 分鐘
                         {link.pending_blocked_by_lock ? "（涉及已鎖定薪資，需人資處理）" : ""}
                       </Badge>
                     </p>
                   );
                 }
-                if (link.status === "approved") return <p style={{ marginTop: 6 }}><Badge tone="green">已核准，已納入薪資（{link.hours} 小時{rawNote}）</Badge></p>;
+                if (link.status === "approved") return <p style={{ marginTop: 6 }}><Badge tone="green">已核准，已納入薪資（{legacyApprovedMinutes} 分鐘）</Badge></p>;
                 if (link.status === "pending") {
                   return (
                     <p style={{ marginTop: 6 }}>
                       <Badge tone="yellow">
-                        {link.hours != null ? `待核准（建議 ${link.hours} 小時${rawNote}）` : `待核准，尚未核定計薪時數${rawNote}`}
+                        {`待核准，預設核准分鐘數 ${link.source_minutes ?? rawMinutes ?? "—"} 分鐘（主管審核時可調整）`}
                       </Badge>
                     </p>
                   );
@@ -3033,7 +3069,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           <p style={{ margin: 0, fontSize: 13, color: T.brown, fontWeight: 600 }}>
             ⚠ {overtimePendingRows.length} 筆加班待核准／待人工處理，尚未納入薪資（簽名送出不代表已完成計薪）
           </p>
-          {onGotoRequests && <button className="ph-btn small" onClick={onGotoRequests}>前往加班申請頁審核</button>}
+          {onGotoRequests && <button className="ph-btn small" onClick={() => onGotoRequests({ month: date.slice(0, 7) })}>前往加班申請頁審核</button>}
         </div>
       )}
 
@@ -3772,11 +3808,13 @@ function KioskRequestsReview({ me, store, toast }) {
 
   // 跟 RequestsPage 共用同一支 RPC，不是另外寫一套審核判斷——避免主頁面與 kiosk
   // 對同一筆申請算出不同結果
-  async function reviewOvertime(id, decision, hours, note) {
+  async function reviewOvertime(id, decision, { hours, approvedMinutes, note } = {}) {
     if (decidingId) return;
     setDecidingId(id);
     try {
-      const { error } = await sb.rpc("review_overtime_request", { p_request_id: id, p_decision: decision, p_hours: hours ?? null, p_note: note || null });
+      const { error } = await sb.rpc("review_overtime_request", {
+        p_request_id: id, p_decision: decision, p_hours: hours ?? null, p_approved_minutes: approvedMinutes ?? null, p_note: note || null,
+      });
       if (error) {
         toast((error.message.includes("CONFLICT_LOCKED") ? "" : "操作失敗：") + error.message.replace("CONFLICT_LOCKED：", ""));
         return;
@@ -4160,13 +4198,14 @@ function PayslipModal({ store, ym, periodLabel, row, locked, onClose, onGotoRequ
               <PayslipRow label={"加班費" + (row.overtimeOverride?.manual_value != null ? "（人工調整，系統試算 NT$ " + money(row.overtimePay) + "）" : "")} value={row.effectiveOvertimePay} />
               {(row.overtimeSourceRequests || []).filter((s) => s.source_daily_report_entry_id).map((s) => {
                 const info = locked ? s : liveSourceInfo[s.source_daily_report_entry_id];
+                const approvedMinutes = s.approved_minutes ?? (s.hours != null ? Math.round(Number(s.hours) * 60) : null);
                 return (
                   <tr key={s.id} className="ph-payslip-noprint">
                     <td colSpan={2} style={{ fontSize: 11.5, color: "#888", padding: "0 0 6px" }}>
-                      來源：每日回報 {info?.reportDate || info?.report_date || "—"}
+                      來源：{store?.name}・每日回報 {info?.reportDate || info?.report_date || "—"}
                       {(info?.reportVersion || info?.version) ? `（v${info.reportVersion || info.version}）` : ""}
-                      ・核准 {s.hours} 小時（原始 {s.source_minutes ?? "—"} 分鐘）
-                      {onGotoRequests && <button className="ph-btn small" style={{ marginLeft: 8 }} onClick={onGotoRequests}>查看加班申請</button>}
+                      ・核准 {approvedMinutes ?? "—"} 分鐘（原始 {s.source_minutes ?? "—"} 分鐘，計薪採用 {Number(s.hours).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} 小時）
+                      {onGotoRequests && <button className="ph-btn small" style={{ marginLeft: 8 }} onClick={() => onGotoRequests({ employeeId: row.emp.id, month: ym })}>查看加班申請</button>}
                     </td>
                   </tr>
                 );
@@ -4542,12 +4581,14 @@ function LockWarningModal({ pending, nameById, busy, onClose, onConfirm }) {
         需要人資到「加班申請」頁逐筆確認或駁回。確定要先鎖定嗎？
       </p>
       <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
-        {pending.map((r) => (
-          <li key={r.id} style={{ marginBottom: 4 }}>
-            {nameById[r.employee_id] || "—"}・{fmtDateShort(r.start_at)}・原核准 {r.hours ?? "—"} 小時 → 提議 {r.pending_hours ?? "未核定"} 小時
-            （原始 {r.source_minutes ?? "—"} 分鐘）
-          </li>
-        ))}
+        {pending.map((r) => {
+          const legacyApprovedMinutes = r.approved_minutes ?? (r.hours != null ? Math.round(Number(r.hours) * 60) : null);
+          return (
+            <li key={r.id} style={{ marginBottom: 4 }}>
+              {nameById[r.employee_id] || "—"}・{fmtDateShort(r.start_at)}・原核准 {legacyApprovedMinutes ?? "—"} 分鐘 → 提議 {r.pending_minutes ?? "未核定"} 分鐘
+            </li>
+          );
+        })}
       </ul>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
         <button className="ph-btn" onClick={onClose} disabled={busy}>先不鎖定</button>
@@ -6303,6 +6344,8 @@ function AppShell({ session }) {
   const [storeId, setStoreId] = useState(null);
   const [scope, setScope] = useState(() => new URLSearchParams(location.search).get("scope") || "all"); // 全站共用門市篩選：'all' 或某個 store id，僅 hr 可切換
   const [page, setPage] = useState(() => new URLSearchParams(location.search).get("page") || "dashboard");
+  const [requestsFocus, setRequestsFocus] = useState(null); // { employeeId, month } | null，從薪資明細/每日回報「查看加班申請」帶過去的篩選焦點
+  function gotoRequests(focus) { setRequestsFocus(focus || null); setPage("requests"); }
   const [toastMsg, setToastMsg] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
@@ -6460,12 +6503,12 @@ function AppShell({ session }) {
             {page === "schedule" && (perm.schedule === "self"
               ? <MySchedulePage me={me} />
               : <SchedulePage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />)}
-            {page === "requests" && <RequestsPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setScope={setScope} toast={toast} />}
-            {page === "daily_report" && perm.daily_report !== "none" && <DailyReportPage me={me} stores={stores} storeId={storeId} scopeStoreIds={dailyReportScopeStoreIds} toast={toast} onGotoRequests={() => setPage("requests")} />}
-            {page === "payroll" && perm.payroll && perm.payroll !== "self" && <PayrollPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} onGotoRequests={() => setPage("requests")} />}
+            {page === "requests" && <RequestsPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setScope={setScope} toast={toast} focus={requestsFocus} onFocusConsumed={() => setRequestsFocus(null)} />}
+            {page === "daily_report" && perm.daily_report !== "none" && <DailyReportPage me={me} stores={stores} storeId={storeId} scopeStoreIds={dailyReportScopeStoreIds} toast={toast} onGotoRequests={gotoRequests} />}
+            {page === "payroll" && perm.payroll && perm.payroll !== "self" && <PayrollPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} onGotoRequests={gotoRequests} />}
             {page === "staff" && (perm.staff && perm.staff !== "self"
               ? <StaffPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />
-              : <MyProfilePage me={me} stores={stores} onGotoRequests={() => setPage("requests")} />)}
+              : <MyProfilePage me={me} stores={stores} onGotoRequests={gotoRequests} />)}
             {page === "monthly_summary" && perm.staff === "edit" && <MonthlySummaryPage me={me} stores={stores} scope={scope} scopeStoreIds={scopeStoreIds} toast={toast} />}
             {page === "backup" && perm.backup && perm.backup !== "none" && <BackupPage me={me} toast={toast} />}
             {page === "permissions" && perm.permission_admin === "manage" && <PermissionsPage me={me} stores={stores} toast={toast} />}
