@@ -2170,13 +2170,20 @@ function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpe
   const [storeSub, setStoreSub] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [employeeFilter, setEmployeeFilter] = useState("all");
+  const [proofFilter, setProofFilter] = useState("all");
   const [roster, setRoster] = useState([]);
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [leaveTypeSettings, setLeaveTypeSettings] = useState([]);
+  const [proofModal, setProofModal] = useState(null);
+  const canReviewProof = me.access_tier === "super_admin" || me.permissions?.daily_report === "all";
+  const leaveTypeByCode = useMemo(() => Object.fromEntries(leaveTypeSettings.map((t) => [t.code, t])), [leaveTypeSettings]);
   const PAGE_SIZE = 50;
+
+  useEffect(() => { sb.from("leave_type_settings").select("*").order("sort_order").then(({ data }) => setLeaveTypeSettings(data || [])); }, []);
 
   useEffect(() => {
     Promise.all(storeIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid })))
@@ -2193,13 +2200,14 @@ function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpe
       p_employee_id: employeeFilter === "all" ? null : employeeFilter,
       p_type: typeFilter === "all" ? null : typeFilter,
       p_limit: PAGE_SIZE, p_offset: nextOffset,
+      p_proof_status: proofFilter === "all" ? null : [proofFilter],
     });
     if (error) { console.error("daily_report_anomaly_list", error); setLoadError(true); setLoading(false); return; }
     setRows((prev) => nextOffset === 0 ? (data || []) : [...prev, ...(data || [])]);
     setTotal(data?.[0]?.total_count || 0);
     setOffset(nextOffset);
     setLoading(false);
-  }, [activeStoreIds.join(","), from, to, statusFilter.join(","), employeeFilter, typeFilter]);
+  }, [activeStoreIds.join(","), from, to, statusFilter.join(","), employeeFilter, typeFilter, proofFilter]);
 
   useEffect(() => { load(0); }, [load]);
   useEffect(() => {
@@ -2221,6 +2229,16 @@ function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpe
     load(0);
   }
 
+  async function reviewProof(entryId, decision, note) {
+    const { error } = await sb.rpc("review_leave_proof", { p_entry_id: entryId, p_decision: decision, p_note: note || null });
+    if (error) { toast("審核失敗：" + error.message); return; }
+    toast(decision === "confirm" ? "已確認憑證" : "已標記需重補");
+    setProofModal(null);
+    load(0);
+  }
+
+  const PROOF_STATUS_LABEL = { pending: "待補證明", pending_review: "待審核", confirmed: "已確認", needs_resubmit: "需重補", not_required: "免附證明" };
+
   return (
     <div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
@@ -2241,6 +2259,13 @@ function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpe
           <option value="all">全部類型</option>
           {Object.entries(ANOMALY_TYPE_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
         </select>
+        <select className="ph-input" style={{ width: 120 }} value={proofFilter} onChange={(e) => setProofFilter(e.target.value)}>
+          <option value="all">全部憑證狀態</option>
+          <option value="pending">待補證明</option>
+          <option value="pending_review">憑證待審核</option>
+          <option value="confirmed">憑證已確認</option>
+          <option value="needs_resubmit">憑證需重補</option>
+        </select>
       </div>
       {loadError ? (
         <div className="ph-card" style={{ padding: 24, textAlign: "center" }}>
@@ -2254,7 +2279,7 @@ function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpe
           <div className="ph-card" style={{ overflowX: "auto" }}>
             <table className="ph-table">
               <thead>
-                <tr><th>日期</th><th>門市</th><th>員工</th><th>類型</th><th>處理狀態</th><th>說明</th><th></th></tr>
+                <tr><th>日期</th><th>門市</th><th>員工</th><th>類型</th><th>處理狀態</th><th>憑證狀態</th><th>說明</th><th></th></tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
@@ -2268,6 +2293,16 @@ function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpe
                         {Object.entries(ANOMALY_STATUS_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
                       </select>
                     </td>
+                    <td>
+                      {!r.leave ? "—" : (
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 12 }}>{PROOF_STATUS_LABEL[r.leave_proof_status] || "—"}</span>
+                          {canReviewProof && r.leave_proof_status === "pending_review" && (
+                            <button className="ph-btn small" onClick={() => setProofModal(r)}>審核</button>
+                          )}
+                        </div>
+                      )}
+                    </td>
                     <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reason}</td>
                     <td><button className="ph-btn small" onClick={() => onOpenDetail(r.store_id, r.report_date)}>明細 →</button></td>
                   </tr>
@@ -2280,6 +2315,15 @@ function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpe
             {rows.length < total && <button className="ph-btn small" disabled={loading} onClick={() => load(offset + PAGE_SIZE)}>{loading ? "載入中…" : "載入更多"}</button>}
           </div>
         </>
+      )}
+      {proofModal && (
+        <LeaveProofModal
+          entry={{ id: proofModal.entry_id, leave_type: proofModal.leave_type, leave_proof_status: proofModal.leave_proof_status, leave_proof_deferred_reason: proofModal.leave_proof_deferred_reason, leave_proof_deadline: proofModal.leave_proof_deadline, leave_proof_review_note: proofModal.leave_proof_review_note }}
+          employeeName={proofModal.employee_name} leaveTypeByCode={leaveTypeByCode} canUpload={false} canReview={canReviewProof}
+          onUpload={() => {}} onDefer={() => {}}
+          onReview={(decision, note) => reviewProof(proofModal.entry_id, decision, note)}
+          onClose={() => setProofModal(null)}
+        />
       )}
     </div>
   );
@@ -2298,19 +2342,27 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const signaturePadRef = useRef(null);
   const [signatureHistory, setSignatureHistory] = useState(null); // null=未開啟；陣列=已載入
   const [returnModal, setReturnModal] = useState(false);
+  const [leaveTypeSettings, setLeaveTypeSettings] = useState([]);
   const canManageAnomaly = !kioskMode && (me.access_tier === "super_admin" || me.permissions?.daily_report === "all");
+  const leaveTypeByCode = useMemo(() => Object.fromEntries(leaveTypeSettings.map((t) => [t.code, t])), [leaveTypeSettings]);
+  const [deadlineDays, setDeadlineDays] = useState(null);
+  const [leaveProofModal, setLeaveProofModal] = useState(null); // { entry, employeeName } | null
 
   const load = useCallback(async () => {
     if (!storeId) return;
     setLoading(true);
-    const [rosterRes, reportRes] = await Promise.all([
+    const [rosterRes, reportRes, leaveTypeRes, deadlineRes] = await Promise.all([
       sb.rpc("store_roster", { p_store_id: storeId }),
       sb.from("daily_reports").select("*").eq("store_id", storeId).eq("report_date", date).maybeSingle(),
+      sb.from("leave_type_settings").select("*").order("sort_order"),
+      sb.from("app_settings").select("value").eq("key", "leave_proof_deadline_days").maybeSingle(),
     ]);
+    setDeadlineDays(deadlineRes.data?.value ?? null);
     if (rosterRes.error) console.error("store_roster", rosterRes.error);
     if (reportRes.error) console.error("daily_reports", reportRes.error);
     const rosterActive = (rosterRes.data || []).filter((r) => r.active);
     setRoster(rosterActive);
+    setLeaveTypeSettings(leaveTypeRes.data || []);
     const rep = reportRes.data;
     setReport(rep);
     setPosVerified(rep?.pos_verified || false);
@@ -2331,6 +2383,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         late: false, late_minutes: "", missed_punch: false, leave: false, leave_hours: "", overtime: false, overtime_hours: "",
         missed_punch_reason: "", missed_punch_error_start: "", missed_punch_error_end: "", missed_punch_fix_start: "", missed_punch_fix_end: "",
         reason: "", improvement: "", note: "",
+        leave_type: "", leave_proof_status: null, leave_proof_deferred_reason: "", leave_proof_deadline: null,
+        leave_proof_confirmed_by: null, leave_proof_confirmed_at: null, leave_proof_review_note: "",
       };
     });
     setEntries(draft);
@@ -2342,6 +2396,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
 
   const hasAnomaly = Object.values(entries).some((e) => e.late || e.missed_punch || e.leave || e.overtime);
   const canWrite = me.permissions?.daily_report === "fill" && (!report || report.status === "draft" || report.status === "submitted");
+  const canUploadProof = me.permissions?.daily_report === "fill"; // 補件不受回報流程狀態限制
 
   function clearSignatureOnChange() {
     if (kioskMode && signaturePadRef.current && !signaturePadRef.current.isEmpty()) {
@@ -2353,6 +2408,91 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   function updateEntry(employeeId, patch) {
     setEntries((prev) => ({ ...prev, [employeeId]: { ...prev[employeeId], ...patch } }));
     clearSignatureOnChange();
+  }
+
+  // 取消勾選異常時，若這位員工這個項目已經有附件，不能靜默取消——附件本身不會被刪除，
+  // 但畫面上會從「目前異常」移到「歷史附件」，先跟操作者確認過再繼續
+  function toggleAnomalyFlag(employeeId, field, checked) {
+    if (!checked) {
+      const hasAtt = attachments.some((a) => a.employee_id === employeeId && a.anomaly_type === field);
+      if (hasAtt && !window.confirm("此項目已上傳附件，取消勾選不會刪除附件，附件會改列在「歷史附件」中仍可查閱。確定要取消勾選嗎？")) return;
+    }
+    updateEntry(employeeId, { [field]: checked });
+  }
+
+  // 假別憑證：勾選請假、選假別、選「立即上傳」或「待補證明」都還只是本機表單狀態，
+  // 跟其他異常欄位（如 missed_punch_reason）一樣，等 submitReport() 的 entries upsert
+  // 才真正寫進資料庫；只有「送出之後」要再補件/重補/審核，才會走下面那三支 RPC
+  // （這時 entries 列一定已經存在，e.id 有值）
+  function computeLocalDeadline() {
+    if (deadlineDays === null || deadlineDays === undefined) return null;
+    const n = Number(deadlineDays);
+    if (!Number.isFinite(n)) return null;
+    return addDaysStr(todayStr(), n);
+  }
+
+  function chooseLeaveType(employeeId, leaveType) {
+    const setting = leaveTypeByCode[leaveType];
+    updateEntry(employeeId, {
+      leave_type: leaveType,
+      leave_proof_status: setting?.requires_proof ? null : "not_required",
+      leave_proof_deferred_reason: "", leave_proof_deadline: null,
+    });
+  }
+
+  function deferLeaveProofDraft(employeeId, reason) {
+    if (!reason?.trim()) { toast("請填寫待補原因"); return; }
+    updateEntry(employeeId, { leave_proof_status: "pending", leave_proof_deferred_reason: reason.trim(), leave_proof_deadline: computeLocalDeadline() });
+    toast("已標記待補證明，送出後仍可補交");
+  }
+
+  async function ensureReportId() {
+    if (report?.id) return report.id;
+    const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "draft" }).select().single();
+    if (error) { toast("建立日總表失敗：" + error.message); return null; }
+    setReport(data);
+    return data.id;
+  }
+
+  async function uploadTypedAttachment(employeeId, entryId, anomalyType, file) {
+    if (file.size > 10 * 1024 * 1024) { toast("單檔上限 10MB"); return; }
+    const reportId = await ensureReportId();
+    if (!reportId) return;
+    const path = `${reportId}/${employeeId}_${anomalyType}_${Date.now()}_${file.name}`;
+    const { error: upErr } = await sb.storage.from("daily-report-attachments").upload(path, file);
+    if (upErr) { toast("上傳失敗：" + upErr.message); return; }
+    const { data: attRow, error } = await sb.from("daily_report_attachments").insert({
+      daily_report_id: reportId, store_id: storeId, employee_id: employeeId, entry_id: entryId || null, anomaly_type: anomalyType,
+      storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "application/octet-stream", uploaded_by: me.id,
+    }).select().single();
+    if (error) { toast("附件登錄失敗：" + error.message); return; }
+    if (anomalyType === "leave") {
+      if (entryId) {
+        // 已送出後補交：走 RPC 正式登記為待審核，並留下歷程
+        const { error: subErr } = await sb.rpc("submit_leave_proof", { p_entry_id: entryId, p_attachment_id: attRow.id });
+        if (subErr) { toast("憑證登記失敗：" + subErr.message); return; }
+      } else {
+        // 還在填寫階段，尚未送出：先設成本機狀態，跟其他欄位一起在送出時存進去
+        updateEntry(employeeId, { leave_proof_status: "pending_review", leave_proof_deferred_reason: "" });
+      }
+    }
+    clearSignatureOnChange();
+    load();
+  }
+
+  async function postSubmitDeferLeaveProof(entryId, reason) {
+    if (!reason?.trim()) { toast("請填寫待補原因"); return; }
+    const { error } = await sb.rpc("defer_leave_proof", { p_entry_id: entryId, p_reason: reason.trim() });
+    if (error) { toast("標記失敗：" + error.message); return; }
+    toast("已標記待補證明");
+    load();
+  }
+
+  async function reviewLeaveProof(entryId, decision, note) {
+    const { error } = await sb.rpc("review_leave_proof", { p_entry_id: entryId, p_decision: decision, p_note: note || null });
+    if (error) { toast("審核失敗：" + error.message); return; }
+    toast(decision === "confirm" ? "已確認憑證" : "已標記需重補");
+    load();
   }
 
   async function submitReport() {
@@ -2370,8 +2510,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       if (e.overtime && !isHalfHourStep(Number(e.overtime_hours))) { toast(`${r.name}的加班時數須以 0.5 小時為單位`); return; }
       if (e.late && !(Number.isInteger(Number(e.late_minutes)) && Number(e.late_minutes) > 0)) { toast(`${r.name}的遲到分鐘數須為正整數`); return; }
       if (e.leave && !isHalfHourStep(Number(e.leave_hours))) { toast(`${r.name}的請假時數須以 0.5 小時為單位`); return; }
+      if (e.leave && !e.leave_type) { toast(`請選擇${r.name}的請假假別`); return; }
+      if (e.leave && leaveTypeByCode[e.leave_type]?.requires_proof && !e.leave_proof_status) {
+        toast(`${r.name}的請假需要提供證明或選擇待補`); return;
+      }
       if (e.missed_punch && !e.missed_punch_reason?.trim()) { toast(`${r.name}的補打卡單須填寫事由`); return; }
     }
+    const pendingProofCount = roster.filter((r) => ["pending", "needs_resubmit"].includes(entries[r.id]?.leave_proof_status)).length;
     setActionBusy(true);
     try {
       let reportId = report?.id;
@@ -2388,6 +2533,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           daily_report_id: reportId, store_id: storeId, employee_id: r.id,
           late: e.late, late_minutes: e.late ? Number(e.late_minutes) : null,
           missed_punch: e.missed_punch, leave: e.leave, leave_hours: e.leave ? Number(e.leave_hours) : null,
+          leave_type: e.leave ? (e.leave_type || null) : null,
+          leave_proof_status: e.leave ? (e.leave_proof_status || null) : null,
+          leave_proof_deferred_reason: e.leave && e.leave_proof_status === "pending" ? (e.leave_proof_deferred_reason || "") : null,
+          leave_proof_deadline: e.leave && e.leave_proof_status === "pending" ? (e.leave_proof_deadline || null) : null,
           overtime: e.overtime, overtime_hours: e.overtime ? Number(e.overtime_hours) : null,
           missed_punch_reason: e.missed_punch ? (e.missed_punch_reason || "") : null,
           missed_punch_error_start: e.missed_punch ? (e.missed_punch_error_start || null) : null,
@@ -2415,7 +2564,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
       }
       await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
-      toast("已送出，等待領班簽核");
+      toast(pendingProofCount > 0 ? `已送出，等待領班簽核（本次有 ${pendingProofCount} 筆請假證明待補，送出後仍可補交）` : "已送出，等待領班簽核");
       load();
     } finally {
       setActionBusy(false);
@@ -2472,25 +2621,6 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   async function changeEntryAnomalyStatus(entryId, status) {
     const { error } = await sb.rpc("set_anomaly_status", { p_entry_id: entryId, p_status: status });
     if (error) { toast("更新失敗：" + error.message); return; }
-    load();
-  }
-
-  async function uploadFile(file) {
-    if (file.size > 10 * 1024 * 1024) { toast("單檔上限 10MB"); return; }
-    let reportId = report?.id;
-    if (!reportId) {
-      const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "draft" }).select().single();
-      if (error) { toast("建立日總表失敗：" + error.message); return; }
-      reportId = data.id;
-    }
-    const path = `${reportId}/${Date.now()}_${file.name}`;
-    const { error: upErr } = await sb.storage.from("daily-report-attachments").upload(path, file);
-    if (upErr) { toast("上傳失敗：" + upErr.message); return; }
-    const { error } = await sb.from("daily_report_attachments").insert({
-      daily_report_id: reportId, store_id: storeId, storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "application/octet-stream", uploaded_by: me.id,
-    });
-    if (error) { toast("附件登錄失敗：" + error.message); return; }
-    clearSignatureOnChange();
     load();
   }
 
@@ -2551,21 +2681,21 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                       <tr key={r.id}>
                         <td><RosterCell r={r} index={idx} /></td>
                         <td>
-                          <input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} />
+                          <input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => toggleAnomalyFlag(r.id, "late", ev.target.checked)} />
                           {e.late && (
                             <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="1" min="1" placeholder="分鐘"
                               disabled={dis} value={e.late_minutes} onChange={(ev) => updateEntry(r.id, { late_minutes: ev.target.value })} />
                           )}
                         </td>
-                        <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /></td>
+                        <td><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => toggleAnomalyFlag(r.id, "missed_punch", ev.target.checked)} /></td>
                         <td>
-                          <input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} />
+                          <input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => toggleAnomalyFlag(r.id, "leave", ev.target.checked)} />
                           {e.leave && (
                             <input className="ph-input" style={{ width: 64, marginTop: 6 }} type="number" step="0.5" min="0.5" placeholder="時數"
                               disabled={dis} value={e.leave_hours} onChange={(ev) => updateEntry(r.id, { leave_hours: ev.target.value })} />
                           )}
                         </td>
-                        <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => updateEntry(r.id, { overtime: ev.target.checked })} /></td>
+                        <td><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => toggleAnomalyFlag(r.id, "overtime", ev.target.checked)} /></td>
                         <td style={{ minWidth: 240 }}>
                           {e.overtime && (
                             <input className="ph-input" style={{ width: 90, marginBottom: 6 }} type="number" step="0.5" min="0.5" placeholder="加班時數"
@@ -2600,10 +2730,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                   <div key={r.id} style={{ padding: "12px 0", borderBottom: `1px solid ${T.line}` }}>
                     <RosterCell r={r} index={idx} />
                     <div style={{ display: "flex", gap: 14, margin: "10px 0", flexWrap: "wrap" }}>
-                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => updateEntry(r.id, { late: ev.target.checked })} /> 遲到</label>
-                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => updateEntry(r.id, { missed_punch: ev.target.checked })} /> 漏打卡</label>
-                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => updateEntry(r.id, { leave: ev.target.checked })} /> 請假</label>
-                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => updateEntry(r.id, { overtime: ev.target.checked })} /> 加班</label>
+                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => toggleAnomalyFlag(r.id, "late", ev.target.checked)} /> 遲到</label>
+                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => toggleAnomalyFlag(r.id, "missed_punch", ev.target.checked)} /> 漏打卡</label>
+                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.leave} onChange={(ev) => toggleAnomalyFlag(r.id, "leave", ev.target.checked)} /> 請假</label>
+                      <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.overtime} onChange={(ev) => toggleAnomalyFlag(r.id, "overtime", ev.target.checked)} /> 加班</label>
                     </div>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                       {e.late && (
@@ -2644,64 +2774,127 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
             <ReportSignatureDisplay report={report} toast={toast} onShowHistory={() => setSignatureHistory([])} />
           )}
 
+          {report?.id && roster.some((r) => ["pending", "needs_resubmit"].includes(entries[r.id]?.leave_proof_status)) && (
+            <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+              <strong style={{ fontSize: 13 }}>待補證明</strong>
+              <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>此區不受回報流程狀態限制，隨時可以補交或重新上傳，補交後不需要重新簽名。</p>
+              {roster.filter((r) => ["pending", "needs_resubmit"].includes(entries[r.id]?.leave_proof_status)).map((r) => {
+                const e = entries[r.id];
+                return (
+                  <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
+                    <span style={{ fontSize: 12.5 }}>
+                      {r.name}・{leaveTypeByCode[e.leave_type]?.label || e.leave_type}{" "}
+                      <span style={{ marginLeft: 8 }}>
+                        <Badge tone={e.leave_proof_status === "needs_resubmit" ? "red" : "brown"}>
+                          {e.leave_proof_status === "needs_resubmit" ? "需重補" : "待補證明"}
+                        </Badge>
+                      </span>
+                      {e.leave_proof_deadline && <span style={{ color: T.sub, marginLeft: 8 }}>期限 {e.leave_proof_deadline}</span>}
+                    </span>
+                    <button className="ph-btn small" onClick={() => setLeaveProofModal({ entry: e, employeeName: r.name })}>補交／查看</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
             <strong style={{ fontSize: 13 }}>相關附件</strong>
-            <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>漏打卡、請假或加班須上傳相關補單、加班單或證明；支援 PDF 與圖片，單檔上限 10MB。</p>
-
-            {roster.some((r) => entries[r.id]?.missed_punch) && (
-              <div style={{ marginBottom: 14 }}>
-                {roster.filter((r) => entries[r.id]?.missed_punch).map((r) => {
-                  const e = entries[r.id] || {};
-                  const dis = !canWrite;
-                  const missing = !e.missed_punch_reason?.trim();
-                  return (
-                    <div key={r.id} style={{ border: `1px solid ${T.line}`, borderRadius: 8, padding: 12, marginBottom: 10, background: T.bg }}>
-                      <strong style={{ fontSize: 12.5 }}>{r.name}　補打卡單</strong>
-                      <div style={{ marginTop: 8 }}>
-                        <textarea className="ph-input" rows={2} disabled={dis} placeholder="事由（如去客戶／廠商端出差，請填寫客戶／廠商名稱）"
-                          value={e.missed_punch_reason || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_reason: ev.target.value })}
-                          style={missing ? { borderColor: T.red } : undefined} />
-                      </div>
-                      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8 }}>
-                        <div>
-                          <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>錯誤時間</p>
-                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                            <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
-                              value={e.missed_punch_error_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_start: ev.target.value })} />
-                            <span style={{ color: T.sub, fontSize: 12 }}>至</span>
-                            <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
-                              value={e.missed_punch_error_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_end: ev.target.value })} />
-                          </div>
-                        </div>
-                        <div>
-                          <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>修正時間</p>
-                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                            <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
-                              value={e.missed_punch_fix_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_start: ev.target.value })} />
-                            <span style={{ color: T.sub, fontSize: 12 }}>至</span>
-                            <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
-                              value={e.missed_punch_fix_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_end: ev.target.value })} />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-                <p style={{ color: T.sub, fontSize: 11.5, margin: 0 }}>
-                  請於二日內申請補卡；若當月個人因忘記打卡事由累計達 3 次（含）以上，扣除全勤獎金。嚴禁代打卡，若有發生此情形連坐罰各記一支大過。
-                </p>
-              </div>
-            )}
+            <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>依員工與異常項目個別上傳；請假憑證可選擇立即上傳或待補證明。支援 PDF 與圖片，單檔上限 10MB。</p>
 
             {!report?.id && !canWrite ? (
               <p style={{ color: T.sub, fontSize: 12.5, background: T.bg, padding: "8px 12px", borderRadius: 6 }}>目前尚無日總表資料。</p>
             ) : (
               <>
-                {attachments.length === 0 && <p style={{ color: T.sub, fontSize: 12.5 }}>{hasAnomaly ? "目前沒有附件，簽核前必須上傳" : "目前沒有附件"}</p>}
-                <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
-                  {attachments.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
-                </ul>
-                {canWrite && <input type="file" accept="application/pdf,image/*" onChange={(e) => e.target.files[0] && uploadFile(e.target.files[0])} />}
+                {!hasAnomaly && <p style={{ color: T.sub, fontSize: 12.5 }}>目前沒有勾選任何異常項目，不需要附件。</p>}
+
+                {roster.filter((r) => { const e = entries[r.id] || {}; return e.late || e.missed_punch || e.leave || e.overtime; }).map((r) => {
+                  const e = entries[r.id] || {};
+                  const dis = !canWrite;
+                  const byType = (type) => attachments.filter((a) => a.employee_id === r.id && a.anomaly_type === type);
+                  return (
+                    <div key={r.id} style={{ border: `1px solid ${T.line}`, borderRadius: 8, padding: 12, marginBottom: 10, background: T.bg }}>
+                      <strong style={{ fontSize: 12.5 }}>{r.name}</strong>
+
+                      {e.late && (
+                        <AttachmentTypeBlock label="遲到" attachments={byType("late")} dis={dis}
+                          onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "late", file)} />
+                      )}
+
+                      {e.missed_punch && (
+                        <div style={{ marginTop: 8 }}>
+                          <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>補打卡單</p>
+                          <textarea className="ph-input" rows={2} disabled={dis} placeholder="事由（如去客戶／廠商端出差，請填寫客戶／廠商名稱）"
+                            value={e.missed_punch_reason || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_reason: ev.target.value })}
+                            style={!e.missed_punch_reason?.trim() ? { borderColor: T.red } : undefined} />
+                          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8 }}>
+                            <div>
+                              <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>錯誤時間</p>
+                              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                                  value={e.missed_punch_error_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_start: ev.target.value })} />
+                                <span style={{ color: T.sub, fontSize: 12 }}>至</span>
+                                <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                                  value={e.missed_punch_error_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_error_end: ev.target.value })} />
+                              </div>
+                            </div>
+                            <div>
+                              <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>修正時間</p>
+                              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                                  value={e.missed_punch_fix_start || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_start: ev.target.value })} />
+                                <span style={{ color: T.sub, fontSize: 12 }}>至</span>
+                                <input className="ph-input" style={{ width: 110 }} type="time" disabled={dis}
+                                  value={e.missed_punch_fix_end || ""} onChange={(ev) => updateEntry(r.id, { missed_punch_fix_end: ev.target.value })} />
+                              </div>
+                            </div>
+                          </div>
+                          <p style={{ color: T.sub, fontSize: 11, margin: "6px 0 0" }}>
+                            請於二日內申請補卡；若當月個人因忘記打卡事由累計達 3 次（含）以上，扣除全勤獎金。嚴禁代打卡，若有發生此情形連坐罰各記一支大過。
+                          </p>
+                          <AttachmentTypeBlock label="補打卡單附件" attachments={byType("missed_punch")} dis={dis}
+                            onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "missed_punch", file)} />
+                        </div>
+                      )}
+
+                      {e.leave && (
+                        <LeaveProofBlock
+                          e={e} leaveTypeSettings={leaveTypeSettings} leaveTypeByCode={leaveTypeByCode}
+                          attachments={byType("leave")} dis={dis} deadlineDays={deadlineDays}
+                          onChooseType={(type) => chooseLeaveType(r.id, type)}
+                          onUploadNow={(file) => uploadTypedAttachment(r.id, e.id || null, "leave", file)}
+                          onDefer={(reason) => (e.id ? postSubmitDeferLeaveProof(e.id, reason) : deferLeaveProofDraft(r.id, reason))}
+                        />
+                      )}
+
+                      {e.overtime && (
+                        <AttachmentTypeBlock label="加班單" attachments={byType("overtime")} dis={dis}
+                          onUpload={(file) => uploadTypedAttachment(r.id, e.id || null, "overtime", file)} />
+                      )}
+                    </div>
+                  );
+                })}
+
+                {(() => {
+                  const legacy = attachments.filter((a) => !a.employee_id);
+                  const orphaned = attachments.filter((a) => a.employee_id && !entries[a.employee_id]?.[a.anomaly_type]);
+                  if (!legacy.length && !orphaned.length) return null;
+                  return (
+                    <div style={{ marginTop: 8 }}>
+                      <strong style={{ fontSize: 12.5 }}>歷史附件</strong>
+                      <p style={{ color: T.sub, fontSize: 11.5, margin: "4px 0" }}>
+                        改版前未區分員工／異常項目的舊附件，以及已取消勾選異常項目後保留下來的附件，僅供查閱。
+                      </p>
+                      <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
+                        {legacy.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
+                        {orphaned.map((a) => (
+                          <li key={a.id}>{roster.find((r) => r.id === a.employee_id)?.name || "（已離職／不在名單）"}・{ANOMALY_TYPE_LABEL[a.anomaly_type] || a.anomaly_type}：{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })()}
+
                 {hasAnomaly && (
                   <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12.5 }}>
                     <input type="checkbox" checked={attachmentsComplete} onChange={(e) => setAttachmentsComplete(e.target.checked)} disabled={report?.status !== "submitted" || me.permissions?.daily_report !== "fill"} />
@@ -2744,7 +2937,141 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       {signatureHistory !== null && report && (
         <SignatureHistoryModal reportId={report.id} onClose={() => setSignatureHistory(null)} />
       )}
+      {leaveProofModal && (
+        <LeaveProofModal
+          entry={leaveProofModal.entry} employeeName={leaveProofModal.employeeName}
+          leaveTypeByCode={leaveTypeByCode} canUpload={canUploadProof} canReview={canManageAnomaly}
+          onUpload={(file) => uploadTypedAttachment(leaveProofModal.entry.employee_id, leaveProofModal.entry.id, "leave", file).then(() => setLeaveProofModal(null))}
+          onDefer={(reason) => postSubmitDeferLeaveProof(leaveProofModal.entry.id, reason).then(() => setLeaveProofModal(null))}
+          onReview={(decision, note) => reviewLeaveProof(leaveProofModal.entry.id, decision, note).then(() => setLeaveProofModal(null))}
+          onClose={() => setLeaveProofModal(null)}
+        />
+      )}
     </div>
+  );
+}
+
+function AttachmentTypeBlock({ label, attachments, dis, onUpload }) {
+  return (
+    <div style={{ marginTop: 8 }}>
+      <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>{label}</p>
+      {attachments.length === 0 && <p style={{ color: T.sub, fontSize: 12, margin: "0 0 4px" }}>尚無附件</p>}
+      {attachments.length > 0 && (
+        <ul style={{ fontSize: 12, paddingLeft: 18, margin: "0 0 6px" }}>
+          {attachments.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
+        </ul>
+      )}
+      {!dis && <input type="file" accept="application/pdf,image/*" onChange={(ev) => ev.target.files[0] && onUpload(ev.target.files[0])} />}
+    </div>
+  );
+}
+
+function DeferInline({ dis, onDefer }) {
+  const [reason, setReason] = useState("");
+  if (dis) return null;
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
+      <input className="ph-input" style={{ width: 200 }} placeholder="待補原因" value={reason} onChange={(e) => setReason(e.target.value)} />
+      <button className="ph-btn small" onClick={() => onDefer(reason)}>標記待補證明</button>
+    </div>
+  );
+}
+
+// 請假憑證區：requires_proof 依 leave_type_settings 動態判斷，不寫死；待補/上傳都不要求
+// 重新簽名（clearSignatureOnChange 不會被這裡的動作觸發）
+function LeaveProofBlock({ e, leaveTypeSettings, leaveTypeByCode, attachments, dis, deadlineDays, onChooseType, onUploadNow, onDefer }) {
+  const setting = leaveTypeByCode[e.leave_type];
+  const requiresProof = !!setting?.requires_proof;
+  const status = e.leave_proof_status;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>請假假別</p>
+      <select className="ph-input" style={{ width: 220 }} disabled={dis} value={e.leave_type || ""} onChange={(ev) => onChooseType(ev.target.value)}>
+        <option value="">請選擇假別</option>
+        {leaveTypeSettings.map((t) => <option key={t.code} value={t.code}>{t.label}</option>)}
+      </select>
+      {setting?.proof_note && <p style={{ fontSize: 11, color: T.sub, margin: "4px 0 0" }}>{setting.proof_note}</p>}
+
+      {requiresProof ? (
+        <div style={{ marginTop: 8, padding: 10, background: "#fff", borderRadius: 6, border: `1px solid ${T.line}` }}>
+          {status === "confirmed" && <Badge tone="green">憑證已確認</Badge>}
+          {status === "pending_review" && <Badge tone="brown">憑證待審核</Badge>}
+          {status === "needs_resubmit" && (
+            <>
+              <Badge tone="red">憑證需重補</Badge>
+              {e.leave_proof_review_note && <p style={{ fontSize: 11.5, color: T.sub, margin: "4px 0" }}>審核意見：{e.leave_proof_review_note}</p>}
+            </>
+          )}
+          {status === "pending" && (
+            <>
+              <Badge tone="brown">待補證明</Badge>
+              <p style={{ fontSize: 11.5, color: T.sub, margin: "4px 0" }}>
+                原因：{e.leave_proof_deferred_reason || "—"}；期限：{e.leave_proof_deadline || "未設定"}
+              </p>
+            </>
+          )}
+          {!status && <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 6px" }}>此假別須提供證明，請選擇立即上傳或先標記待補。</p>}
+
+          {attachments.length > 0 && (
+            <ul style={{ fontSize: 12, paddingLeft: 18, margin: "6px 0" }}>
+              {attachments.map((a) => <li key={a.id}>{a.file_name}（{(a.file_size / 1024).toFixed(0)}KB）</li>)}
+            </ul>
+          )}
+
+          {["needs_resubmit", null, undefined].includes(status) && !dis && (
+            <>
+              <input type="file" accept="application/pdf,image/*" onChange={(ev) => ev.target.files[0] && onUploadNow(ev.target.files[0])} />
+              {status !== "needs_resubmit" && <DeferInline dis={dis} onDefer={onDefer} />}
+            </>
+          )}
+        </div>
+      ) : (
+        <AttachmentTypeBlock label="請假相關附件（選填）" attachments={attachments} dis={dis} onUpload={onUploadNow} />
+      )}
+    </div>
+  );
+}
+
+// 補件/審核共用 modal：報告明細的「待補證明」入口與管理者跨日異常清單都用這個，
+// 不因為要補件/審核就得重新打開整份回報或重新簽名
+function LeaveProofModal({ entry, employeeName, leaveTypeByCode, canUpload, canReview, onUpload, onDefer, onReview, onClose }) {
+  const [note, setNote] = useState("");
+  const setting = leaveTypeByCode[entry.leave_type];
+  return (
+    <Modal title={`${employeeName}・${setting?.label || entry.leave_type}憑證`} onClose={onClose}>
+      <p style={{ fontSize: 12.5, color: T.sub }}>{setting?.proof_note}</p>
+      <p style={{ fontSize: 12.5 }}>
+        目前狀態：{{ pending: "待補證明", pending_review: "憑證待審核", confirmed: "憑證已確認", needs_resubmit: "憑證需重補" }[entry.leave_proof_status] || "—"}
+      </p>
+      {entry.leave_proof_deferred_reason && <p style={{ fontSize: 12, color: T.sub }}>待補原因：{entry.leave_proof_deferred_reason}</p>}
+      {entry.leave_proof_deadline && <p style={{ fontSize: 12, color: T.sub }}>期限：{entry.leave_proof_deadline}</p>}
+      {entry.leave_proof_review_note && <p style={{ fontSize: 12, color: T.sub }}>審核意見：{entry.leave_proof_review_note}</p>}
+
+      {canUpload && ["pending", "needs_resubmit"].includes(entry.leave_proof_status) && (
+        <div style={{ marginTop: 10 }}>
+          <strong style={{ fontSize: 12.5 }}>補交憑證</strong>
+          <div style={{ marginTop: 6 }}>
+            <input type="file" accept="application/pdf,image/*" onChange={(ev) => ev.target.files[0] && onUpload(ev.target.files[0])} />
+          </div>
+        </div>
+      )}
+
+      {canReview && entry.leave_proof_status === "pending_review" && (
+        <div style={{ marginTop: 14 }}>
+          <strong style={{ fontSize: 12.5 }}>審核</strong>
+          <p style={{ fontSize: 11.5, color: T.sub, margin: "4px 0" }}>審核只會改變憑證狀態，不會改變請假時數、假別或薪資試算。</p>
+          <textarea className="ph-input" rows={2} placeholder="審核意見（選填）" value={note} onChange={(ev) => setNote(ev.target.value)} />
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button className="ph-btn primary" onClick={() => onReview("confirm", note)}>確認憑證</button>
+            <button className="ph-btn danger" onClick={() => onReview("reject", note)}>標記需重補</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+        <button className="ph-btn small" onClick={onClose}>關閉</button>
+      </div>
+    </Modal>
   );
 }
 
@@ -4868,17 +5195,51 @@ function PermissionsPage({ me, stores, toast }) {
   const [pinErrs, setPinErrs] = useState({}); // store_id -> error message
   const [pwInputs, setPwInputs] = useState({}); // employee_id -> password string
   const [pwErrs, setPwErrs] = useState({}); // employee_id -> error message
+  const [leaveTypeSettings, setLeaveTypeSettings] = useState([]);
+  const [proofNoteDrafts, setProofNoteDrafts] = useState({}); // code -> 編輯中的說明文字
+  const [deadlineInput, setDeadlineInput] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data, error } = await sb.from("employees").select("id,name,access_tier,store_id,active,email,is_shared_pin_account,is_non_employee_account")
-      .order("active", { ascending: false }).order("name");
-    if (error) console.error("permissions employees", error);
-    const all = data || [];
+    const [empRes, leaveTypeRes, deadlineRes] = await Promise.all([
+      sb.from("employees").select("id,name,access_tier,store_id,active,email,is_shared_pin_account,is_non_employee_account")
+        .order("active", { ascending: false }).order("name"),
+      sb.from("leave_type_settings").select("*").order("sort_order"),
+      sb.from("app_settings").select("value").eq("key", "leave_proof_deadline_days").maybeSingle(),
+    ]);
+    if (empRes.error) console.error("permissions employees", empRes.error);
+    const all = empRes.data || [];
     setHqRows(all.filter((r) => r.access_tier === "super_admin" || r.access_tier === "admin_specialist"));
     setPinAccounts(all.filter((r) => r.is_shared_pin_account));
+    setLeaveTypeSettings(leaveTypeRes.data || []);
+    const dv = deadlineRes.data?.value;
+    setDeadlineInput(dv === null || dv === undefined ? "" : String(dv));
     setLoading(false);
   }, []);
+
+  async function toggleRequiresProof(code, val) {
+    const { error } = await sb.from("leave_type_settings").update({ requires_proof: val }).eq("code", code);
+    if (error) { toast("更新失敗：" + error.message); return; }
+    load();
+  }
+
+  async function saveProofNote(code) {
+    const note = proofNoteDrafts[code] ?? "";
+    const { error } = await sb.from("leave_type_settings").update({ proof_note: note || null }).eq("code", code);
+    if (error) { toast("更新失敗：" + error.message); return; }
+    toast("已儲存說明文字");
+    load();
+  }
+
+  async function saveDeadline() {
+    const trimmed = deadlineInput.trim();
+    const n = trimmed === "" ? null : Number(trimmed);
+    if (trimmed !== "" && (!Number.isInteger(n) || n < 0)) { toast("補交期限須為 0 以上整數，或留白代表未設定"); return; }
+    const { error } = await sb.from("app_settings").update({ value: n, updated_by: me.id, updated_at: new Date().toISOString() }).eq("key", "leave_proof_deadline_days");
+    if (error) { toast("更新失敗：" + error.message); return; }
+    toast("已儲存補交期限設定");
+    load();
+  }
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -5012,6 +5373,46 @@ function PermissionsPage({ me, stores, toast }) {
                 })}
               </tbody>
             </table>
+          </div>
+
+          <h3 className="ph-serif" style={{ fontSize: 16, margin: "24px 0 10px" }}>假別憑證設定</h3>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: "0 0 10px" }}>
+            設定「每日異常回報」請假憑證流程要用到的規則；這不是法規強制清單，是公司自行決定的補件規則，可依實際需要調整。
+          </p>
+          <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginBottom: 14 }}>
+            <table className="ph-table">
+              <thead><tr><th>假別</th><th>需要憑證</th><th>說明文字</th><th></th></tr></thead>
+              <tbody>
+                {leaveTypeSettings.map((t) => (
+                  <tr key={t.code}>
+                    <td>{t.label}</td>
+                    <td>
+                      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5 }}>
+                        <input type="checkbox" checked={t.requires_proof} onChange={(e) => toggleRequiresProof(t.code, e.target.checked)} />
+                        {t.requires_proof ? "需要" : "不需要"}
+                      </label>
+                    </td>
+                    <td>
+                      <input className="ph-input" style={{ width: 280 }} placeholder="給填報人員看的說明文字"
+                        value={proofNoteDrafts[t.code] ?? (t.proof_note || "")}
+                        onChange={(e) => setProofNoteDrafts((p) => ({ ...p, [t.code]: e.target.value }))} />
+                    </td>
+                    <td><button className="ph-btn small" onClick={() => saveProofNote(t.code)}>儲存</button></td>
+                  </tr>
+                ))}
+                {leaveTypeSettings.length === 0 && <tr><td colSpan={4} style={{ color: T.sub, textAlign: "center" }}>尚無假別設定</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <div className="ph-card" style={{ padding: 16 }}>
+            <label style={{ fontSize: 12.5, display: "block", marginBottom: 8 }}>
+              請假證明補交期限（全公司，天；留白＝未設定期限）
+            </label>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input className="ph-input" style={{ width: 100 }} type="number" min="0" step="1" placeholder="未設定"
+                value={deadlineInput} onChange={(e) => setDeadlineInput(e.target.value)} />
+              <button className="ph-btn small" onClick={saveDeadline}>儲存</button>
+            </div>
           </div>
         </>
       )}
