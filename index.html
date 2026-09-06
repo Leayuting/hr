@@ -251,6 +251,29 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
     empAdjustments: confirmedAdjustments, pendingAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
   };
 }
+// 套用人資/管理者對「加班費」「全勤獎金」的人工覆寫，取代（不是疊加）系統試算值；
+// 沒有覆寫時 effective* 直接等於系統值（全勤獎金已先扣掉普通傷病假比例，因為畫面上的
+// 「最終全勤獎金」本來就該是扣除後金額，比例扣除明細仍保留在 bonusProrateDeduction
+// 供參考），PayrollPage／PayslipModal／CSV／鎖定快照都改讀 effective* 欄位
+function applyManualOverrides(base, overrides) {
+  const bonusOverride = overrides.find((o) => o.subject === "bonus") || null;
+  const overtimeOverride = overrides.find((o) => o.subject === "overtime") || null;
+  const effectiveOvertimePay = overtimeOverride && overtimeOverride.manual_value !== null ? Number(overtimeOverride.manual_value) : base.overtimePay;
+  const systemFullAttendanceBonus = base.fullAttendanceBonus - base.bonusProrateDeduction;
+  const bonusOverridden = !!(bonusOverride && bonusOverride.manual_value !== null);
+  const effectiveFullAttendanceBonus = bonusOverridden ? Number(bonusOverride.manual_value) : systemFullAttendanceBonus;
+  const effectiveBonusProrateDeduction = bonusOverridden ? 0 : base.bonusProrateDeduction;
+  const effectiveGrossPay = base.basePay + base.mealAllowance + base.positionAllowance + effectiveOvertimePay + effectiveFullAttendanceBonus + base.adjustmentsTotal;
+  const effectiveTaxableIncome = effectiveGrossPay - base.mealAllowance - (base.adjustmentsTotal - base.empAdjustments.filter((a) => a.taxable).reduce((s, a) => s + Number(a.amount), 0));
+  const effectiveTotalDeduction = base.attendanceDeduction + effectiveBonusProrateDeduction + base.laborInsuranceFee + base.healthInsuranceFee + base.incomeTax;
+  const effectiveTotal = effectiveGrossPay - effectiveTotalDeduction;
+  return {
+    ...base,
+    systemFullAttendanceBonus, bonusOverride, overtimeOverride,
+    effectiveOvertimePay, effectiveFullAttendanceBonus, effectiveBonusProrateDeduction,
+    effectiveGrossPay, effectiveTaxableIncome, effectiveTotalDeduction, effectiveTotal,
+  };
+}
 async function logAudit(actorLabel, action, target, detail = "") {
   try {
     await sb.from("audit_logs").insert({ actor_label: actorLabel, action, target, detail });
@@ -2919,8 +2942,8 @@ function PayslipModal({ store, ym, periodLabel, row, onClose }) {
               <PayslipRow label="伙食費" value={row.mealAllowance} />
               <PayslipRow label="職務津貼" value={row.positionAllowance} />
               <PayslipSection title="薪資科目加項" />
-              <PayslipRow label="加班費" value={row.overtimePay} />
-              <PayslipRow label="全勤獎金" value={row.fullAttendanceBonus} />
+              <PayslipRow label={"加班費" + (row.overtimeOverride?.manual_value != null ? "（人工調整，系統試算 NT$ " + money(row.overtimePay) + "）" : "")} value={row.effectiveOvertimePay} />
+              <PayslipRow label={"全勤獎金" + (row.bonusOverride?.manual_value != null ? "（人工調整，系統試算 NT$ " + money(row.systemFullAttendanceBonus) + "）" : "")} value={row.effectiveFullAttendanceBonus} />
               {row.empAdjustments.filter((a) => Number(a.amount) > 0).map((a) => (
                 <PayslipRow key={a.id} label={a.label + (a.taxable ? "" : "（免稅）")} value={a.amount} />
               ))}
@@ -2930,15 +2953,19 @@ function PayslipModal({ store, ym, periodLabel, row, onClose }) {
               ))}
               {row.personalLeaveDeduction > 0 && <PayslipRow label="事假扣款（不給工資）" value={row.personalLeaveDeduction} />}
               {row.sickLeaveDeduction > 0 && <PayslipRow label="普通傷病假扣款（工資折半）" value={row.sickLeaveDeduction} />}
-              {row.bonusProrateDeduction > 0 && <PayslipRow label="全勤獎金比例扣除（普通傷病假）" value={row.bonusProrateDeduction} />}
+              {row.bonusProrateDeduction > 0 && (
+                <PayslipRow
+                  label={"全勤獎金比例扣除（普通傷病假）" + (row.bonusOverride?.manual_value != null ? `－原系統扣除 NT$ ${money(row.bonusProrateDeduction)}，人工採用全勤獎金後不再扣除` : "")}
+                  value={row.effectiveBonusProrateDeduction} />
+              )}
               <PayslipRow label="勞保費" value={row.laborInsuranceFee} />
               <PayslipRow label="健保費" value={row.healthInsuranceFee} />
               <PayslipRow label="所得稅" value={row.incomeTax} />
               <PayslipSection title="薪資總計" />
-              <PayslipRow label="應稅所得" value={row.taxableIncome} />
-              <PayslipRow label="應發總額" value={row.grossPay} />
-              <PayslipRow label="應減總額" value={row.totalDeduction} />
-              <PayslipRow label="實發金額" value={row.total} strong />
+              <PayslipRow label="應稅所得" value={row.effectiveTaxableIncome} />
+              <PayslipRow label="應發總額" value={row.effectiveGrossPay} />
+              <PayslipRow label="應減總額" value={row.effectiveTotalDeduction} />
+              <PayslipRow label="實發金額" value={row.effectiveTotal} strong />
             </tbody>
           </table>
         </div>
@@ -2954,9 +2981,13 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   const [requests, setRequests] = useState([]);
   const [runs, setRuns] = useState([]);
   const [adjustments, setAdjustments] = useState([]);
+  const [overrides, setOverrides] = useState([]);
   const [lockBusy, setLockBusy] = useState(false);
   const [payslipRow, setPayslipRow] = useState(null);
   const [adjustingEmp, setAdjustingEmp] = useState(null);
+  const [overrideEditing, setOverrideEditing] = useState(null); // { emp, subject }
+  const [historyEmp, setHistoryEmp] = useState(null); // { emp, subject }
+  const [unlockRun, setUnlockRun] = useState(null);
   const [loading, setLoading] = useState(true);
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
 
@@ -2965,19 +2996,21 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
     setLoading(true);
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
-    const [empRes, shiftRes, reqRes, runRes, adjRes] = await Promise.all([
+    const [empRes, shiftRes, reqRes, runRes, adjRes, ovrRes] = await Promise.all([
       sb.from("employees").select("*").in("store_id", scopeStoreIds).eq("active", true).eq("is_shared_pin_account", false).order("name"),
       sb.from("shifts").select("*").in("store_id", scopeStoreIds).gte("work_date", from).lte("work_date", to),
       sb.from("requests").select("*").in("store_id", scopeStoreIds).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
       sb.from("payroll_runs").select("*").in("store_id", scopeStoreIds).eq("year_month", ym),
       sb.from("payroll_adjustments").select("*").in("store_id", scopeStoreIds).eq("year_month", ym),
+      sb.from("payroll_manual_overrides").select("*").in("store_id", scopeStoreIds).eq("year_month", ym),
     ]);
-    [empRes, shiftRes, reqRes, runRes, adjRes].forEach((r) => { if (r.error) console.error("payroll load", r.error); });
+    [empRes, shiftRes, reqRes, runRes, adjRes, ovrRes].forEach((r) => { if (r.error) console.error("payroll load", r.error); });
     setRoster(empRes.data || []);
     setShifts(shiftRes.data || []);
     setRequests(reqRes.data || []);
     setRuns(runRes.data || []);
     setAdjustments(adjRes.data || []);
+    setOverrides(ovrRes.data || []);
     setLoading(false);
   }, [scopeStoreIds, ym]);
 
@@ -2986,43 +3019,62 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
     const ch = sb.channel("payroll_sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "payroll_runs" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "payroll_adjustments" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "payroll_manual_overrides" }, load)
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
 
   const rows = useMemo(() => {
-    return roster.map((emp) => computePayrollRow(
-      emp,
-      shifts.filter((s) => s.employee_id === emp.id),
-      requests.filter((r) => r.employee_id === emp.id),
-      adjustments.filter((a) => a.employee_id === emp.id)
-    ));
-  }, [roster, shifts, requests, adjustments]);
+    return roster.map((emp) => {
+      const run = runs.find((r) => r.store_id === emp.store_id);
+      if (run?.status === "locked" && run.snapshot?.rows) {
+        const snap = run.snapshot.rows.find((r) => r.empId === emp.id);
+        if (snap) return { ...snap, emp, fromSnapshot: true };
+      }
+      const base = computePayrollRow(
+        emp,
+        shifts.filter((s) => s.employee_id === emp.id),
+        requests.filter((r) => r.employee_id === emp.id),
+        adjustments.filter((a) => a.employee_id === emp.id)
+      );
+      return applyManualOverrides(base, overrides.filter((o) => o.employee_id === emp.id));
+    });
+  }, [roster, shifts, requests, adjustments, overrides, runs]);
 
   const activeRun = activeStoreId ? runs.find((r) => r.store_id === activeStoreId) : null;
   const locked = activeRun?.status === "locked";
 
-  async function toggleLock() {
-    if (lockBusy) return;
-    if (!activeStoreId) { toast("請先在上方選擇單一門市才能鎖定薪資"); return; }
+  function buildSnapshotRow(r) {
+    // 快照存 applyManualOverrides() 算出來的完整物件（減掉不能序列化的 emp 物件本身），
+    // 之後讀快照跟即時試算的欄位形狀完全一致，PayslipModal／CSV 不用分兩套邏輯處理
+    const { emp, ...rest } = r;
+    return { empId: emp.id, ...rest };
+  }
+
+  async function doLock() {
+    if (lockBusy || !activeStoreId) return;
     setLockBusy(true);
     try {
-      if (locked) {
-        const { error } = await sb.from("payroll_runs").update({ status: "draft", locked_by: null, locked_at: null }).eq("id", activeRun.id);
-        if (error) { toast("解鎖失敗：" + error.message); return; }
-        await logAudit(me.name, "unlock_payroll", `${activeStoreId}:${ym}`);
-        toast("已解鎖");
-      } else {
-        if (!activeRun) {
-          const { error } = await sb.from("payroll_runs").insert({ store_id: activeStoreId, year_month: ym, status: "locked", locked_by: me.id, locked_at: new Date().toISOString() });
-          if (error) { toast("鎖定失敗：" + error.message); return; }
-        } else {
-          const { error } = await sb.from("payroll_runs").update({ status: "locked", locked_by: me.id, locked_at: new Date().toISOString() }).eq("id", activeRun.id);
-          if (error) { toast("鎖定失敗：" + error.message); return; }
-        }
-        await logAudit(me.name, "lock_payroll", `${activeStoreId}:${ym}`);
-        toast("已鎖定該月薪資");
-      }
+      const snapshotRows = rows.filter((r) => r.emp.store_id === activeStoreId).map(buildSnapshotRow);
+      const { error } = await sb.rpc("lock_payroll_run", {
+        p_store_id: activeStoreId, p_year_month: ym, p_snapshot: { locked_at: new Date().toISOString(), rows: snapshotRows },
+      });
+      if (error) { toast("鎖定失敗：" + error.message); return; }
+      toast("已鎖定該月薪資");
+      load();
+    } finally {
+      setLockBusy(false);
+    }
+  }
+
+  async function doUnlock(reason) {
+    if (lockBusy || !activeRun) return;
+    setLockBusy(true);
+    try {
+      const { error } = await sb.rpc("unlock_payroll_run", { p_run_id: activeRun.id, p_reason: reason });
+      if (error) { toast("解鎖失敗：" + error.message); return; }
+      toast("已解鎖");
+      setUnlockRun(null);
       load();
     } finally {
       setLockBusy(false);
@@ -3033,11 +3085,11 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
     const head = ["姓名", "到職日", "計薪方式", "基本薪資", "伙食費", "職務津貼", "加班費", "全勤獎金", "本月調整項", "應發總額", "請假扣款", "全勤獎金比例扣除", "勞保費", "健保費", "所得稅", "應稅所得", "應減總額", "實發金額"];
     const lines = [head.join(",")].concat(rows.map((r) => [
       r.emp.name, r.emp.hire_date || "", r.emp.employment_type === "full_time" ? "全職" : "兼職",
-      Math.round(r.basePay), Math.round(r.mealAllowance), Math.round(r.positionAllowance), Math.round(r.overtimePay), Math.round(r.fullAttendanceBonus),
+      Math.round(r.basePay), Math.round(r.mealAllowance), Math.round(r.positionAllowance), Math.round(r.effectiveOvertimePay), Math.round(r.effectiveFullAttendanceBonus),
       `"${Math.round(r.adjustmentsTotal)}${r.empAdjustments.length ? ` (${r.empAdjustments.map((a) => a.label).join("／")})` : ""}"`,
-      Math.round(r.grossPay),
-      Math.round(r.attendanceDeduction), Math.round(r.bonusProrateDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.taxableIncome), Math.round(r.totalDeduction),
-      Math.round(r.total),
+      Math.round(r.effectiveGrossPay),
+      Math.round(r.attendanceDeduction), Math.round(r.effectiveBonusProrateDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.effectiveTaxableIncome), Math.round(r.effectiveTotalDeduction),
+      Math.round(r.effectiveTotal),
     ].join(",")));
     const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
     const a = document.createElement("a");
@@ -3064,7 +3116,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 16, marginTop: 20 }}>
             {stores.map((s) => {
               const storeRows = rows.filter((r) => r.emp.store_id === s.id);
-              const storeTotal = storeRows.reduce((sum, r) => sum + r.total, 0);
+              const storeTotal = storeRows.reduce((sum, r) => sum + r.effectiveTotal, 0);
               const run = runs.find((rr) => rr.store_id === s.id);
               const storeLocked = run?.status === "locked";
               return (
@@ -3095,6 +3147,26 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
   const days = monthDays(ym);
   const periodLabel = `${ym}-01 ~ ${ym}-${pad2(days)}`;
 
+  function renderOverridableCell(r, subject) {
+    const override = subject === "bonus" ? r.bonusOverride : r.overtimeOverride;
+    const effectiveValue = subject === "bonus" ? r.effectiveFullAttendanceBonus : r.effectiveOvertimePay;
+    const systemValue = subject === "bonus" ? r.systemFullAttendanceBonus : r.overtimePay;
+    const isOverridden = !!(override && override.manual_value !== null);
+    const isStale = !!(override && Math.round(Number(override.system_value)) !== Math.round(systemValue));
+    const rowLocked = r.fromSnapshot || runs.find((x) => x.store_id === r.emp.store_id)?.status === "locked";
+    const canEdit = me.permissions?.payroll === "edit" && !rowLocked;
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+        <span>{money(effectiveValue)}</span>
+        {isOverridden && <Badge tone="brown">人工</Badge>}
+        {isStale && <Badge tone="yellow">來源已更新</Badge>}
+        {canEdit && (
+          <button className="ph-btn small" style={{ padding: "2px 6px" }} title="調整" onClick={() => setOverrideEditing({ emp: r.emp, subject, row: r })}>✎</button>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
@@ -3102,7 +3174,9 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
         <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
         <button className="ph-btn" onClick={exportCsv}>匯出 CSV</button>
         {me.access_tier === "super_admin" && (
-          <button className="ph-btn primary" disabled={!activeStoreId || lockBusy} onClick={toggleLock} title={!activeStoreId ? "請先在上方選擇單一門市" : undefined}>
+          <button className="ph-btn primary" disabled={!activeStoreId || lockBusy}
+            onClick={() => locked ? setUnlockRun(activeRun) : doLock()}
+            title={!activeStoreId ? "請先在上方選擇單一門市" : undefined}>
             {lockBusy ? "處理中…" : locked ? "解鎖" : "鎖定本月"}
           </button>
         )}
@@ -3144,8 +3218,8 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                   <td>{money(r.basePay)}</td>
                   <td>{money(r.mealAllowance)}</td>
                   <td>{money(r.positionAllowance)}</td>
-                  <td>{money(r.overtimePay)}</td>
-                  <td>{money(r.fullAttendanceBonus)}</td>
+                  <td>{renderOverridableCell(r, "overtime")}</td>
+                  <td>{renderOverridableCell(r, "bonus")}</td>
                   <td>
                     {me.permissions?.payroll === "edit" ? (
                       <button className="ph-btn small" style={r.adjustmentsTotal !== 0 || r.pendingAdjustments.length ? { borderColor: T.brown, color: T.brown } : undefined} onClick={() => setAdjustingEmp(r.emp)}>
@@ -3157,14 +3231,14 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                     )}
                   </td>
                   <td>{money(r.attendanceDeduction)}</td>
-                  <td>{money(r.bonusProrateDeduction)}</td>
+                  <td>{money(r.effectiveBonusProrateDeduction)}</td>
                   <td>{money(r.laborInsuranceFee)}</td>
                   <td>{money(r.healthInsuranceFee)}</td>
                   <td>{money(r.incomeTax)}</td>
-                  <td>{money(r.taxableIncome)}</td>
-                  <td>{money(r.grossPay)}</td>
-                  <td>{money(r.totalDeduction)}</td>
-                  <td style={{ fontWeight: 600 }}>NT$ {money(r.total)}</td>
+                  <td>{money(r.effectiveTaxableIncome)}</td>
+                  <td>{money(r.effectiveGrossPay)}</td>
+                  <td>{money(r.effectiveTotalDeduction)}</td>
+                  <td style={{ fontWeight: 600 }}>NT$ {money(r.effectiveTotal)}</td>
                   <td><button className="ph-btn small" onClick={() => setPayslipRow(r)}>薪資明細 →</button></td>
                 </tr>
               ))}
@@ -3181,7 +3255,207 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
           items={adjustments.filter((a) => a.employee_id === adjustingEmp.id)}
           onClose={() => setAdjustingEmp(null)} toast={toast} />
       )}
+      {overrideEditing && (
+        <PayrollOverrideModal me={me} emp={overrideEditing.emp} ym={ym} subject={overrideEditing.subject}
+          row={overrideEditing.row} onClose={() => setOverrideEditing(null)}
+          onSaved={() => { setOverrideEditing(null); load(); }} toast={toast} />
+      )}
+      {unlockRun && (
+        <UnlockPayrollModal storeName={storeById[activeStoreId]?.name} busy={lockBusy}
+          onClose={() => setUnlockRun(null)} onConfirm={doUnlock} />
+      )}
     </div>
+  );
+}
+
+function UnlockPayrollModal({ storeName, busy, onClose, onConfirm }) {
+  const [reason, setReason] = useState("");
+  return (
+    <Modal title={`解鎖 ${storeName || ""} 薪資`} onClose={onClose}>
+      <p style={{ fontSize: 12.5, color: T.sub, marginTop: -6 }}>解鎖後才能繼續調整本月薪資，請填寫解鎖原因（會記錄於稽核紀錄）。</p>
+      <Field label="解鎖原因"><textarea className="ph-input" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+        <button className="ph-btn" onClick={onClose} disabled={busy}>取消</button>
+        <button className="ph-btn primary" disabled={busy || !reason.trim()} onClick={() => onConfirm(reason.trim())}>{busy ? "處理中…" : "確認解鎖"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+const PAYROLL_SUBJECT_LABEL = { bonus: "全勤獎金", overtime: "加班費" };
+
+// 加班費／全勤獎金共用的人工覆寫視窗。row 是 PayrollPage 那一列 applyManualOverrides()
+// 算好的完整物件（含原始 computePayrollRow 欄位＋目前的 effective/override 欄位），
+// 預覽全部重用 applyManualOverrides() 本身，不再另外實作一次公式
+function PayrollOverrideModal({ me, emp, ym, subject, row, onClose, onSaved, toast }) {
+  const override = subject === "bonus" ? row.bonusOverride : row.overtimeOverride;
+  const systemValue = subject === "bonus" ? row.systemFullAttendanceBonus : row.overtimePay;
+  const [draft, setDraft] = useState(String(Math.round(override?.manual_value ?? systemValue)));
+  const [reason, setReason] = useState(override?.reason || "");
+  const [busy, setBusy] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [related, setRelated] = useState([]);
+
+  useEffect(() => {
+    const days = monthDays(ym);
+    const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
+    if (subject === "overtime") {
+      sb.from("requests").select("*").eq("employee_id", emp.id).eq("type", "overtime").eq("status", "approved")
+        .gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`)
+        .then(({ data }) => setRelated(data || []));
+    } else {
+      sb.from("daily_reports").select("id,report_date").eq("store_id", emp.store_id).gte("report_date", from).lte("report_date", to)
+        .then(async ({ data: reports }) => {
+          const ids = (reports || []).map((r) => r.id);
+          if (!ids.length) { setRelated([]); return; }
+          const { data: entries } = await sb.from("daily_report_entries").select("*").eq("employee_id", emp.id).in("daily_report_id", ids).or("late.eq.true,missed_punch.eq.true");
+          const dateById = Object.fromEntries((reports || []).map((r) => [r.id, r.report_date]));
+          setRelated((entries || []).map((e) => ({ ...e, report_date: dateById[e.daily_report_id] })));
+        });
+    }
+  }, [emp.id, emp.store_id, ym, subject]);
+
+  function loadHistory() {
+    if (!override) { setShowHistory(true); return; }
+    sb.from("payroll_manual_override_history").select("*").eq("override_id", override.id).order("created_at", { ascending: false })
+      .then(({ data }) => { setHistory(data || []); setShowHistory(true); });
+  }
+
+  const draftValue = draft.trim() === "" ? null : Number(draft);
+  const isValidDraft = draft.trim() !== "" && Number.isFinite(draftValue);
+  const previewOverrides = [
+    { subject: "bonus", manual_value: subject === "bonus" ? (isValidDraft ? draftValue : null) : (row.bonusOverride?.manual_value ?? null) },
+    { subject: "overtime", manual_value: subject === "overtime" ? (isValidDraft ? draftValue : null) : (row.overtimeOverride?.manual_value ?? null) },
+  ];
+  const preview = applyManualOverrides(row, previewOverrides);
+  const currentValue = subject === "bonus" ? row.effectiveFullAttendanceBonus : row.effectiveOvertimePay;
+
+  async function save() {
+    if (!isValidDraft) { toast("請輸入有效的金額"); return; }
+    if (!reason.trim()) { toast("請填寫調整原因"); return; }
+    setBusy(true);
+    try {
+      const { error } = await sb.rpc("set_payroll_manual_override", {
+        p_employee_id: emp.id, p_year_month: ym, p_subject: subject, p_manual_value: draftValue,
+        p_reason: reason.trim(), p_system_value: systemValue, p_expected_updated_at: override?.updated_at || null,
+      });
+      if (error) { toast((error.message.includes("CONFLICT") ? "" : "調整失敗：") + error.message); return; }
+      toast(`已更新${PAYROLL_SUBJECT_LABEL[subject]}`);
+      onSaved();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revert() {
+    if (!window.confirm(`確定要恢復系統試算金額（NT$ ${money(systemValue)}）嗎？`)) return;
+    setBusy(true);
+    try {
+      const { error } = await sb.rpc("set_payroll_manual_override", {
+        p_employee_id: emp.id, p_year_month: ym, p_subject: subject, p_manual_value: null,
+        p_reason: reason.trim() || null, p_system_value: systemValue, p_expected_updated_at: override?.updated_at || null,
+      });
+      if (error) { toast((error.message.includes("CONFLICT") ? "" : "恢復失敗：") + error.message); return; }
+      toast("已恢復系統試算");
+      onSaved();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function markReviewed() {
+    setBusy(true);
+    try {
+      const { error } = await sb.rpc("review_payroll_subject", {
+        p_employee_id: emp.id, p_year_month: ym, p_subject: subject, p_system_value: systemValue,
+        p_expected_updated_at: override?.updated_at || null,
+      });
+      if (error) { toast((error.message.includes("CONFLICT") ? "" : "複核失敗：") + error.message); return; }
+      toast("已標記複核");
+      onSaved();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const isOverridden = !!(override && override.manual_value !== null);
+  const isStale = !!(override && Math.round(Number(override.system_value)) !== Math.round(systemValue));
+
+  return (
+    <Modal title={`調整${PAYROLL_SUBJECT_LABEL[subject]}・${emp.name}`} onClose={onClose} wide>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10, fontSize: 12.5, marginBottom: 12 }}>
+        <div><div style={{ color: T.sub, marginBottom: 2 }}>員工</div><div style={{ fontWeight: 600 }}>{emp.name}</div></div>
+        <div><div style={{ color: T.sub, marginBottom: 2 }}>薪資月份</div><div style={{ fontWeight: 600 }}>{ym}</div></div>
+        <div><div style={{ color: T.sub, marginBottom: 2 }}>系統試算金額</div><div style={{ fontWeight: 600 }}>NT$ {money(systemValue)}</div></div>
+        <div><div style={{ color: T.sub, marginBottom: 2 }}>目前採用金額</div><div style={{ fontWeight: 600, color: isOverridden ? T.brown : T.ink }}>NT$ {money(currentValue)}{isOverridden ? "（人工）" : "（系統）"}</div></div>
+      </div>
+      {subject === "bonus" && (
+        <p style={{ fontSize: 12, color: T.sub, background: T.subBg, padding: "8px 10px", borderRadius: 6, marginBottom: 12 }}>
+          系統原始全勤獎金 NT$ {money(row.fullAttendanceBonus)}－系統比例扣除（普通傷病假）NT$ {money(row.bonusProrateDeduction)}
+          ＝扣除後 NT$ {money(row.systemFullAttendanceBonus)}。原系統扣除依據仍保留於個人薪資明細，人工採用後不會再扣一次。
+        </p>
+      )}
+      {isStale && (
+        <p style={{ fontSize: 12, color: T.yellow, background: T.yellowBg, padding: "8px 10px", borderRadius: 6, marginBottom: 12 }}>
+          來源已更新，待重新確認：上次複核時系統試算為 NT$ {money(override.system_value)}，目前系統試算為 NT$ {money(systemValue)}。
+        </p>
+      )}
+      <Field label={subject === "bonus" ? "相關每日回報異常（遲到／漏打卡）" : "相關已核准加班申請"}>
+        {related.length === 0 ? <p style={{ fontSize: 12.5, color: T.sub, margin: 0 }}>本月沒有相關紀錄。</p> : (
+          <div style={{ maxHeight: 140, overflowY: "auto", border: `1px solid ${T.line}`, borderRadius: 6, padding: 8, fontSize: 12.5 }}>
+            {subject === "bonus" ? related.map((e) => (
+              <div key={e.id} style={{ padding: "4px 0", borderBottom: `1px solid ${T.line}` }}>
+                {e.report_date}：{e.late ? `遲到 ${e.late_minutes} 分鐘` : ""}{e.late && e.missed_punch ? "；" : ""}{e.missed_punch ? "漏打卡" : ""}
+              </div>
+            )) : related.map((r) => (
+              <div key={r.id} style={{ padding: "4px 0", borderBottom: `1px solid ${T.line}` }}>
+                {fmtDateShort(r.start_at)}：{r.hours} 小時（{OVERTIME_TYPE_LABEL?.[r.overtime_type] || r.overtime_type || "平日加班"}）
+              </div>
+            ))}
+          </div>
+        )}
+      </Field>
+      <Field label="最終採用金額">
+        <input className="ph-input" type="number" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="0 元也是有效金額" />
+      </Field>
+      <Field label="調整原因（必填）">
+        <textarea className="ph-input" rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />
+      </Field>
+      {isValidDraft && (
+        <div style={{ fontSize: 12.5, background: T.subBg, borderRadius: 6, padding: "8px 10px", marginBottom: 12 }}>
+          修改前 NT$ {money(currentValue)} → 修改後 NT$ {money(draftValue)}（差額 {draftValue - currentValue >= 0 ? "+" : ""}{money(draftValue - currentValue)}）
+          更新後實發金額：NT$ {money(preview.effectiveTotal)}
+        </div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="ph-btn small" onClick={loadHistory}>查看修改歷程</button>
+          {isOverridden && <button className="ph-btn small" disabled={busy} onClick={revert}>恢復系統試算</button>}
+          {!isOverridden && <button className="ph-btn small" disabled={busy} onClick={markReviewed}>維持系統試算並標記已複核</button>}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="ph-btn" onClick={onClose} disabled={busy}>取消</button>
+          <button className="ph-btn primary" disabled={busy} onClick={save}>{busy ? "儲存中…" : "儲存"}</button>
+        </div>
+      </div>
+      {showHistory && (
+        <Modal title={`修改歷程・${emp.name}・${PAYROLL_SUBJECT_LABEL[subject]}`} onClose={() => setShowHistory(false)}>
+          {history.length === 0 ? <p style={{ color: T.sub, fontSize: 12.5 }}>目前沒有修改歷程。</p> : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {history.map((h) => (
+                <div key={h.id} style={{ fontSize: 12.5, borderBottom: `1px solid ${T.line}`, paddingBottom: 8 }}>
+                  <div><strong>{h.action === "set" ? "設定人工金額" : h.action === "revert" ? "恢復系統試算" : "複核（未改金額）"}</strong>　{fmtTaipei(h.created_at)}</div>
+                  <div style={{ color: T.sub }}>系統試算 NT$ {money(h.system_value)}　{money(h.previous_manual_value)} → {money(h.new_manual_value)}</div>
+                  {h.reason && <div style={{ color: T.sub }}>原因：{h.reason}</div>}
+                  <div style={{ color: T.sub }}>操作人：{h.actor_name}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Modal>
+      )}
+    </Modal>
   );
 }
 
@@ -3985,6 +4259,8 @@ function MyProfilePage({ me, stores }) {
   const [shifts, setShifts] = useState([]);
   const [requests, setRequests] = useState([]);
   const [adjustments, setAdjustments] = useState([]);
+  const [overrides, setOverrides] = useState([]);
+  const [run, setRun] = useState(null);
   const [showPayslip, setShowPayslip] = useState(false);
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const hasPayrollAccess = !!me.permissions?.payroll;
@@ -3997,14 +4273,24 @@ function MyProfilePage({ me, stores }) {
       sb.from("shifts").select("*").eq("employee_id", me.id).gte("work_date", from).lte("work_date", to),
       sb.from("requests").select("*").eq("employee_id", me.id).eq("status", "approved").gte("start_at", `${from}T00:00:00+08:00`).lte("start_at", `${to}T23:59:59+08:00`),
       sb.from("payroll_adjustments").select("*").eq("employee_id", me.id).eq("year_month", ym),
-    ]).then(([s, r, a]) => {
+      sb.from("payroll_manual_overrides").select("*").eq("employee_id", me.id).eq("year_month", ym),
+      sb.from("payroll_runs").select("*").eq("store_id", me.store_id).eq("year_month", ym).maybeSingle(),
+    ]).then(([s, r, a, o, rn]) => {
       setShifts(s.data || []);
       setRequests(r.data || []);
       setAdjustments(a.data || []);
+      setOverrides(o.data || []);
+      setRun(rn.data || null);
     });
-  }, [me.id, ym, hasPayrollAccess]);
+  }, [me.id, me.store_id, ym, hasPayrollAccess]);
 
-  const payslipRow = useMemo(() => computePayrollRow(me, shifts, requests, adjustments), [me, shifts, requests, adjustments]);
+  const payslipRow = useMemo(() => {
+    if (run?.status === "locked" && run.snapshot?.rows) {
+      const snap = run.snapshot.rows.find((r) => r.empId === me.id);
+      if (snap) return { ...snap, emp: me, fromSnapshot: true };
+    }
+    return applyManualOverrides(computePayrollRow(me, shifts, requests, adjustments), overrides);
+  }, [me, shifts, requests, adjustments, overrides, run]);
   const days = monthDays(ym);
   const periodLabel = `${ym}-01 ~ ${ym}-${pad2(days)}`;
 
@@ -4029,7 +4315,7 @@ function MyProfilePage({ me, stores }) {
               <button className="ph-btn small" onClick={() => setShowPayslip(true)}>薪資明細 →</button>
             </div>
           </div>
-          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>實發金額：<strong style={{ color: T.ink }}>NT$ {money(payslipRow.total)}</strong></p>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>實發金額：<strong style={{ color: T.ink }}>NT$ {money(payslipRow.effectiveTotal)}</strong></p>
         </div>
       )}
       {showPayslip && (
