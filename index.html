@@ -234,6 +234,10 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   const overtimePay = overtimeRequests.reduce((sum, r) => sum + overtimePayForRequest(overtimeHourlyBase, r.hours, r.overtime_type || "workday"), 0);
 
   // 依《勞工請假規則》：事假不給工資、普通傷病假工資折半、婚假/喪假/公假/公傷病假工資照給不扣款
+  // 這段是「正式請假申請」（requests表）來源的計算，留給日後萬一真的有人直接送出正式
+  // 請假申請時仍能生效；實務上請假記錄的權威來源是「每日回報」，見下方 leaveWageAdj／
+  // leaveBonusProrateAdj（recompute_leave_deduction 在SQL端依假別＋病假年度30日折半門檻
+  // 算好，含完整可讀明細文字，詳見 phase-hr_fix_20260907_sick_leave_q10.sql）
   const leaveHoursByType = {};
   let wageLeaveDeduction = 0;
   let bonusProrateHours = 0;
@@ -250,21 +254,33 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   const personalLeaveDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0;
   const sickLeaveHours = leaveHoursByType.sick_leave || 0;
   const sickLeaveDeduction = isFullTime ? sickLeaveHours * hourlyBase * 0.5 : 0;
-  const attendanceDeduction = wageLeaveDeduction;
 
   const basePay = isFullTime ? Number(emp.base_salary) : workedHours * Number(emp.hourly_rate);
   const mealAllowance = Number(emp.meal_allowance) || 0;
   const positionAllowance = Number(emp.position_allowance) || 0;
   const fullAttendanceBonus = Number(emp.bonus) || 0;
-  // 普通傷病假：全勤獎金依請假時數比例扣除（比例基準沿用系統既有的月標準工時 240 小時）
-  const bonusProrateDeduction = isFullTime && fullAttendanceBonus > 0
+  const requestsBonusProrateDeduction = isFullTime && fullAttendanceBonus > 0
     ? Math.min(fullAttendanceBonus, fullAttendanceBonus * (bonusProrateHours / 240))
     : 0;
+
+  // 每日回報依假別計算的請假工資扣款／全勤獎金比例扣除：從一般「本月調整」清單中
+  // 獨立出來（改走請假扣款／全勤獎金專屬欄位顯示），避免同一筆金額顯示兩次；
+  // 待確認（confirmed=false）清單仍保留這兩筆，讓既有「本月調整」Modal 的確認/忽略
+  // 按鈕原封不動可用，只有「已確認」的金額才計入請假扣款／全勤獎金比例扣除
+  const leaveWageAdj = empAdjustments.find((a) => (a.source_key || "").startsWith("leave_wage:")) || null;
+  const leaveBonusProrateAdj = empAdjustments.find((a) => (a.source_key || "").startsWith("leave_bonus_prorate:")) || null;
+  const otherAdjustments = empAdjustments.filter((a) => !(a.source_key || "").startsWith("leave_wage:") && !(a.source_key || "").startsWith("leave_bonus_prorate:"));
+  const leaveWageConfirmed = leaveWageAdj && leaveWageAdj.confirmed !== false ? -Number(leaveWageAdj.amount) : 0;
+  const bonusProrateConfirmed = leaveBonusProrateAdj && leaveBonusProrateAdj.confirmed !== false ? -Number(leaveBonusProrateAdj.amount) : 0;
+
+  const attendanceDeduction = wageLeaveDeduction + leaveWageConfirmed;
+  const bonusProrateDeduction = requestsBonusProrateDeduction + bonusProrateConfirmed;
+
   const laborInsuranceFee = Number(emp.labor_insurance_fee) || 0;
   const healthInsuranceFee = Number(emp.health_insurance_fee) || 0;
   const incomeTax = Number(emp.income_tax) || 0;
   // 未確認（confirmed=false，例如每日回報異常自動產生的草稿）不計入薪資，須人資在薪資試算頁確認後才生效
-  const confirmedAdjustments = empAdjustments.filter((a) => a.confirmed !== false);
+  const confirmedAdjustments = otherAdjustments.filter((a) => a.confirmed !== false);
   const pendingAdjustments = empAdjustments.filter((a) => a.confirmed === false);
   const adjustmentsTotal = confirmedAdjustments.reduce((sum, a) => sum + Number(a.amount), 0);
   const taxableAdjustments = confirmedAdjustments.filter((a) => a.taxable).reduce((sum, a) => sum + Number(a.amount), 0);
@@ -275,7 +291,7 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   return {
     emp, workedHours, overtimeHours, personalLeaveHours, leaveHoursByType, basePay, mealAllowance, positionAllowance,
     overtimePay, fullAttendanceBonus, attendanceDeduction, personalLeaveDeduction, sickLeaveHours, sickLeaveDeduction,
-    bonusProrateDeduction, laborInsuranceFee, healthInsuranceFee, incomeTax,
+    bonusProrateDeduction, leaveWageAdj, leaveBonusProrateAdj, laborInsuranceFee, healthInsuranceFee, incomeTax,
     empAdjustments: confirmedAdjustments, pendingAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
     // 這次算加班費實際採用的核准列（一定是 status='approved'，因為呼叫端查 requests 時
     // 本來就已經 .eq('status','approved')），給薪資明細做「來源：每日回報」追溯用
@@ -285,7 +301,10 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
 // 套用人資/管理者對「加班費」「全勤獎金」的人工覆寫，取代（不是疊加）系統試算值；
 // 沒有覆寫時 effective* 直接等於系統值（全勤獎金已先扣掉普通傷病假比例，因為畫面上的
 // 「最終全勤獎金」本來就該是扣除後金額，比例扣除明細仍保留在 bonusProrateDeduction
-// 供參考），PayrollPage／PayslipModal／CSV／鎖定快照都改讀 effective* 欄位
+// 供參考），PayrollPage／PayslipModal／CSV／鎖定快照都改讀 effective* 欄位。
+// 注意：effectiveGrossPay 用的是「已扣除比例」的 effectiveFullAttendanceBonus，
+// 全勤比例扣除的效果已經反映在這裡了——effectiveTotalDeduction 不可以再把
+// effectiveBonusProrateDeduction 加回去扣一次（曾經是舊有的雙重扣除bug，這次修正）
 function applyManualOverrides(base, overrides) {
   const bonusOverride = overrides.find((o) => o.subject === "bonus") || null;
   const overtimeOverride = overrides.find((o) => o.subject === "overtime") || null;
@@ -294,16 +313,14 @@ function applyManualOverrides(base, overrides) {
   const bonusOverridden = !!(bonusOverride && bonusOverride.manual_value !== null);
   const effectiveFullAttendanceBonus = bonusOverridden ? Number(bonusOverride.manual_value) : systemFullAttendanceBonus;
   const effectiveBonusProrateDeduction = bonusOverridden ? 0 : base.bonusProrateDeduction;
-  // 全勤獎金比例扣除（普通傷病假）不再於主表/CSV獨立列一欄，併入「請假扣款」顯示
-  const effectiveAttendanceDeduction = base.attendanceDeduction + effectiveBonusProrateDeduction;
   const effectiveGrossPay = base.basePay + base.mealAllowance + base.positionAllowance + effectiveOvertimePay + effectiveFullAttendanceBonus + base.adjustmentsTotal;
   const effectiveTaxableIncome = effectiveGrossPay - base.mealAllowance - (base.adjustmentsTotal - base.empAdjustments.filter((a) => a.taxable).reduce((s, a) => s + Number(a.amount), 0));
-  const effectiveTotalDeduction = effectiveAttendanceDeduction + base.laborInsuranceFee + base.healthInsuranceFee + base.incomeTax;
+  const effectiveTotalDeduction = base.attendanceDeduction + base.laborInsuranceFee + base.healthInsuranceFee + base.incomeTax;
   const effectiveTotal = effectiveGrossPay - effectiveTotalDeduction;
   return {
     ...base,
     systemFullAttendanceBonus, bonusOverride, overtimeOverride,
-    effectiveOvertimePay, effectiveFullAttendanceBonus, effectiveBonusProrateDeduction, effectiveAttendanceDeduction,
+    effectiveOvertimePay, effectiveFullAttendanceBonus, effectiveBonusProrateDeduction,
     effectiveGrossPay, effectiveTaxableIncome, effectiveTotalDeduction, effectiveTotal,
   };
 }
@@ -4300,7 +4317,15 @@ function PayslipModal({ store, ym, periodLabel, row, locked, onClose, onGotoRequ
                   </tr>
                 );
               })}
-              <PayslipRow label={"全勤獎金" + (row.bonusOverride?.manual_value != null ? "（人工調整，系統試算 NT$ " + money(row.systemFullAttendanceBonus) + "）" : "")} value={row.effectiveFullAttendanceBonus} />
+              <PayslipRow
+                label={"全勤獎金" +
+                  (row.effectiveBonusProrateDeduction > 0
+                    ? `（原額 NT$ ${money(row.fullAttendanceBonus)}－病假比例扣除 NT$ ${money(row.effectiveBonusProrateDeduction)}＝最終 NT$ ${money(row.systemFullAttendanceBonus)}）`
+                    : "") +
+                  (row.bonusOverride?.manual_value != null
+                    ? `（人工調整，系統試算 NT$ ${money(row.systemFullAttendanceBonus)}，人工採用後不再扣除比例）`
+                    : "")}
+                value={row.effectiveFullAttendanceBonus} />
               {row.empAdjustments.filter((a) => Number(a.amount) > 0).map((a) => (
                 <PayslipRow key={a.id} label={a.label + (a.taxable ? "" : "（免稅）")} value={a.amount} />
               ))}
@@ -4309,10 +4334,9 @@ function PayslipModal({ store, ym, periodLabel, row, locked, onClose, onGotoRequ
                 <PayslipRow key={a.id} label={a.label} value={-a.amount} />
               ))}
               {row.personalLeaveDeduction > 0 && <PayslipRow label="事假扣款（不給工資）" value={row.personalLeaveDeduction} />}
-              {(row.sickLeaveDeduction > 0 || row.effectiveBonusProrateDeduction > 0) && (
-                <PayslipRow
-                  label={"普通傷病假扣款（工資折半＋全勤獎金比例扣除）" + (row.bonusOverride?.manual_value != null ? `－原系統全勤獎金扣除 NT$ ${money(row.bonusProrateDeduction)}，人工採用全勤獎金後不再扣除` : "")}
-                  value={row.sickLeaveDeduction + row.effectiveBonusProrateDeduction} />
+              {row.sickLeaveDeduction > 0 && <PayslipRow label="普通傷病假扣款（工資折半）" value={row.sickLeaveDeduction} />}
+              {row.leaveWageAdj && row.leaveWageAdj.confirmed !== false && Number(row.leaveWageAdj.amount) !== 0 && (
+                <PayslipRow label={row.leaveWageAdj.label} value={-Number(row.leaveWageAdj.amount)} />
               )}
               <PayslipRow label="勞保費" value={row.laborInsuranceFee} />
               <PayslipRow label="健保費" value={row.healthInsuranceFee} />
@@ -4478,7 +4502,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
       Math.round(r.basePay), Math.round(r.mealAllowance), Math.round(r.positionAllowance), Math.round(r.effectiveOvertimePay), Math.round(r.effectiveFullAttendanceBonus),
       `"${Math.round(r.adjustmentsTotal)}${r.empAdjustments.length ? ` (${r.empAdjustments.map((a) => a.label).join("／")})` : ""}"`,
       Math.round(r.effectiveGrossPay),
-      Math.round(r.effectiveAttendanceDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.effectiveTaxableIncome), Math.round(r.effectiveTotalDeduction),
+      Math.round(r.attendanceDeduction), Math.round(r.laborInsuranceFee), Math.round(r.healthInsuranceFee), Math.round(r.incomeTax), Math.round(r.effectiveTaxableIncome), Math.round(r.effectiveTotalDeduction),
       Math.round(r.effectiveTotal),
     ].join(",")));
     const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
@@ -4620,7 +4644,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
                       r.adjustmentsTotal !== 0 ? `${r.adjustmentsTotal > 0 ? "+" : ""}${money(r.adjustmentsTotal)}` : "—"
                     )}
                   </td>
-                  <td>{money(r.effectiveAttendanceDeduction)}</td>
+                  <td>{money(r.attendanceDeduction)}</td>
                   <td>{money(r.laborInsuranceFee)}</td>
                   <td>{money(r.healthInsuranceFee)}</td>
                   <td>{money(r.incomeTax)}</td>
