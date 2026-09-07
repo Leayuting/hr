@@ -2188,7 +2188,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
         <Modal title="排班衝突提醒" onClose={() => setConflictModal(null)}>
           <p style={{ fontSize: 13.5 }}>
             <strong>{conflictModal.employeeName}</strong> 在 <strong>{conflictModal.date}</strong> 已於「{conflictModal.conflict.store_name}」排班
-            （{conflictModal.conflict.is_day_off ? "休假" : `${(conflictModal.conflict.start_time || "").slice(0, 5)}–${(conflictModal.conflict.end_time || "").slice(0, 5)}`}）。
+            （{conflictModal.conflict.is_day_off ? "休假" : (shiftCellText(conflictModal.conflict, conflictModal.conflict.store_name, "–") || "")}）。
           </p>
           {me.isGlobalScope ? (
             <>
@@ -3027,7 +3027,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       sb.from("daily_reports").select("*").eq("store_id", storeId).eq("report_date", date).maybeSingle(),
       sb.from("leave_type_settings").select("*").order("sort_order"),
       sb.from("app_settings").select("value").eq("key", "leave_proof_deadline_days").maybeSingle(),
-      sb.from("shifts").select("employee_id,start_time,end_time,is_day_off").eq("store_id", storeId).eq("work_date", date),
+      sb.from("shifts").select("employee_id,start_time,end_time,is_day_off,note").eq("store_id", storeId).eq("work_date", date),
     ]);
     setDeadlineDays(deadlineRes.data?.value ?? null);
     if (rosterRes.error) console.error("store_roster", rosterRes.error);
@@ -3037,7 +3037,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     setLeaveTypeSettings(leaveTypeRes.data || []);
     const shiftMap = {};
     (shiftRes.data || []).forEach((s) => {
-      shiftMap[s.employee_id] = s.is_day_off ? null : { start: s.start_time ? s.start_time.slice(0, 5) : null, end: s.end_time ? s.end_time.slice(0, 5) : null };
+      shiftMap[s.employee_id] = s.is_day_off ? null : { start: s.start_time ? s.start_time.slice(0, 5) : null, end: s.end_time ? s.end_time.slice(0, 5) : null, raw: s };
     });
     setScheduledShiftByEmployee(shiftMap);
     const rep = reportRes.data;
@@ -3695,7 +3695,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                             <RosterCell r={r} index={idx} />
                             {scheduledShiftByEmployee[r.id] && (
                               <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>
-                                排定 {scheduledShiftByEmployee[r.id].start || "—"}–{scheduledShiftByEmployee[r.id].end || "—"}
+                                排定 {shiftCellText(scheduledShiftByEmployee[r.id].raw, store?.name, "–") || `${scheduledShiftByEmployee[r.id].start || "—"}–${scheduledShiftByEmployee[r.id].end || "—"}`}
                               </div>
                             )}
                           </td>
@@ -6156,7 +6156,8 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
    我的班表／我的資料（schedule=self／staff=self 的人使用）
 ──────────────────────────────────────────── */
 
-function MySchedulePage({ me }) {
+function MySchedulePage({ me, stores }) {
+  const myStoreName = stores?.find((s) => s.id === me.store_id)?.name;
   const [ym, setYm] = useState(thisMonthStr());
   const [shifts, setShifts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -6209,7 +6210,7 @@ function MySchedulePage({ me }) {
               <div key={d} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", borderBottom: `1px solid ${T.line}` }}>
                 <span style={{ fontSize: 13.5 }}>{d.slice(5)}（週{weekdayZh(d)}）</span>
                 <span style={{ fontSize: 13.5, color: s?.is_day_off ? T.sub : T.ink, fontWeight: s ? 600 : 400 }}>
-                  {s ? (s.is_day_off ? "休假" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "—"}
+                  {s ? (s.is_day_off ? "休假" : (shiftCellText(s, myStoreName, "–") || "")) : "—"}
                 </span>
               </div>
             );
@@ -6784,7 +6785,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
           <div className="ph-stat-card accent-brick" onClick={() => setPage("schedule")}>
             <p className="ph-eyebrow" style={{ marginBottom: 8 }}>今日排班</p>
             <p className="ph-serif" style={{ fontSize: 28, margin: "0 0 8px" }}>
-              {myShiftToday === undefined ? "…" : myShiftToday ? (myShiftToday.is_day_off ? "休假" : `${myShiftToday.start_time?.slice(0, 5)}–${myShiftToday.end_time?.slice(0, 5)}`) : "尚未排班"}
+              {myShiftToday === undefined ? "…" : myShiftToday ? (myShiftToday.is_day_off ? "休假" : (shiftCellText(myShiftToday, storeById[storeId]?.name, "–") || "")) : "尚未排班"}
             </p>
             <span style={{ fontSize: 12.5, color: T.brown }}>查看完整班表 →</span>
           </div>
@@ -6871,7 +6872,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
                       {weekDates.map((d) => {
                         const s = weekShifts.find((sh) => sh.employee_id === r.id && sh.work_date === d);
                         const cls = s ? (s.is_day_off ? "cell-off" : "cell-work") : "";
-                        return <td key={d} className={cls} style={{ textAlign: "center" }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "–"}</td>;
+                        return <td key={d} className={cls} style={{ textAlign: "center" }}>{shiftCellText(s, storeById[r.store_id]?.name, "–") ?? "–"}</td>;
                       })}
                     </tr>
                   ))}
@@ -6890,7 +6891,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
                 return (
                   <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
                     <RosterCell r={r} index={idx} showStore={scopeStoreIds.length > 1} storeName={storeById[r.store_id]?.name} />
-                    <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{s ? (s.is_day_off ? "休" : `${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}`) : "–"}</div>
+                    <div style={{ fontSize: 13, color: s?.is_day_off ? T.sub : T.ink }}>{shiftCellText(s, storeById[r.store_id]?.name, "–") ?? "–"}</div>
                   </div>
                 );
               })}
@@ -7138,7 +7139,7 @@ function AppShell({ session }) {
           <div style={{ maxWidth: 1460, margin: "0 auto" }}>
             {page === "dashboard" && <Dashboard me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setPage={setPage} />}
             {page === "schedule" && (perm.schedule === "self"
-              ? <MySchedulePage me={me} />
+              ? <MySchedulePage me={me} stores={stores} />
               : <SchedulePage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} activeStoreId={activeStoreId} setScope={setScope} toast={toast} />)}
             {page === "requests" && <RequestsPage me={me} stores={stores} storeId={storeId} scope={scope} scopeStoreIds={scopeStoreIds} setScope={setScope} toast={toast} focus={requestsFocus} onFocusConsumed={() => setRequestsFocus(null)} />}
             {page === "daily_report" && perm.daily_report !== "none" && <DailyReportPage me={me} stores={stores} storeId={storeId} scopeStoreIds={dailyReportScopeStoreIds} toast={toast} onGotoRequests={gotoRequests} />}
