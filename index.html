@@ -359,6 +359,78 @@ const SHIFT_TEMPLATES = {
   ],
 };
 
+// Excel 班表匯入：代碼→時間對照表預設值。中山店這組（早/中1/中2/晚/中班/休及
+// 省略「班」字的簡寫）已用實際樣本檔（中山Phase班表9月_3班制）逐項向使用者確認過；
+// 「中班」（內場，無1/2）固定對應中班1；其他店只先帶入 SHIFT_TEMPLATES 本來就有的
+// 全名，簡寫/省略寫法未經驗證不預先假設，匯入畫面上仍會讓使用者逐項確認整份對照表，
+// 不是直接套用不給看
+const SCHEDULE_IMPORT_CODE_DEFAULTS = {
+  "中山店": {
+    "早": { start: "08:00", end: "17:00" }, "早班": { start: "08:00", end: "17:00" },
+    "中1": { start: "09:00", end: "18:00" }, "中班1": { start: "09:00", end: "18:00" },
+    "中班": { start: "09:00", end: "18:00" },
+    "中2": { start: "09:30", end: "18:30" }, "中班2": { start: "09:30", end: "18:30" },
+    "晚": { start: "10:30", end: "19:30" }, "晚班": { start: "10:30", end: "19:30" },
+    "廚早": { start: "08:30", end: "17:30" }, "廚中": { start: "09:00", end: "18:00" }, "廚晚": { start: "10:30", end: "19:30" },
+    "休": { dayOff: true },
+  },
+};
+function scheduleImportDefaultCodeMap(storeName) {
+  const fromTemplates = {};
+  (SHIFT_TEMPLATES[storeName] || []).forEach((t) => { fromTemplates[t.label] = { start: t.start, end: t.end }; });
+  return { ...fromTemplates, ...(SCHEDULE_IMPORT_CODE_DEFAULTS[storeName] || {}), "休": { dayOff: true } };
+}
+// Excel 欄號(1-based)轉字母，供問題清單顯示儲存格位置（例如 5→E）
+function colLetter(col) {
+  let s = "";
+  while (col > 0) { const r = (col - 1) % 26; s = String.fromCharCode(65 + r) + s; col = Math.floor((col - 1) / 26); }
+  return s;
+}
+function cellAddr(row, col) { return `${colLetter(col)}${row}`; }
+// 偵測是否符合「3班制」樣本格式的簽章：B2=姓名、D2=總休假、E2起是遞增的日期數字。
+// 不符合就不嘗試硬解，直接讓使用者走固定範本，不用啟發式規則亂猜其他店的佈局
+function detectSchedule3ShiftFormat(ws) {
+  const b2 = ws.getCell(2, 2).value, d2 = ws.getCell(2, 4).value, e2 = ws.getCell(2, 5).value;
+  return typeof b2 === "string" && b2.includes("姓") && typeof d2 === "string" && typeof e2 === "number";
+}
+// 解析「3班制」樣本格式：B欄有文字+D欄是數字→員工列；「支援者」列不解析成班次，
+// 逐格記錄成問題清單；遇到「現場戰力」列視為員工資料結束（之後是彙總/圖例，不是資料）
+function parseSchedule3Shift(ws) {
+  const dateCols = [];
+  for (let col = 5; col <= 60; col++) {
+    const v = ws.getCell(2, col).value;
+    if (typeof v !== "number") break;
+    dateCols.push({ col, day: Math.round(v) });
+  }
+  const rows = [];
+  const supportIssues = [];
+  for (let r = 4; r <= 80; r++) {
+    const nameCell = ws.getCell(r, 2).value;
+    if (nameCell === null || nameCell === undefined || String(nameCell).trim() === "") continue;
+    const name = String(nameCell).trim();
+    if (name === "現場戰力") break;
+    const totalCell = ws.getCell(r, 4).value;
+    const isEmployeeRow = typeof totalCell === "number";
+    if (!isEmployeeRow) {
+      if (name === "支援者") {
+        dateCols.forEach(({ col, day }) => {
+          const v = ws.getCell(r, col).value;
+          if (v !== null && v !== undefined && String(v).trim() !== "") {
+            supportIssues.push({ cell: cellAddr(r, col), day, text: String(v).trim() });
+          }
+        });
+      }
+      continue;
+    }
+    dateCols.forEach(({ col, day }) => {
+      const raw = ws.getCell(r, col).value;
+      if (raw === null || raw === undefined || String(raw).trim() === "") return; // 空白＝維持原狀，不是刪除指令
+      rows.push({ cell: cellAddr(r, col), employeeName: name, day, code: String(raw).trim() });
+    });
+  }
+  return { dateCols, rows, supportIssues };
+}
+
 /* ────────────────────────────────────────────
    共用 UI 元件
 ──────────────────────────────────────────── */
@@ -945,6 +1017,404 @@ function StorePinLogin() {
 function prevMonthStr(ym) { const [y, m] = ym.split("-").map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${pad2(m - 1)}`; }
 function nextMonthStr(ym) { const [y, m] = ym.split("-").map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${pad2(m + 1)}`; }
 
+// 固定範本（無法辨識既有格式時的備援）：一列一筆，欄位＝員工姓名／日期／班別代碼／
+// 上班時間／下班時間／是否休假，班別代碼與上下班時間擇一填寫即可
+async function downloadScheduleImportTemplate(storeName) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("班表匯入範本");
+  ws.addRow(["員工姓名", "日期(YYYY-MM-DD)", "班別代碼(可留空，與上下班時間擇一)", "上班時間(HH:MM)", "下班時間(HH:MM)", "是否休假(是/否)"]);
+  ws.addRow(["王小明", "2026-09-01", "早班", "", "", "否"]);
+  ws.addRow(["王小明", "2026-09-02", "", "", "", "是"]);
+  ws.getRow(1).font = { bold: true };
+  ws.columns.forEach((c) => { c.width = 22; });
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: "application/octet-stream" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `班表匯入範本_${storeName || ""}.xlsx`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function parseScheduleFlatTemplate(ws) {
+  const rows = [];
+  let r = 2;
+  while (r <= 5000) {
+    const name = ws.getCell(r, 1).value;
+    if (name === null || name === undefined || String(name).trim() === "") { r++; if (r > 3 && !ws.getCell(r - 1, 1).value && !ws.getCell(r - 2, 1).value) break; continue; }
+    const dateRaw = ws.getCell(r, 2).value;
+    const date = dateRaw instanceof Date ? dateRaw.toISOString().slice(0, 10) : String(dateRaw || "").trim();
+    const code = String(ws.getCell(r, 3).value || "").trim();
+    const start = String(ws.getCell(r, 4).value || "").trim();
+    const end = String(ws.getCell(r, 5).value || "").trim();
+    const dayOffRaw = String(ws.getCell(r, 6).value || "").trim();
+    const dayOff = ["是", "true", "TRUE", "1"].includes(dayOffRaw);
+    rows.push({ cell: `R${r}`, employeeName: String(name).trim(), date, code: code || null, start: start || null, end: end || null, dayOff });
+    r++;
+  }
+  return { rows };
+}
+
+// Excel 班表匯入精靈：選店/月→上傳解析→預覽修正（代碼對照／員工比對／衝突／
+// 已有回報警示）→確認套用。解析全部在前端記憶體進行（ExcelJS 讀取上傳檔案的
+// ArrayBuffer，不執行巨集也不連外部連結）；套用透過 apply_schedule_import RPC
+// 一次交易完成，任何一步失敗整批不生效
+function ScheduleImportModal({ me, stores, scopeStoreIds, defaultStoreId, defaultYm, toast, onClose, onApplied }) {
+  const editableStores = useMemo(() => stores.filter((s) => scopeStoreIds.includes(s.id) && s.name !== "總部"), [stores, scopeStoreIds]);
+  const [storeId, setStoreId] = useState(defaultStoreId || editableStores[0]?.id || "");
+  const [ym, setYm] = useState(defaultYm || thisMonthStr());
+  const store = editableStores.find((s) => s.id === storeId);
+
+  const [fileName, setFileName] = useState("");
+  const [parsing, setParsing] = useState(false);
+  const [formatMode, setFormatMode] = useState(null); // null | '3shift' | 'flat' | 'unknown'
+  const [rawRows, setRawRows] = useState([]); // {cell, employeeName, day?|date?, code|start/end/dayOff}
+  const [supportIssues, setSupportIssues] = useState([]);
+
+  const [codeMap, setCodeMap] = useState({});
+  const [roster, setRoster] = useState([]);
+  const [employeeChoice, setEmployeeChoice] = useState({}); // { name: employeeId | 'skip' }
+  const [codeChoice, setCodeChoice] = useState({}); // { code: {start,end}|{dayOff:true}|'skip' }
+  const [existingShifts, setExistingShifts] = useState({}); // { `${employeeId}_${date}`: {start_time,end_time,is_day_off} }
+  const [reportDates, setReportDates] = useState(new Set()); // Set of `${employeeId}_${date}` 已有每日回報
+  const [lockedDates, setLockedDates] = useState(false); // 該店該月是否鎖定
+  const [crossStoreConflicts, setCrossStoreConflicts] = useState({}); // `${employeeId}_${date}` -> storeName
+  const [checkingConflicts, setCheckingConflicts] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => { setCodeMap(scheduleImportDefaultCodeMap(store?.name)); }, [store?.name]);
+
+  async function handleFile(file) {
+    setFileName(file.name); setParsing(true); setResult(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(buf);
+      const ws = wb.worksheets[0];
+      if (!ws) throw new Error("找不到工作表");
+      if (detectSchedule3ShiftFormat(ws)) {
+        const { rows, supportIssues } = parseSchedule3Shift(ws);
+        setRawRows(rows); setSupportIssues(supportIssues); setFormatMode("3shift");
+      } else if (String(ws.getCell(1, 1).value || "").includes("員工姓名")) {
+        const { rows } = parseScheduleFlatTemplate(ws);
+        setRawRows(rows); setSupportIssues([]); setFormatMode("flat");
+      } else {
+        setFormatMode("unknown"); setRawRows([]); setSupportIssues([]);
+      }
+    } catch (e) {
+      toast("解析失敗：" + e.message);
+      setFormatMode(null);
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  // 載入該店員工名冊＋當月既有班表＋是否鎖定，供比對／預覽差異用
+  useEffect(() => {
+    if (!storeId || !ym) return;
+    (async () => {
+      const days = monthDays(ym);
+      const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
+      const [rosterRes, shiftRes, runRes, entryRes] = await Promise.all([
+        sb.rpc("store_roster", { p_store_id: storeId }),
+        sb.from("shifts").select("employee_id,work_date,start_time,end_time,is_day_off").eq("store_id", storeId).gte("work_date", from).lte("work_date", to),
+        sb.from("payroll_runs").select("id").eq("store_id", storeId).eq("year_month", ym).eq("status", "locked"),
+        sb.from("daily_report_entries").select("employee_id,daily_reports!inner(report_date)").eq("store_id", storeId).gte("daily_reports.report_date", from).lte("daily_reports.report_date", to),
+      ]);
+      setRoster((rosterRes.data || []).filter((r) => r.active));
+      const sMap = {};
+      (shiftRes.data || []).forEach((s) => { sMap[`${s.employee_id}_${s.work_date}`] = s; });
+      setExistingShifts(sMap);
+      setLockedDates((runRes.data || []).length > 0);
+      const rSet = new Set();
+      (entryRes.data || []).forEach((e) => { rSet.add(`${e.employee_id}_${e.daily_reports.report_date}`); });
+      setReportDates(rSet);
+    })();
+  }, [storeId, ym]);
+
+  // 員工姓名比對：只在店內名冊比對，找不到／同名衝突需要人工指定
+  const nameMatch = useMemo(() => {
+    const byName = {};
+    roster.forEach((r) => { (byName[r.name] = byName[r.name] || []).push(r); });
+    const names = [...new Set(rawRows.map((r) => r.employeeName))];
+    const out = {};
+    names.forEach((n) => {
+      const cands = byName[n] || [];
+      out[n] = cands.length === 1 ? { status: "matched", employeeId: cands[0].id } : cands.length === 0 ? { status: "notfound", candidates: [] } : { status: "ambiguous", candidates: cands };
+    });
+    return out;
+  }, [roster, rawRows]);
+
+  // codeChoice 必須是 'skip' 或「start 與 end 都已填」才算解決，只填一半（例如只填上班
+  // 時間）不能算數，避免半套時間被當成已確認套用
+  function isCodeChoiceResolved(v) { return v === "skip" || (v && v.start && v.end); }
+  const unmappedCodes = useMemo(() => {
+    if (formatMode !== "3shift") return [];
+    return [...new Set(rawRows.filter((r) => r.code).map((r) => r.code))].filter((c) => !codeMap[c] && !isCodeChoiceResolved(codeChoice[c]));
+  }, [rawRows, codeMap, codeChoice, formatMode]);
+
+  const unresolvedEmployees = useMemo(() => Object.entries(nameMatch).filter(([n, m]) => m.status !== "matched" && !employeeChoice[n]), [nameMatch, employeeChoice]);
+
+  // 全部代碼／員工都已對應或標記略過，才能進入下一步（未解決前不得套用）
+  const allResolved = unmappedCodes.length === 0 && unresolvedEmployees.length === 0;
+
+  // 組出最終待套用列（已解決代碼＋已比對員工），並跟現有班表比對出新增/修改/不變
+  const resolvedRows = useMemo(() => {
+    if (!allResolved) return [];
+    const out = [];
+    rawRows.forEach((row) => {
+      const empInfo = nameMatch[row.employeeName];
+      const empChoice = employeeChoice[row.employeeName];
+      const employeeId = empChoice && empChoice !== "skip" ? empChoice : empInfo?.status === "matched" ? empInfo.employeeId : null;
+      if (!employeeId || employeeChoice[row.employeeName] === "skip") return;
+      let start = null, end = null, dayOff = false;
+      if (formatMode === "flat") {
+        if (row.dayOff) { dayOff = true; }
+        else if (row.start && row.end) { start = row.start; end = row.end; }
+        else if (row.code) {
+          const resolved = codeMap[row.code] || (codeChoice[row.code] !== "skip" ? codeChoice[row.code] : null);
+          if (!resolved || resolved === "skip") return;
+          if (resolved.dayOff) dayOff = true; else { start = resolved.start; end = resolved.end; }
+        } else return;
+        var workDate = row.date;
+      } else {
+        const resolved = codeMap[row.code] || (codeChoice[row.code] !== "skip" ? codeChoice[row.code] : null);
+        if (!resolved || resolved === "skip") return;
+        if (resolved.dayOff) dayOff = true; else { start = resolved.start; end = resolved.end; }
+        workDate = `${ym}-${pad2(row.day)}`;
+      }
+      out.push({ employee_id: employeeId, employeeName: row.employeeName, work_date: workDate, start_time: dayOff ? null : start, end_time: dayOff ? null : end, is_day_off: dayOff, sheet_cell: row.cell, shift_code_raw: row.code || (dayOff ? "休" : `${start}-${end}`) });
+    });
+    return out;
+  }, [allResolved, rawRows, nameMatch, employeeChoice, codeMap, codeChoice, formatMode, ym]);
+
+  // 批次內衝突：同員工同日期出現不同結果
+  const inBatchConflicts = useMemo(() => {
+    const byKey = {};
+    resolvedRows.forEach((r) => { (byKey[`${r.employee_id}_${r.work_date}`] = byKey[`${r.employee_id}_${r.work_date}`] || []).push(r); });
+    return Object.entries(byKey).filter(([k, list]) => {
+      const sig = (x) => `${x.start_time}|${x.end_time}|${x.is_day_off}`;
+      return new Set(list.map(sig)).size > 1;
+    }).map(([k, list]) => ({ key: k, rows: list }));
+  }, [resolvedRows]);
+  const inBatchConflictKeys = useMemo(() => new Set(inBatchConflicts.map((c) => c.key)), [inBatchConflicts]);
+
+  const diff = useMemo(() => {
+    const create = [], update = [], unchanged = [], lockedSkip = [], conflict = [];
+    resolvedRows.forEach((r) => {
+      const key = `${r.employee_id}_${r.work_date}`;
+      if (inBatchConflictKeys.has(key)) { conflict.push(r); return; }
+      if (lockedDates) { lockedSkip.push(r); return; }
+      const existing = existingShifts[key];
+      if (!existing) { create.push(r); return; }
+      const same = (existing.start_time || "").slice(0, 5) === (r.start_time || "") && (existing.end_time || "").slice(0, 5) === (r.end_time || "") && !!existing.is_day_off === !!r.is_day_off;
+      if (same) unchanged.push(r); else update.push({ ...r, before: existing });
+    });
+    return { create, update, unchanged, lockedSkip, conflict };
+  }, [resolvedRows, existingShifts, lockedDates, inBatchConflictKeys]);
+
+  // 跨店衝突偵測：只對真的要送出（新增/修改）的列才呼叫，避免對整月每一格打RPC
+  useEffect(() => {
+    const candidates = [...diff.create, ...diff.update];
+    if (!candidates.length) { setCrossStoreConflicts({}); setCheckingConflicts(false); return; }
+    setCheckingConflicts(true);
+    (async () => {
+      const results = await Promise.all(candidates.map((r) => sb.rpc("shift_conflict_check", { p_employee_id: r.employee_id, p_work_date: r.work_date, p_exclude_store_id: storeId })));
+      const m = {};
+      results.forEach((res, i) => {
+        if (res.data && res.data.length) m[`${candidates[i].employee_id}_${candidates[i].work_date}`] = res.data[0].name;
+      });
+      setCrossStoreConflicts(m);
+      setCheckingConflicts(false);
+    })();
+  }, [diff.create, diff.update, storeId]);
+
+  const affectedByReport = useMemo(() => [...diff.create, ...diff.update].filter((r) => reportDates.has(`${r.employee_id}_${r.work_date}`)), [diff.create, diff.update, reportDates]);
+  const crossStoreKeys = Object.keys(crossStoreConflicts);
+  const readyToApply = allResolved && rawRows.length > 0 && crossStoreKeys.length === 0 && !checkingConflicts && (diff.create.length + diff.update.length) > 0;
+
+  async function doApply() {
+    setApplying(true);
+    try {
+      const payload = [...diff.create, ...diff.update].map((r) => ({
+        employee_id: r.employee_id, work_date: r.work_date, start_time: r.start_time, end_time: r.end_time,
+        is_day_off: r.is_day_off, sheet_cell: r.sheet_cell, shift_code_raw: r.shift_code_raw,
+      }));
+      const { data, error } = await sb.rpc("apply_schedule_import", { p_store_id: storeId, p_year_month: ym, p_file_name: fileName, p_rows: payload });
+      if (error) { toast("套用失敗：" + error.message); return; }
+      const row = data && data[0];
+      setResult(row);
+      await logAudit(me.name, "apply_schedule_import", `${storeId}:${ym}`, `匯入 ${fileName}，套用 ${row?.applied_count ?? 0} 筆`);
+      toast(`班表匯入完成：套用 ${row?.applied_count ?? 0} 筆${row?.skipped_locked_count ? `，${row.skipped_locked_count} 筆因薪資已鎖定未套用` : ""}`);
+      onApplied && onApplied();
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  return (
+    <Modal title="匯入班表" onClose={onClose} wide>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <Field label="門市">
+          <select className="ph-input" value={storeId} onChange={(e) => { setStoreId(e.target.value); setRawRows([]); setFormatMode(null); setResult(null); }}>
+            {editableStores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="月份">
+          <input className="ph-input" type="month" value={ym} onChange={(e) => { setYm(e.target.value); setResult(null); }} />
+        </Field>
+      </div>
+
+      {result ? (
+        <div>
+          <p style={{ fontSize: 13.5 }}>
+            已套用 <strong>{result.applied_count}</strong> 筆班次
+            {result.skipped_locked_count > 0 && <>，另有 <strong>{result.skipped_locked_count}</strong> 筆因該月薪資已鎖定未套用（需走既有更正流程）</>}。
+          </p>
+          <button className="ph-btn primary" onClick={onClose}>完成</button>
+        </div>
+      ) : (
+        <>
+          <Field label="上傳 Excel 班表">
+            <input className="ph-input" type="file" accept=".xlsx" onChange={(e) => e.target.files[0] && handleFile(e.target.files[0])} />
+          </Field>
+          {parsing && <p style={{ color: T.sub, fontSize: 13 }}>解析中…</p>}
+
+          {formatMode === "unknown" && (
+            <div style={{ background: T.subBg, padding: 12, borderRadius: 8, fontSize: 13, margin: "10px 0" }}>
+              無法辨識此檔案的既有格式，請改用固定範本：
+              <button className="ph-btn small" style={{ marginLeft: 8 }} onClick={() => downloadScheduleImportTemplate(store?.name)}>下載範本</button>
+              <div style={{ marginTop: 6, color: T.sub }}>填好範本後，重新在上面選擇檔案上傳即可（會自動辨識範本格式）。</div>
+            </div>
+          )}
+
+          {formatMode && formatMode !== "unknown" && rawRows.length > 0 && (
+            <>
+              {formatMode === "3shift" && (
+                <div style={{ margin: "14px 0" }}>
+                  <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 6 }}>班別代碼對照（請確認，非既有清單的代碼不會自動套用時間）</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8, fontSize: 12.5 }}>
+                    {[...new Set(rawRows.filter((r) => r.code).map((r) => r.code))].map((code) => {
+                      const mapped = codeMap[code];
+                      return (
+                        <div key={code} style={{ border: `1px solid ${T.line}`, borderRadius: 6, padding: 8 }}>
+                          <div style={{ fontWeight: 600 }}>{code}</div>
+                          {mapped ? (
+                            <div style={{ color: T.sub }}>{mapped.dayOff ? "休假" : `${mapped.start}–${mapped.end}`}</div>
+                          ) : (
+                            <div style={{ color: T.red }}>
+                              未知代碼，需人工確認
+                              <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                                <input className="ph-input" style={{ padding: 4, fontSize: 11.5 }} placeholder="HH:MM" onBlur={(e) => e.target.value && setCodeChoice((m) => ({ ...m, [code]: { start: e.target.value, end: codeChoice[code]?.end || "" } }))} />
+                                <input className="ph-input" style={{ padding: 4, fontSize: 11.5 }} placeholder="HH:MM" onBlur={(e) => e.target.value && setCodeChoice((m) => ({ ...m, [code]: { start: codeChoice[code]?.start || "", end: e.target.value } }))} />
+                                <button className="ph-btn small" onClick={() => setCodeChoice((m) => ({ ...m, [code]: "skip" }))}>忽略</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {unresolvedEmployees.length > 0 && (
+                <div style={{ margin: "14px 0" }}>
+                  <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 6, color: T.red }}>員工比對待確認</div>
+                  {unresolvedEmployees.map(([name, m]) => (
+                    <div key={name} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 6 }}>
+                      <span style={{ minWidth: 90 }}>{name}</span>
+                      <span style={{ color: T.sub, fontSize: 12 }}>{m.status === "notfound" ? "系統找不到此姓名" : `同名 ${m.candidates.length} 人，需手動指定`}</span>
+                      <select className="ph-input" style={{ width: 200 }} onChange={(e) => setEmployeeChoice((c) => ({ ...c, [name]: e.target.value }))}>
+                        <option value="">請選擇</option>
+                        {m.candidates?.map((c) => <option key={c.id} value={c.id}>{c.name}（{c.position || "—"}）</option>)}
+                        {roster.filter((r) => !m.candidates?.some((c) => c.id === r.id)).map((r) => <option key={r.id} value={r.id}>{r.name}（其他在職員工）</option>)}
+                        <option value="skip">略過此姓名（不匯入）</option>
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {supportIssues.length > 0 && (
+                <div style={{ background: T.subBg, padding: 10, borderRadius: 8, fontSize: 12.5, margin: "10px 0" }}>
+                  「支援者」列共 {supportIssues.length} 格文字（例：{supportIssues[0].text}），不會自動解析成班次，請改用既有「加入支援人員」功能處理：
+                  <div style={{ maxHeight: 100, overflowY: "auto", marginTop: 6 }}>
+                    {supportIssues.map((s) => <div key={s.cell}>{s.cell}（{s.day}日）：{s.text}</div>)}
+                  </div>
+                </div>
+              )}
+
+              {allResolved && (
+                <div style={{ margin: "14px 0" }}>
+                  <div style={{ display: "flex", gap: 14, fontSize: 13.5, marginBottom: 10 }}>
+                    <span>新增 <strong>{diff.create.length}</strong></span>
+                    <span>修改 <strong>{diff.update.length}</strong></span>
+                    <span style={{ color: T.sub }}>不變 <strong>{diff.unchanged.length}</strong>（不會重複套用）</span>
+                    {diff.lockedSkip.length > 0 && <span style={{ color: T.red }}>已鎖定跳過 <strong>{diff.lockedSkip.length}</strong></span>}
+                    {diff.conflict.length > 0 && <span style={{ color: T.red }}>批次內衝突 <strong>{diff.conflict.length}</strong></span>}
+                  </div>
+
+                  {diff.conflict.length > 0 && (
+                    <div style={{ background: "#FBE9E7", padding: 10, borderRadius: 8, fontSize: 12.5, marginBottom: 10, color: T.red }}>
+                      同一員工同一天出現不同結果，請修正 Excel 內容後重新上傳：
+                      {inBatchConflicts.map((c) => <div key={c.key}>{c.rows.map((r) => `${r.sheet_cell}(${r.shift_code_raw})`).join(" vs ")}</div>)}
+                    </div>
+                  )}
+
+                  {crossStoreKeys.length > 0 && (
+                    <div style={{ background: "#FBE9E7", padding: 10, borderRadius: 8, fontSize: 12.5, marginBottom: 10, color: T.red }}>
+                      以下員工同一天已在其他門市排班，未解決前無法套用：
+                      {[...diff.create, ...diff.update].filter((r) => crossStoreConflicts[`${r.employee_id}_${r.work_date}`]).map((r) => (
+                        <div key={r.sheet_cell}>{r.employeeName}・{r.work_date}・已排在「{crossStoreConflicts[`${r.employee_id}_${r.work_date}`]}」</div>
+                      ))}
+                    </div>
+                  )}
+
+                  {affectedByReport.length > 0 && (
+                    <div style={{ background: "#FFF3E0", padding: 10, borderRadius: 8, fontSize: 12.5, marginBottom: 10 }}>
+                      以下 {affectedByReport.length} 筆異動的員工當天已有每日回報資料，異動可能影響回報上的排定時間或加班依據，套用後請另行通知門市核對：
+                      <div style={{ maxHeight: 100, overflowY: "auto", marginTop: 6 }}>
+                        {affectedByReport.map((r) => <div key={r.sheet_cell}>{r.employeeName}・{r.work_date}</div>)}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${T.line}`, borderRadius: 8 }}>
+                    <table className="ph-table">
+                      <thead><tr><th>儲存格</th><th>員工</th><th>日期</th><th>原代碼</th><th>異動</th></tr></thead>
+                      <tbody>
+                        {diff.update.map((r) => (
+                          <tr key={r.sheet_cell}>
+                            <td>{r.sheet_cell}</td><td>{r.employeeName}</td><td>{r.work_date}</td><td>{r.shift_code_raw}</td>
+                            <td>{r.before.is_day_off ? "休" : `${(r.before.start_time || "").slice(0, 5)}-${(r.before.end_time || "").slice(0, 5)}`} → {r.is_day_off ? "休" : `${r.start_time}-${r.end_time}`}</td>
+                          </tr>
+                        ))}
+                        {diff.create.map((r) => (
+                          <tr key={r.sheet_cell}>
+                            <td>{r.sheet_cell}</td><td>{r.employeeName}</td><td>{r.work_date}</td><td>{r.shift_code_raw}</td>
+                            <td style={{ color: T.green }}>新增：{r.is_day_off ? "休" : `${r.start_time}-${r.end_time}`}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div style={{ marginTop: 12 }}>
+                    <button className="ph-btn primary" disabled={!readyToApply || applying} onClick={doApply}>
+                      {applying ? "套用中…" : checkingConflicts ? "檢查衝突中…" : `確認套用（${diff.create.length + diff.update.length} 筆）`}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </Modal>
+  );
+}
+
 function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, kioskMode }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
@@ -1308,6 +1778,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
   }, [supportPool, homeIds, shifts, supportAssignments, activeStoreId]);
   const displayRoster = useMemo(() => [...roster, ...supportRoster], [roster, supportRoster]);
   const [addSupportOpen, setAddSupportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [supportSourceStoreId, setSupportSourceStoreId] = useState("");
   const [supportPersonIds, setSupportPersonIds] = useState([]);
   const [supportMonth, setSupportMonth] = useState(ym);
@@ -1381,6 +1852,9 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
           {canEdit && activeStoreId && (
             <button className="ph-btn small" onClick={() => setAddSupportOpen(true)}>加入支援人員</button>
           )}
+          {canEdit && activeStoreId && !kioskMode && (
+            <button className="ph-btn small" onClick={() => setImportOpen(true)}>匯入班表</button>
+          )}
           {canEdit && !kioskMode && (
             <>
               <button className="ph-btn small" disabled={copying} onClick={copyLastMonth}>{copying ? "複製中…" : "複製上月"}</button>
@@ -1429,6 +1903,14 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
             <button className="ph-btn primary" disabled={supportBusy || !supportPersonIds.length || !supportMonth} onClick={confirmAddSupport}>{supportBusy ? "處理中…" : `確認加入${supportPersonIds.length ? `（${supportPersonIds.length}人）` : ""}`}</button>
           </div>
         </Modal>
+      )}
+      {importOpen && (
+        <ScheduleImportModal
+          me={me} stores={stores} scopeStoreIds={scheduleStoreIds}
+          defaultStoreId={activeStoreId} defaultYm={ym} toast={toast}
+          onClose={() => setImportOpen(false)}
+          onApplied={() => { setImportOpen(false); load(); }}
+        />
       )}
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 4, marginBottom: 12 }}>
         整月排班（{Number(ym.slice(5, 7))}/1–{Number(ym.slice(5, 7))}/{days}）；各門店分開處理，點擊班次即可修改。
@@ -2516,7 +2998,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const rowRefsDesktop = useRef({}); // employeeId -> 桌面表格列 DOM node
   const rowRefsMobile = useRef({}); // employeeId -> 手機卡片 DOM node（桌面/手機兩份 DOM 同時存在，用 CSS 切換顯示，各自要有自己的 ref 才能在對應版面捲動）
   const [errorTarget, setErrorTarget] = useState(null); // { employeeId, field } | null
-  const [shiftEndByEmployee, setShiftEndByEmployee] = useState({}); // employeeId -> "HH:mm" | null，用來預填加班的原定下班時間
+  const [scheduledShiftByEmployee, setScheduledShiftByEmployee] = useState({}); // employeeId -> {start,end} | null，排定班次；end 用來預填加班的原定下班時間
   const [overtimeLinkByEntry, setOvertimeLinkByEntry] = useState({}); // entryId -> 連結的加班申請（requests 表精簡欄位）
   const [corrections, setCorrections] = useState([]); // daily_report_entry_corrections，這份回報全部異常明細的更正歷程
   const [correctModal, setCorrectModal] = useState(null); // { r, e } | null
@@ -2530,7 +3012,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       sb.from("daily_reports").select("*").eq("store_id", storeId).eq("report_date", date).maybeSingle(),
       sb.from("leave_type_settings").select("*").order("sort_order"),
       sb.from("app_settings").select("value").eq("key", "leave_proof_deadline_days").maybeSingle(),
-      sb.from("shifts").select("employee_id,end_time,is_day_off").eq("store_id", storeId).eq("work_date", date),
+      sb.from("shifts").select("employee_id,start_time,end_time,is_day_off").eq("store_id", storeId).eq("work_date", date),
     ]);
     setDeadlineDays(deadlineRes.data?.value ?? null);
     if (rosterRes.error) console.error("store_roster", rosterRes.error);
@@ -2539,8 +3021,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     setRoster(rosterActive);
     setLeaveTypeSettings(leaveTypeRes.data || []);
     const shiftMap = {};
-    (shiftRes.data || []).forEach((s) => { shiftMap[s.employee_id] = !s.is_day_off && s.end_time ? s.end_time.slice(0, 5) : null; });
-    setShiftEndByEmployee(shiftMap);
+    (shiftRes.data || []).forEach((s) => {
+      shiftMap[s.employee_id] = s.is_day_off ? null : { start: s.start_time ? s.start_time.slice(0, 5) : null, end: s.end_time ? s.end_time.slice(0, 5) : null };
+    });
+    setScheduledShiftByEmployee(shiftMap);
     const rep = reportRes.data;
     setReport(rep);
     setPosVerified(rep?.pos_verified || false);
@@ -2639,8 +3123,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       return;
     }
     // 第一次勾選加班時，若當店當日班表有可靠的下班時間，先預填原定下班時間（仍可更正）
-    if (field === "overtime" && !entries[employeeId]?.overtime_scheduled_time && shiftEndByEmployee[employeeId]) {
-      updateEntry(employeeId, { overtime: checked, overtime_scheduled_time: shiftEndByEmployee[employeeId] });
+    if (field === "overtime" && !entries[employeeId]?.overtime_scheduled_time && scheduledShiftByEmployee[employeeId]?.end) {
+      updateEntry(employeeId, { overtime: checked, overtime_scheduled_time: scheduledShiftByEmployee[employeeId].end });
       return;
     }
     updateEntry(employeeId, { [field]: checked });
@@ -3192,7 +3676,14 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                     return (
                       <React.Fragment key={r.id}>
                         <tr ref={(el) => (rowRefsDesktop.current[r.id] = el)}>
-                          <td><RosterCell r={r} index={idx} /></td>
+                          <td>
+                            <RosterCell r={r} index={idx} />
+                            {scheduledShiftByEmployee[r.id] && (
+                              <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>
+                                排定 {scheduledShiftByEmployee[r.id].start || "—"}–{scheduledShiftByEmployee[r.id].end || "—"}
+                              </div>
+                            )}
+                          </td>
                           <td>
                             <input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => toggleAnomalyFlag(r.id, "late", ev.target.checked)} />
                             {e.late && (
@@ -3248,6 +3739,11 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                 return (
                   <div key={r.id} ref={(el) => (rowRefsMobile.current[r.id] = el)} style={{ padding: "12px 0", borderBottom: `1px solid ${T.line}` }}>
                     <RosterCell r={r} index={idx} />
+                    {scheduledShiftByEmployee[r.id] && (
+                      <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>
+                        排定 {scheduledShiftByEmployee[r.id].start || "—"}–{scheduledShiftByEmployee[r.id].end || "—"}
+                      </div>
+                    )}
                     <div style={{ display: "flex", gap: 14, margin: "10px 0", flexWrap: "wrap" }}>
                       <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.late} onChange={(ev) => toggleAnomalyFlag(r.id, "late", ev.target.checked)} /> 遲到</label>
                       <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}><input type="checkbox" disabled={dis} checked={!!e.missed_punch} onChange={(ev) => toggleAnomalyFlag(r.id, "missed_punch", ev.target.checked)} /> 漏打卡</label>
