@@ -1117,7 +1117,7 @@ function ScheduleImportModal({ me, stores, scopeStoreIds, defaultStoreId, defaul
       const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
       const [rosterRes, shiftRes, runRes, entryRes] = await Promise.all([
         sb.rpc("store_roster", { p_store_id: storeId }),
-        sb.from("shifts").select("employee_id,work_date,start_time,end_time,is_day_off").eq("store_id", storeId).gte("work_date", from).lte("work_date", to),
+        sb.from("shifts").select("employee_id,work_date,start_time,end_time,is_day_off,note").eq("store_id", storeId).gte("work_date", from).lte("work_date", to),
         sb.from("payroll_runs").select("id").eq("store_id", storeId).eq("year_month", ym).eq("status", "locked"),
         sb.from("daily_report_entries").select("employee_id,daily_reports!inner(report_date)").eq("store_id", storeId).gte("daily_reports.report_date", from).lte("daily_reports.report_date", to),
       ]);
@@ -1183,10 +1183,15 @@ function ScheduleImportModal({ me, stores, scopeStoreIds, defaultStoreId, defaul
         if (resolved.dayOff) dayOff = true; else { start = resolved.start; end = resolved.end; }
         workDate = `${ym}-${pad2(row.day)}`;
       }
-      out.push({ employee_id: employeeId, employeeName: row.employeeName, work_date: workDate, start_time: dayOff ? null : start, end_time: dayOff ? null : end, is_day_off: dayOff, sheet_cell: row.cell, shift_code_raw: row.code || (dayOff ? "休" : `${start}-${end}`) });
+      // note 寫入對應的範本班別名稱（例如「早班」），讓既有 templateLabelFor()／
+      // shiftCellText() 顯示邏輯（時間對得上範本就顯示班別名稱、對不上才顯示時間）
+      // 對匯入的班次也生效，不用另外重寫一套顯示規則；時間沒有對應到任何官方範本
+      // 時 note 留空，畫面自然照舊顯示時間區間（跟手動排班行為一致）
+      const matchedTemplate = !dayOff && (SHIFT_TEMPLATES[store?.name] || []).find((t) => t.start === start && t.end === end);
+      out.push({ employee_id: employeeId, employeeName: row.employeeName, work_date: workDate, start_time: dayOff ? null : start, end_time: dayOff ? null : end, is_day_off: dayOff, sheet_cell: row.cell, shift_code_raw: row.code || (dayOff ? "休" : `${start}-${end}`), note: matchedTemplate ? matchedTemplate.label : "" });
     });
     return out;
-  }, [allResolved, rawRows, nameMatch, employeeChoice, codeMap, codeChoice, formatMode, ym]);
+  }, [allResolved, rawRows, nameMatch, employeeChoice, codeMap, codeChoice, formatMode, ym, store]);
 
   // 批次內衝突：同員工同日期出現不同結果
   const inBatchConflicts = useMemo(() => {
@@ -1207,7 +1212,10 @@ function ScheduleImportModal({ me, stores, scopeStoreIds, defaultStoreId, defaul
       if (lockedDates) { lockedSkip.push(r); return; }
       const existing = existingShifts[key];
       if (!existing) { create.push(r); return; }
-      const same = (existing.start_time || "").slice(0, 5) === (r.start_time || "") && (existing.end_time || "").slice(0, 5) === (r.end_time || "") && !!existing.is_day_off === !!r.is_day_off;
+      // 時間與休假狀態相同才算不變；note 只有在這次有對應到範本名稱時才納入比對
+      // （沒對應到範本時 note 是空字串，不強迫覆蓋既有班次可能有的手動備註）
+      const same = (existing.start_time || "").slice(0, 5) === (r.start_time || "") && (existing.end_time || "").slice(0, 5) === (r.end_time || "") && !!existing.is_day_off === !!r.is_day_off
+        && (!r.note || (existing.note || "") === r.note);
       if (same) unchanged.push(r); else update.push({ ...r, before: existing });
     });
     return { create, update, unchanged, lockedSkip, conflict };
@@ -1236,9 +1244,13 @@ function ScheduleImportModal({ me, stores, scopeStoreIds, defaultStoreId, defaul
   async function doApply() {
     setApplying(true);
     try {
+      // note：有對應到官方範本名稱就用範本名稱（等同手動點範本按鈕的效果，允許覆蓋
+      // 舊note）；沒對應到範本時，新增班次note留空，更正既有班次則保留原本的note
+      // （不因為只是改時間就把既有手動備註洗掉）
       const payload = [...diff.create, ...diff.update].map((r) => ({
         employee_id: r.employee_id, work_date: r.work_date, start_time: r.start_time, end_time: r.end_time,
         is_day_off: r.is_day_off, sheet_cell: r.sheet_cell, shift_code_raw: r.shift_code_raw,
+        note: r.note || r.before?.note || "",
       }));
       const { data, error } = await sb.rpc("apply_schedule_import", { p_store_id: storeId, p_year_month: ym, p_file_name: fileName, p_rows: payload });
       if (error) { toast("套用失敗：" + error.message); return; }
@@ -1387,7 +1399,10 @@ function ScheduleImportModal({ me, stores, scopeStoreIds, defaultStoreId, defaul
                         {diff.update.map((r) => (
                           <tr key={r.sheet_cell}>
                             <td>{r.sheet_cell}</td><td>{r.employeeName}</td><td>{r.work_date}</td><td>{r.shift_code_raw}</td>
-                            <td>{r.before.is_day_off ? "休" : `${(r.before.start_time || "").slice(0, 5)}-${(r.before.end_time || "").slice(0, 5)}`} → {r.is_day_off ? "休" : `${r.start_time}-${r.end_time}`}</td>
+                            <td>
+                              {r.before.is_day_off ? "休" : `${(r.before.start_time || "").slice(0, 5)}-${(r.before.end_time || "").slice(0, 5)}`} → {r.is_day_off ? "休" : `${r.start_time}-${r.end_time}`}
+                              {r.note && r.note !== (r.before.note || "") && <span style={{ color: T.sub }}> （班別標籤：{r.before.note || "—"} → {r.note}）</span>}
+                            </td>
                           </tr>
                         ))}
                         {diff.create.map((r) => (
