@@ -527,11 +527,16 @@ const css = `
 .ph-payslip th, .ph-payslip td { border:1px solid #ccc; padding:8px 10px; text-align:left; }
 .ph-payslip th { background:#F5F1EA; font-weight:600; white-space:nowrap; }
 .ph-payslip .num { text-align:right; font-variant-numeric:tabular-nums; }
+.ph-summary-detail.collapsed { display:none; }
 @media print {
   body * { visibility:hidden; }
   .ph-payslip, .ph-payslip * { visibility:visible; }
   .ph-payslip { position:absolute; top:0; left:0; width:100%; max-width:none; box-shadow:none; }
   .ph-payslip-noprint { display:none !important; }
+  .ph-summary-print, .ph-summary-print * { visibility:visible; }
+  .ph-summary-print { position:absolute; top:0; left:0; width:100%; }
+  .ph-summary-noprint { display:none !important; }
+  .ph-summary-detail.collapsed { display:block !important; }
 }
 `;
 
@@ -5434,13 +5439,26 @@ function PayrollOverrideModal({ me, emp, ym, subject, row, onClose, onSaved, toa
 const SCHEDULE_MAX_DAILY_HOURS = 12; // 單日排定時數上限（硬編碼常數，不做成後台可設定介面）
 const SCHEDULE_MAX_CONSECUTIVE_DAYS = 6; // 連續排班天數上限
 
-function StatTile({ label, value, unit, tone }) {
+function StatTile({ label, value, unit, tone, onClick }) {
   return (
-    <div className="ph-stat-card" style={{ padding: "14px 16px" }}>
+    <div className="ph-stat-card" style={{ padding: "14px 16px", cursor: onClick ? "pointer" : undefined }} onClick={onClick}>
       <p className="ph-eyebrow" style={{ margin: "0 0 6px", fontSize: 10.5 }}>{label}</p>
       <p className="ph-serif" style={{ margin: 0, fontSize: 22, color: tone ? T[tone] : T.ink }}>
         {value}<span style={{ fontSize: 12, color: T.sub, marginLeft: 4, fontFamily: "'Noto Sans TC',sans-serif" }}>{unit || ""}</span>
       </p>
+    </div>
+  );
+}
+// 收合式明細表格：預設收合時用CSS隱藏（不是不渲染），這樣列印時可以靠
+// @media print 的.collapsed規則強制顯示，不會因為畫面收合就漏印
+function CollapsibleTable({ title, count, unit, collapsed, onToggle, children }) {
+  return (
+    <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }} className="ph-summary-noprint">
+        <strong style={{ fontSize: 12.5 }}>{title}（{count} {unit || "筆"}）</strong>
+        <button className="ph-btn small" onClick={onToggle}>{collapsed ? "展開" : "收合"}</button>
+      </div>
+      <div className={`ph-summary-detail${collapsed ? " collapsed" : ""}`}>{children}</div>
     </div>
   );
 }
@@ -5455,6 +5473,14 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
   const [publications, setPublications] = useState([]);
   const [lockedStores, setLockedStores] = useState([]);
   const [staffingTargets, setStaffingTargets] = useState([]);
+  const [dailyReports, setDailyReports] = useState([]);
+  const [dailyEntries, setDailyEntries] = useState([]);
+  const [leaveTypeSettings, setLeaveTypeSettings] = useState([]);
+  const [collapsed, setCollapsed] = useState({ byEmployee: true, anomalies: true, changesEffective: true, changesFuture: true });
+  const [drillDown, setDrillDown] = useState(null);
+  const sectionRefs = useRef({});
+  function scrollToSection(key) { sectionRefs.current[key]?.scrollIntoView({ behavior: "smooth", block: "start" }); }
+  function toggleCollapsed(key) { setCollapsed((c) => ({ ...c, [key]: !c[key] })); }
 
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const realStores = useMemo(() => stores.filter((s) => s.name !== "總部"), [stores]);
@@ -5472,7 +5498,7 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
     const days = monthDays(ym);
     const from = `${ym}-01`, to = `${ym}-${pad2(days)}`;
     const monthStartIso = `${from}T00:00:00+08:00`, monthEndIso = `${to}T23:59:59+08:00`;
-    const [hcRes, shiftRes, reqRes, changeRes, pubRes, lockRes, targetRes] = await Promise.all([
+    const [hcRes, shiftRes, reqRes, changeRes, pubRes, lockRes, targetRes, reportRes] = await Promise.all([
       sb.rpc("monthly_headcount_snapshot", { p_ym: ym }),
       sb.from("shifts").select("*").in("store_id", scheduleStoreIds).gte("work_date", from).lte("work_date", to),
       sb.from("requests").select("*").in("store_id", scheduleStoreIds).gte("start_at", monthStartIso).lte("start_at", monthEndIso),
@@ -5480,11 +5506,13 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
       sb.from("schedule_publications").select("*").in("store_id", scheduleStoreIds).eq("year_month", ym),
       sb.from("payroll_runs").select("store_id").in("store_id", scheduleStoreIds).eq("year_month", ym).eq("status", "locked"),
       sb.from("store_staffing_targets").select("*").in("store_id", scheduleStoreIds),
+      sb.from("daily_reports").select("*").in("store_id", scheduleStoreIds).gte("report_date", from).lte("report_date", to),
     ]);
     if (hcRes.error) console.error("monthly_headcount_snapshot", hcRes.error);
     if (shiftRes.error) console.error("shifts", shiftRes.error);
     if (reqRes.error) console.error("requests", reqRes.error);
     if (changeRes.error) console.error("employee_change_log", changeRes.error);
+    if (reportRes.error) console.error("daily_reports", reportRes.error);
     setHeadcount(hcRes.data || []);
     setShifts(shiftRes.data || []);
     setRequests(reqRes.data || []);
@@ -5492,15 +5520,29 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
     setPublications(pubRes.data || []);
     setLockedStores((lockRes.data || []).map((r) => r.store_id));
     setStaffingTargets(targetRes.data || []);
+    const reportRows = reportRes.data || [];
+    setDailyReports(reportRows);
+    const reportIds = reportRows.map((r) => r.id);
+    if (reportIds.length) {
+      const { data: entryRows, error: entryErr } = await sb.from("daily_report_entries").select("*").in("daily_report_id", reportIds);
+      if (entryErr) console.error("daily_report_entries", entryErr);
+      setDailyEntries(entryRows || []);
+    } else {
+      setDailyEntries([]);
+    }
     setLoading(false);
   }, [ym, scheduleStoreIds, scopeStoreIds]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
+    sb.from("leave_type_settings").select("*").order("sort_order").then(({ data }) => setLeaveTypeSettings(data || []));
+  }, []);
+  useEffect(() => {
     const ch = sb.channel("monthly_summary_sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "employees" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_reports" }, load)
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
@@ -5508,9 +5550,12 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
   const days = monthDays(ym);
   const dateList = Array.from({ length: days }, (_, i) => `${ym}-${pad2(i + 1)}`);
   const empById = useMemo(() => Object.fromEntries(headcount.map((h) => [h.employee_id, h])), [headcount]);
+  const todayISO = todayStr();
+  const isOngoingMonth = ym >= thisMonthStr(); // 本月或未來月份：月底數字含尚未生效的異動，需要另外顯示「截至今天」
+  const elapsedDateList = isOngoingMonth ? dateList.filter((d) => d <= todayISO) : dateList; // 已經發生的日期，未來月份會是空陣列
 
-  // ---- 一、每月人力總覽 ----
-  const hcInScope = headcount.filter((h) => scopeStoreIds.includes(h.store_id));
+  // ---- 一、每月人力總覽（不含總部，跟排班相關統計口徑一致）----
+  const hcInScope = headcount.filter((h) => scheduleStoreIds.includes(h.store_id));
   const startCount = hcInScope.filter((h) => h.employed_at_month_start).length;
   const endCount = hcInScope.filter((h) => h.employed_at_month_end).length;
   const hiredCount = hcInScope.filter((h) => h.hired_this_month).length;
@@ -5522,8 +5567,28 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
   const partTimeCount = endEmployed.filter((h) => h.employment_type === "part_time").length;
   const byStoreCount = {};
   endEmployed.forEach((h) => { byStoreCount[h.store_id] = (byStoreCount[h.store_id] || 0) + 1; });
-  const byPositionCount = {};
-  endEmployed.forEach((h) => { const p = h.position || "（未填職務）"; byPositionCount[p] = (byPositionCount[p] || 0) + 1; });
+  // 職稱依既有固定清單（POSITION_OPTIONS，StaffPage編輯表單本來就是這份下拉選單）分類，
+  // 不依自由文字任意拆分；固定清單以外的舊資料例外另外歸一類，不是分開展開成一堆自由文字
+  const byPositionCount = Object.fromEntries(POSITION_OPTIONS.map((p) => [p, 0]));
+  let otherPositionCount = 0;
+  endEmployed.forEach((h) => {
+    if (h.position && POSITION_OPTIONS.includes(h.position)) byPositionCount[h.position] += 1; else otherPositionCount += 1;
+  });
+  const hqEndCount = headcount.filter((h) => h.store_id === hqStore?.id && h.employed_at_month_end).length;
+  // 「截至今天」版本：本月/未來月份才有意義，直接用已抓到的原始欄位（hire_date／
+  // termination_date／active）現場算，不靠RPC「月底」邏輯（那個邏輯不管日子有沒有發生）
+  const asOfTodayEmployed = hcInScope.filter((h) => h.hire_date && h.hire_date <= todayISO && (h.active || (h.termination_date && h.termination_date >= todayISO)));
+  const asOfTodayCount = asOfTodayEmployed.length;
+  const asOfTodayHiredCount = hcInScope.filter((h) => h.hired_this_month && h.hire_date <= todayISO).length;
+  const asOfTodayTerminatedCount = hcInScope.filter((h) => h.terminated_this_month && h.termination_date && h.termination_date <= todayISO).length;
+
+  // ---- 五(舊)、請假與排班需求：提前算好，供新的「每日異常月度摘要」段落共用 ----
+  const leaveRows = requests.filter((r) => r.type !== "overtime");
+  const overtimeRows = requests.filter((r) => r.type === "overtime");
+  const pendingCount = requests.filter((r) => r.status === "pending").length;
+  const approvedReqCount = requests.filter((r) => r.status === "approved").length;
+  const rejectedCount = requests.filter((r) => r.status === "rejected").length;
+  const overtimePendingRevisionCount = overtimeRows.filter((r) => r.pending_submitted_at).length;
 
   // ---- 二、每月排班總覽 ----
   const workShifts = shifts.filter((s) => !s.is_day_off);
@@ -5600,37 +5665,81 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
     }
   });
 
-  // ---- 四、門市人力配置（簡化版：平/假日最低人數）----
+  // ---- 三、門市人力配置：以「同門店同日期不重複排班人數」對比每日門檻 ----
+  // （目前現有schema下，shifts表本來就是unique(employee_id,work_date)，一人一天最多一筆，
+  // 「不重複人數」跟「當日班次數」在此結構下數值相同，這裡主要是把語意/單位講清楚）；
+  // 門檻未設定或當天完全沒有排班紀錄時記為「無法判定」，不計為0天或直接認定缺人——沒有
+  // 排班紀錄無法分辨是「當天真的不需要人」還是「還沒排」
   const staffingByStore = {};
   scheduleStoreIds.forEach((sid) => {
     const wdTarget = staffingTargets.find((t) => t.store_id === sid && !t.is_weekend)?.min_headcount ?? null;
     const weTarget = staffingTargets.find((t) => t.store_id === sid && t.is_weekend)?.min_headcount ?? null;
-    let short = 0, over = 0, met = 0;
+    let short = 0, over = 0, met = 0, unjudgable = 0;
+    const shortDetail = [], unjudgableDetail = [];
     dateList.forEach((d) => {
       const isWeekend = ["六", "日"].includes(weekdayZh(d));
       const target = isWeekend ? weTarget : wdTarget;
-      if (target == null) return;
-      const count = workShifts.filter((s) => s.store_id === sid && s.work_date === d).length;
-      if (count < target) short++; else if (count > target) over++; else met++;
+      const uniqueCount = new Set(workShifts.filter((s) => s.store_id === sid && s.work_date === d).map((s) => s.employee_id)).size;
+      if (target == null || uniqueCount === 0) { unjudgable++; unjudgableDetail.push({ date: d, count: uniqueCount, target }); return; }
+      if (uniqueCount < target) { short++; shortDetail.push({ date: d, count: uniqueCount, target }); }
+      else if (uniqueCount > target) over++; else met++;
     });
-    staffingByStore[sid] = { wdTarget, weTarget, short, over, met };
+    staffingByStore[sid] = { wdTarget, weTarget, short, over, met, unjudgable, shortDetail, unjudgableDetail };
   });
+  const totalShortStoreDays = Object.values(staffingByStore).reduce((s, v) => s + v.short, 0);
+  const totalUnjudgableStoreDays = Object.values(staffingByStore).reduce((s, v) => s + v.unjudgable, 0);
 
-  // ---- 五、請假與排班需求 ----
-  const leaveRows = requests.filter((r) => r.type !== "overtime");
-  const overtimeRows = requests.filter((r) => r.type === "overtime");
-  const pendingCount = requests.filter((r) => r.status === "pending").length;
-  const approvedReqCount = requests.filter((r) => r.status === "approved").length;
-  const rejectedCount = requests.filter((r) => r.status === "rejected").length;
+  // ---- 五(新)、每日異常月度摘要（遲到/漏打卡/假別/加班/每日回報繳交情況）----
+  const leaveTypeByCode = Object.fromEntries(leaveTypeSettings.map((t) => [t.code, t]));
+  const reportsElapsed = dailyReports.filter((r) => elapsedDateList.includes(r.report_date));
+  const submittedReports = reportsElapsed.filter((r) => r.status !== "draft");
+  const dueStoreDays = scheduleStoreIds.length * elapsedDateList.length;
+  const submittedStoreDays = submittedReports.length;
+  const overdueList = [];
+  scheduleStoreIds.forEach((sid) => {
+    elapsedDateList.forEach((d) => {
+      if (!submittedReports.some((r) => r.store_id === sid && r.report_date === d)) overdueList.push({ store_id: sid, date: d });
+    });
+  });
+  const overdueStoreDays = overdueList.length;
+
+  const lateEntries = dailyEntries.filter((e) => e.late);
+  const lateCount = lateEntries.length;
+  const lateMinutesTotal = lateEntries.reduce((s, e) => s + (Number(e.late_minutes) || 0), 0);
+  const missedPunchCount = dailyEntries.filter((e) => e.missed_punch).length;
+
+  const leaveEntries = dailyEntries.filter((e) => e.leave && e.leave_type);
+  const leaveHoursByType = {};
+  leaveEntries.forEach((e) => { leaveHoursByType[e.leave_type] = (leaveHoursByType[e.leave_type] || 0) + (Number(e.leave_hours) || 0); });
+  const proofPendingCount = leaveEntries.filter((e) => leaveTypeByCode[e.leave_type]?.requires_proof && e.leave_proof_status !== "confirmed").length;
+
+  const overtimeEntriesReported = dailyEntries.filter((e) => e.overtime);
+  const overtimeReportedMinutes = overtimeEntriesReported.reduce((s, e) => s + (Number(e.overtime_minutes) || 0), 0);
+  const overtimeApprovedMinutes = overtimeRows.filter((r) => r.status === "approved")
+    .reduce((s, r) => s + (r.approved_minutes != null ? Number(r.approved_minutes) : Math.round(Number(r.hours || 0) * 60)), 0);
+
   const leaveConflictCount = anomalies.filter((a) => a.type === "已核准請假時段仍被排班").length;
 
+  // ---- 資料完整性提示 ----
+  const storesNoScheduleAtAll = realStores.filter((s) => scheduleStoreIds.includes(s.id) && !(shiftDatesByStore[s.id]?.size));
+  const storesUnpublished = realStores.filter((s) => scheduleStoreIds.includes(s.id) && !publications.some((p) => p.store_id === s.id));
+
   const kpi = [
-    ["月底在職人數", endCount, "人"], ["當月新進人數", hiredCount, "人"], ["當月離職人數", terminatedCount, "人"],
-    ["人力淨增減", (netChange >= 0 ? "+" : "") + netChange, "人"], ["當月離職率", turnoverRate.toFixed(1), "%"],
-    ["總排定時數", Math.round(totalHours), "小時"], ["正職排定時數", Math.round(ftHours), "小時"], ["兼職排定時數", Math.round(ptHours), "小時"],
-    ["人力不足天數", Object.values(staffingByStore).reduce((s, v) => s + v.short, 0), "天"],
-    ["排班異常數", anomalies.length, "筆"], ["未完成排班日期數", emptyDays.length, "筆"],
-    ["待審核請假件數", pendingCount, "件"], ["未發布門市數", unpublishedCount, "間"],
+    { label: isOngoingMonth ? "月底在職（含未生效異動）" : "月底在職人數", value: endCount, unit: "人", onClick: () => scrollToSection("headcount") },
+    { label: "當月新進人數", value: hiredCount, unit: "人", onClick: () => scrollToSection("headcount") },
+    { label: "當月離職人數", value: terminatedCount, unit: "人", onClick: () => scrollToSection("headcount") },
+    { label: "人力淨增減", value: (netChange >= 0 ? "+" : "") + netChange, unit: "人" },
+    { label: "當月離職率", value: turnoverRate.toFixed(1), unit: "%" },
+    { label: "總排定時數（不含休息扣除）", value: Math.round(totalHours), unit: "小時", onClick: () => scrollToSection("scheduleOverview") },
+    { label: "正職排定時數", value: Math.round(ftHours), unit: "小時" },
+    { label: "兼職排定時數", value: Math.round(ptHours), unit: "小時" },
+    { label: "排班人數未達每日門檻店日", value: totalShortStoreDays, unit: "店日", tone: totalShortStoreDays ? "red" : undefined, onClick: () => scrollToSection("staffing") },
+    { label: "人力門檻無法判定店日", value: totalUnjudgableStoreDays, unit: "店日", onClick: () => scrollToSection("staffing") },
+    { label: "排班異常數", value: anomalies.length, unit: "筆", onClick: () => scrollToSection("anomalies") },
+    { label: "尚未排班日期", value: emptyDays.length, unit: "筆", onClick: () => scrollToSection("scheduleOverview") },
+    { label: "每日回報逾期未繳", value: overdueStoreDays, unit: "店日", tone: overdueStoreDays ? "red" : undefined, onClick: () => scrollToSection("dailySummary") },
+    { label: "待審核請假／加班件數", value: pendingCount, unit: "件", onClick: () => scrollToSection("requestsSection") },
+    { label: "未發布門市數", value: unpublishedCount, unit: "間", onClick: () => scrollToSection("publishSection") },
   ];
 
   function exportHeadcount() {
@@ -5658,15 +5767,36 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
     );
   }
 
+  const changesFuture = changes.filter((c) => (c.change_type === "hire" || c.change_type === "termination") && c.new_value && c.new_value > todayISO);
+  const changesEffective = changes.filter((c) => !((c.change_type === "hire" || c.change_type === "termination") && c.new_value && c.new_value > todayISO));
+
+  function renderChangeRow(c) {
+    return (
+      <tr key={c.id}>
+        <td>{c.employee?.name || "—"}</td>
+        <td>{storeById[c.employee?.store_id]?.name || ""}</td>
+        <td><Badge tone="brown">{CHANGE_TYPE_LABEL[c.change_type] || c.change_type}</Badge></td>
+        <td style={{ fontSize: 12, color: T.sub }}>{c.old_value || "—"}</td>
+        <td style={{ fontSize: 12, color: T.sub }}>{c.new_value || "—"}</td>
+        <td style={{ fontSize: 12, color: T.sub }}>{fmtTaipei(c.changed_at)}</td>
+      </tr>
+    );
+  }
+
   return (
-    <div>
+    <div className="ph-summary-print">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 4 }}>
         <div>
           <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>MONTHLY SUMMARY</p>
           <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每月人事與排班總結</h2>
-          <p style={{ color: T.sub, fontSize: 12, margin: 0 }}>本頁全部時數／班數皆為系統「排定」資料，不是 POS 實際出勤紀錄；門市範圍請用畫面最上方的「處理門市」切換。</p>
+          <p style={{ color: T.sub, fontSize: 12, margin: 0 }}>
+            統計期間：{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月　全月共 {days} 天｜資料截止：
+            {isOngoingMonth ? `本月尚未結束，截至 ${todayISO}` : `${ym}-${pad2(days)}（已結束月份）`}
+          </p>
+          <p style={{ color: T.sub, fontSize: 12, margin: "2px 0 0" }}>本頁全部時數／班數皆為系統「排定」資料，不是 POS 實際出勤紀錄；門市範圍請用畫面最上方的「處理門市」切換。</p>
+          <p style={{ color: T.sub, fontSize: 11.5, margin: "2px 0 0" }}>本頁不含薪資與公司負擔費用，不是完整人事成本報表；薪資請至「薪資試算」頁查看。</p>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div className="ph-summary-noprint" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
           <button className="ph-btn small" onClick={() => window.print()}>列印／匯出 PDF</button>
         </div>
@@ -5674,26 +5804,55 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
 
       {loading ? <p style={{ color: T.sub, marginTop: 20 }}>載入中…</p> : (
         <>
+          {(storesNoScheduleAtAll.length > 0 || storesUnpublished.length > 0) && (
+            <div style={{ background: "#FFF3E0", padding: 10, borderRadius: 8, fontSize: 12.5, margin: "12px 0" }}>
+              <strong>資料完整性提示</strong>
+              {storesNoScheduleAtAll.length > 0 && <div style={{ marginTop: 4 }}>本月完全沒有排班紀錄：{storesNoScheduleAtAll.map((s) => s.name).join("、")}</div>}
+              {storesUnpublished.length > 0 && <div style={{ marginTop: 4 }}>本月尚未發布班表：{storesUnpublished.map((s) => s.name).join("、")}</div>}
+              <div style={{ color: T.sub, marginTop: 4 }}>以上門市的相關統計可能不完整，請勿當作完整月報使用。</div>
+            </div>
+          )}
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10, margin: "18px 0" }}>
-            {kpi.map(([label, value, unit]) => <StatTile key={label} label={label} value={value} unit={unit} />)}
+            {kpi.map((k) => <StatTile key={k.label} label={k.label} value={k.value} unit={k.unit} tone={k.tone} onClick={k.onClick} />)}
           </div>
 
-          <h3 className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>一、每月人力總覽</h3>
+          <div className="ph-card" style={{ padding: 16, marginBottom: 18, background: "#FFF8ED" }}>
+            <strong style={{ fontSize: 13.5 }}>待處理事項</strong>
+            <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.9 }}>
+              {pendingCount > 0 && <li>{pendingCount} 件請假／加班申請待審核</li>}
+              {overdueStoreDays > 0 && <li>{overdueStoreDays} 店日每日回報逾期未繳</li>}
+              {unpublishedCount > 0 && <li>{unpublishedCount} 間門市本月班表尚未發布</li>}
+              {totalUnjudgableStoreDays > 0 && <li>{totalUnjudgableStoreDays} 店日人力門檻無法判定（門檻未設定或當天完全沒有排班紀錄）</li>}
+              {overtimePendingRevisionCount > 0 && <li>{overtimePendingRevisionCount} 筆加班更正待審</li>}
+              {proofPendingCount > 0 && <li>{proofPendingCount} 筆請假證明待補</li>}
+              {pendingCount === 0 && overdueStoreDays === 0 && unpublishedCount === 0 && totalUnjudgableStoreDays === 0 && overtimePendingRevisionCount === 0 && proofPendingCount === 0 && (
+                <li style={{ color: T.sub }}>目前沒有待處理事項</li>
+              )}
+            </ul>
+          </div>
+
+          <h3 ref={(el) => (sectionRefs.current.headcount = el)} className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>一、每月人力總覽</h3>
           <div className="ph-card" style={{ padding: 16, marginBottom: 10 }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12, marginBottom: 14 }}>
               <StatTile label="月初在職" value={startCount} unit="人" />
-              <StatTile label="月底在職" value={endCount} unit="人" />
+              <StatTile label={isOngoingMonth ? "月底在職（含未生效異動）" : "月底在職"} value={endCount} unit="人" />
+              {isOngoingMonth && <StatTile label="截至今天在職" value={asOfTodayCount} unit="人" />}
               <StatTile label="正職" value={fullTimeCount} unit="人" />
               <StatTile label="兼職" value={partTimeCount} unit="人" />
               <StatTile label="留職停薪" value="—" unit="（尚未支援）" />
             </div>
+            {isOngoingMonth && (
+              <p style={{ color: T.sub, fontSize: 11.5, margin: "0 0 12px" }}>
+                本月尚未結束：「月底在職」以整月最後一天為基準推算，含尚未生效的未來到職/離職（本月新進 {hiredCount} 人中已生效 {asOfTodayHiredCount} 人；本月離職 {terminatedCount} 人中已生效 {asOfTodayTerminatedCount} 人）；「截至今天」只反映到 {todayISO} 為止已經生效的異動。
+              </p>
+            )}
             <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 12.5 }}>
               {isMultiStore && (
                 <div>
-                  <strong style={{ fontSize: 12.5 }}>各門市在職人數</strong>
+                  <strong style={{ fontSize: 12.5 }}>各門市在職人數（不含總部）</strong>
                   <div style={{ color: T.sub, marginTop: 4 }}>
                     {realStores.map((s) => <div key={s.id}>{s.name}：{byStoreCount[s.id] || 0} 人</div>)}
-                    <div>總部：{byStoreCount[stores.find((s) => s.name === "總部")?.id] || 0} 人</div>
                   </div>
                 </div>
               )}
@@ -5701,13 +5860,15 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
                 <strong style={{ fontSize: 12.5 }}>各職務在職人數</strong>
                 <div style={{ color: T.sub, marginTop: 4 }}>
                   {Object.entries(byPositionCount).map(([p, c]) => <div key={p}>{p}：{c} 人</div>)}
+                  {otherPositionCount > 0 && <div>其他（未列於固定清單）：{otherPositionCount} 人</div>}
                 </div>
               </div>
             </div>
-            <button className="ph-btn small" style={{ marginTop: 12 }} onClick={exportHeadcount}>匯出人力總覽</button>
+            <p style={{ color: T.sub, fontSize: 11.5, margin: "10px 0 0" }}>總部另計：{hqEndCount} 人（不含在以上總數內）。</p>
+            <button className="ph-btn small ph-summary-noprint" style={{ marginTop: 12 }} onClick={exportHeadcount}>匯出人力總覽</button>
           </div>
 
-          <h3 className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>二、每月排班總覽</h3>
+          <h3 ref={(el) => (sectionRefs.current.scheduleOverview = el)} className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>二、每月排班總覽</h3>
           <div className="ph-card" style={{ padding: 16, marginBottom: 10 }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12, marginBottom: 14 }}>
               <StatTile label="總排定時數（不含休息扣除）" value={Math.round(totalHours)} unit="小時" />
@@ -5732,23 +5893,25 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
                 </div>
               </>
             )}
-            <strong style={{ fontSize: 12.5, display: "block", marginTop: 14 }}>各員工排定班數／排定時數</strong>
-            <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginTop: 6, maxHeight: 320, overflowY: "auto" }}>
-              <table className="ph-table">
-                <thead><tr><th>姓名</th><th>門市</th><th>排定天數</th><th>排定時數</th></tr></thead>
-                <tbody>
-                  {Object.entries(byEmployeeShifts).map(([empId, v]) => (
-                    <tr key={empId}><td>{empById[empId]?.name || "—"}</td><td>{storeById[empById[empId]?.store_id]?.name || ""}</td><td>{v.count}</td><td>{Math.round(v.hours)}</td></tr>
-                  ))}
-                </tbody>
-              </table>
+            <div style={{ marginTop: 14 }}>
+              <CollapsibleTable title="各員工排定班數／排定時數（班數＝排定天數，一人一天最多一筆班次）" count={Object.keys(byEmployeeShifts).length} unit="人"
+                collapsed={collapsed.byEmployee} onToggle={() => toggleCollapsed("byEmployee")}>
+                <table className="ph-table">
+                  <thead><tr><th>姓名</th><th>門市</th><th>排定天數</th><th>排定時數</th></tr></thead>
+                  <tbody>
+                    {Object.entries(byEmployeeShifts).map(([empId, v]) => (
+                      <tr key={empId}><td>{empById[empId]?.name || "—"}</td><td>{storeById[empById[empId]?.store_id]?.name || ""}</td><td>{v.count}</td><td>{Math.round(v.hours)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CollapsibleTable>
             </div>
           </div>
 
-          <h3 className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>三、門市人力配置（平／假日最低人數門檻）</h3>
+          <h3 ref={(el) => (sectionRefs.current.staffing = el)} className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>三、門市人力配置（平／假日最低不重複人數門檻）</h3>
           <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginBottom: 10 }}>
             <table className="ph-table">
-              <thead><tr><th>門市</th><th>平日門檻</th><th>假日門檻</th><th>人力不足天數</th><th>人力超額天數</th><th>符合天數</th></tr></thead>
+              <thead><tr><th>門市</th><th>平日門檻（不重複人數）</th><th>假日門檻（不重複人數）</th><th>未達門檻店日</th><th>超額店日</th><th>符合店日</th><th>無法判定店日</th></tr></thead>
               <tbody>
                 {realStores.filter((s) => scheduleStoreIds.includes(s.id)).map((s) => {
                   const v = staffingByStore[s.id];
@@ -5757,19 +5920,27 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
                       <td>{s.name}</td>
                       <td>{v?.wdTarget ?? "未設定"}</td>
                       <td>{v?.weTarget ?? "未設定"}</td>
-                      <td style={v?.short ? { color: T.red } : undefined}>{v?.short ?? "—"}</td>
+                      <td style={{ color: v?.short ? T.red : undefined, cursor: v?.short ? "pointer" : undefined }}
+                        onClick={() => v?.shortDetail?.length && setDrillDown({ title: `${s.name}・未達門檻店日`, columns: ["日期", "排班人數", "門檻"], rows: v.shortDetail.map((d) => [d.date, d.count, d.target]) })}>
+                        {v?.short ?? "—"}
+                      </td>
                       <td>{v?.over ?? "—"}</td>
                       <td>{v?.met ?? "—"}</td>
+                      <td style={{ cursor: v?.unjudgable ? "pointer" : undefined }}
+                        onClick={() => v?.unjudgableDetail?.length && setDrillDown({ title: `${s.name}・無法判定店日`, columns: ["日期", "排班人數", "門檻"], rows: v.unjudgableDetail.map((d) => [d.date, d.count, d.target ?? "未設定"]) })}>
+                        {v?.unjudgable ?? "—"}
+                      </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
           </div>
-          <p style={{ color: T.sub, fontSize: 11.5, margin: "0 0 20px" }}>門檻在「門市排班」頁的「人力門檻」卡片設定；未設定的門市這裡會顯示「未設定」，不計入統計。</p>
+          <p style={{ color: T.sub, fontSize: 11.5, margin: "0 0 4px" }}>依每日不重複排班人數判斷，不代表各時段人力充足，也不代表實際到班人數；真正的早晚班時段覆蓋分析尚未支援，待營業時段、各時段需求人數及休息時間資料完整後再實作。</p>
+          <p style={{ color: T.sub, fontSize: 11.5, margin: "0 0 20px" }}>門檻在「門市排班」頁的「人力門檻」卡片設定；門檻未設定或當天完全沒有排班紀錄時顯示「無法判定」，不計為0天或直接認定缺人。跨店合計以「店日」為單位（例如同一天兩間店未達門檻計為2店日）。</p>
 
-          <h3 className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>四、排班完整性與異常檢查</h3>
-          <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginBottom: 10 }}>
+          <h3 ref={(el) => (sectionRefs.current.anomalies = el)} className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>四、排班完整性與異常檢查</h3>
+          <CollapsibleTable title="異常明細" count={anomalies.length} unit="筆" collapsed={collapsed.anomalies} onToggle={() => toggleCollapsed("anomalies")}>
             <table className="ph-table">
               <thead><tr><th>姓名</th><th>門市</th><th>日期</th><th>異常類型</th><th>說明</th></tr></thead>
               <tbody>
@@ -5785,10 +5956,35 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
                 {anomalies.length === 0 && <tr><td colSpan={5} style={{ color: T.sub, textAlign: "center" }}>本月沒有偵測到異常</td></tr>}
               </tbody>
             </table>
-          </div>
-          <button className="ph-btn small" style={{ marginBottom: 20 }} onClick={exportAnomalies}>匯出異常明細</button>
+          </CollapsibleTable>
+          <button className="ph-btn small ph-summary-noprint" style={{ marginBottom: 20 }} onClick={exportAnomalies}>匯出異常明細</button>
 
-          <h3 className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>五、請假與排班需求</h3>
+          <h3 ref={(el) => (sectionRefs.current.dailySummary = el)} className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>五、每日異常月度摘要</h3>
+          <div className="ph-card" style={{ padding: 16, marginBottom: 20 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12 }}>
+              <StatTile label="遲到人次" value={lateCount} unit="人次" />
+              <StatTile label="遲到總分鐘" value={lateMinutesTotal} unit="分鐘" />
+              <StatTile label="漏打卡次數" value={missedPunchCount} unit="次" />
+              <StatTile label="加班原始回報分鐘" value={overtimeReportedMinutes} unit="分鐘" />
+              <StatTile label="加班核准計薪分鐘" value={overtimeApprovedMinutes} unit="分鐘" />
+              <StatTile label="加班更正待審" value={overtimePendingRevisionCount} unit="筆" />
+              <StatTile label="請假證明待補" value={proofPendingCount} unit="筆" />
+              <StatTile label="每日回報應繳" value={dueStoreDays} unit="店日" />
+              <StatTile label="每日回報已繳" value={submittedStoreDays} unit="店日" />
+              <StatTile label="每日回報逾期未繳" value={overdueStoreDays} unit="店日" tone={overdueStoreDays ? "red" : undefined}
+                onClick={() => overdueList.length && setDrillDown({ title: "逾期未繳店日", columns: ["門市", "日期"], rows: overdueList.map((o) => [storeById[o.store_id]?.name || "", o.date]) })} />
+            </div>
+            <strong style={{ fontSize: 12.5, display: "block", marginTop: 14 }}>各假別時數</strong>
+            <div style={{ color: T.sub, marginTop: 4, fontSize: 12.5 }}>
+              {Object.entries(leaveHoursByType).map(([code, hrs]) => <div key={code}>{leaveTypeByCode[code]?.label || code}：{hrs} 小時</div>)}
+              {Object.keys(leaveHoursByType).length === 0 && <div>本月沒有請假紀錄</div>}
+            </div>
+            <p style={{ color: T.sub, fontSize: 11.5, margin: "12px 0 0" }}>
+              以上為系統內申請／回報資料，未核准、已核准與待補分開列示，不代表實際出勤結果；{isOngoingMonth ? `本月尚未結束，只統計到 ${todayISO} 為止` : "本月已結束，統計整月"}。
+            </p>
+          </div>
+
+          <h3 ref={(el) => (sectionRefs.current.requestsSection = el)} className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>六、請假與排班需求</h3>
           <div className="ph-card" style={{ padding: 16, marginBottom: 20 }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12 }}>
               <StatTile label="請假申請件數" value={leaveRows.length} unit="件" />
@@ -5803,29 +5999,28 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
             </p>
           </div>
 
-          <h3 className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>六、人員異動總結</h3>
-          <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginBottom: 10 }}>
+          <h3 className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>七、人員異動總結</h3>
+          <CollapsibleTable title="已生效異動" count={changesEffective.length} unit="筆" collapsed={collapsed.changesEffective} onToggle={() => toggleCollapsed("changesEffective")}>
             <table className="ph-table">
               <thead><tr><th>姓名</th><th>門市</th><th>異動類型</th><th>異動前</th><th>異動後</th><th>時間</th></tr></thead>
               <tbody>
-                {changes.map((c) => (
-                  <tr key={c.id}>
-                    <td>{c.employee?.name || "—"}</td>
-                    <td>{storeById[c.employee?.store_id]?.name || ""}</td>
-                    <td><Badge tone="brown">{CHANGE_TYPE_LABEL[c.change_type] || c.change_type}</Badge></td>
-                    <td style={{ fontSize: 12, color: T.sub }}>{c.old_value || "—"}</td>
-                    <td style={{ fontSize: 12, color: T.sub }}>{c.new_value || "—"}</td>
-                    <td style={{ fontSize: 12, color: T.sub }}>{fmtTaipei(c.changed_at)}</td>
-                  </tr>
-                ))}
-                {changes.length === 0 && <tr><td colSpan={6} style={{ color: T.sub, textAlign: "center" }}>本月沒有人員異動紀錄</td></tr>}
+                {changesEffective.map(renderChangeRow)}
+                {changesEffective.length === 0 && <tr><td colSpan={6} style={{ color: T.sub, textAlign: "center" }}>本月沒有已生效人員異動紀錄</td></tr>}
               </tbody>
             </table>
-          </div>
+          </CollapsibleTable>
+          {changesFuture.length > 0 && (
+            <CollapsibleTable title="未來生效異動（到職日／離職日晚於今天）" count={changesFuture.length} unit="筆" collapsed={collapsed.changesFuture} onToggle={() => toggleCollapsed("changesFuture")}>
+              <table className="ph-table">
+                <thead><tr><th>姓名</th><th>門市</th><th>異動類型</th><th>異動前</th><th>異動後</th><th>時間</th></tr></thead>
+                <tbody>{changesFuture.map(renderChangeRow)}</tbody>
+              </table>
+            </CollapsibleTable>
+          )}
           <p style={{ color: T.sub, fontSize: 11.5, margin: "0 0 6px" }}>異動紀錄從 2026-08-15 起自動記錄，更早的異動沒有歷史資料；留職停薪／試用期到期尚未支援。</p>
-          <button className="ph-btn small" style={{ marginBottom: 20 }} onClick={exportChanges}>匯出人員異動明細</button>
+          <button className="ph-btn small ph-summary-noprint" style={{ marginBottom: 20 }} onClick={exportChanges}>匯出人員異動明細</button>
 
-          <h3 className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>七、班表發布／鎖定狀態</h3>
+          <h3 ref={(el) => (sectionRefs.current.publishSection = el)} className="ph-serif" style={{ fontSize: 16, margin: "22px 0 10px" }}>八、班表發布／鎖定狀態</h3>
           <div className="ph-card" style={{ overflowX: "auto", padding: 0, marginBottom: 20 }}>
             <table className="ph-table">
               <thead><tr><th>門市</th><th>狀態</th></tr></thead>
@@ -5840,8 +6035,22 @@ function MonthlySummaryPage({ me, stores, scope, scopeStoreIds, toast }) {
               </tbody>
             </table>
           </div>
-          <p style={{ color: T.sub, fontSize: 11.5, margin: "-14px 0 20px" }}>發布／鎖定操作請到「門市排班」頁進行；鎖定沿用薪資鎖定，鎖定後排班無法再修改。</p>
+          <p style={{ color: T.sub, fontSize: 11.5, margin: "-14px 0 8px" }}>發布／鎖定操作請到「門市排班」頁進行；鎖定沿用薪資鎖定，鎖定後排班無法再修改。</p>
+          <p style={{ color: T.sub, fontSize: 11.5, margin: "0 0 20px" }}>本頁沒有「確認無需排班」狀態，草稿也可能是店家單純沒有排班需求，需人工查看班表內容判斷。</p>
         </>
+      )}
+      {drillDown && (
+        <Modal title={drillDown.title} onClose={() => setDrillDown(null)}>
+          <div style={{ maxHeight: 400, overflowY: "auto" }}>
+            <table className="ph-table">
+              <thead><tr>{drillDown.columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+              <tbody>
+                {drillDown.rows.map((row, i) => <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>)}
+                {drillDown.rows.length === 0 && <tr><td colSpan={drillDown.columns.length} style={{ textAlign: "center", color: T.sub }}>無資料</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </Modal>
       )}
     </div>
   );
