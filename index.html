@@ -233,35 +233,18 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
     : Number(emp.hourly_rate);
   const overtimePay = overtimeRequests.reduce((sum, r) => sum + overtimePayForRequest(overtimeHourlyBase, r.hours, r.overtime_type || "workday"), 0);
 
-  // 依《勞工請假規則》：事假不給工資、普通傷病假工資折半、婚假/喪假/公假/公傷病假工資照給不扣款
-  // 這段是「正式請假申請」（requests表）來源的計算，留給日後萬一真的有人直接送出正式
-  // 請假申請時仍能生效；實務上請假記錄的權威來源是「每日回報」，見下方 leaveWageAdj／
-  // leaveBonusProrateAdj（recompute_leave_deduction 在SQL端依假別＋病假年度30日折半門檻
-  // 算好，含完整可讀明細文字，詳見 phase-hr_fix_20260907_sick_leave_q10.sql）
-  const leaveHoursByType = {};
-  let wageLeaveDeduction = 0;
-  let bonusProrateHours = 0;
-  Object.keys(LEAVE_PAY_RULES).forEach((type) => {
-    const hours = empRequests.filter((r) => r.type === type).reduce((s, r) => s + Number(r.hours), 0);
-    leaveHoursByType[type] = hours;
-    if (!isFullTime || hours <= 0) return;
-    const rule = LEAVE_PAY_RULES[type];
-    if (rule.wage === "unpaid") wageLeaveDeduction += hours * hourlyBase;
-    else if (rule.wage === "half") wageLeaveDeduction += hours * hourlyBase * 0.5;
-    if (rule.bonus === "prorate") bonusProrateHours += hours;
-  });
-  const personalLeaveHours = leaveHoursByType.personal_leave || 0;
-  const personalLeaveDeduction = isFullTime ? personalLeaveHours * hourlyBase : 0;
-  const sickLeaveHours = leaveHoursByType.sick_leave || 0;
-  const sickLeaveDeduction = isFullTime ? sickLeaveHours * hourlyBase * 0.5 : 0;
+  // 請假扣款／全勤獎金比例扣除的權威來源是「每日回報」（見下方 leaveWageAdj／
+  // leaveBonusProrateAdj，SQL端 recompute_leave_deduction／recompute_bonus_forfeit
+  // 依假別＋病假年度30日折半門檻算好，含完整可讀明細文字，詳見
+  // phase-hr_fix_20260907_sick_leave_q10.sql）。這裡不再另外用「正式請假申請」
+  // （requests表）算一次扣款——稽核發現若同一天兩邊都留有紀錄，會用兩種不同的
+  // 工資基礎（本薪 vs 本薪+伙食費+職務津貼）重複扣兩次，且這條路徑完全不受
+  // 「confirmed才生效」保護，2026-09-09 移除（純前端修正，SQL端資料表結構不變）
 
   const basePay = isFullTime ? Number(emp.base_salary) : workedHours * Number(emp.hourly_rate);
   const mealAllowance = Number(emp.meal_allowance) || 0;
   const positionAllowance = Number(emp.position_allowance) || 0;
   const fullAttendanceBonus = Number(emp.bonus) || 0;
-  const requestsBonusProrateDeduction = isFullTime && fullAttendanceBonus > 0
-    ? Math.min(fullAttendanceBonus, fullAttendanceBonus * (bonusProrateHours / 240))
-    : 0;
 
   // 每日回報依假別計算的請假工資扣款／全勤獎金比例扣除／遲到扣款：從一般
   // 「本月調整」清單中獨立出來（改走請假扣款／全勤獎金／遲到扣款專屬欄位
@@ -276,8 +259,8 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   const bonusProrateConfirmed = leaveBonusProrateAdj && leaveBonusProrateAdj.confirmed !== false ? -Number(leaveBonusProrateAdj.amount) : 0;
   const lateDeduction = lateDeductionAdj && lateDeductionAdj.confirmed !== false ? -Number(lateDeductionAdj.amount) : 0;
 
-  const attendanceDeduction = wageLeaveDeduction + leaveWageConfirmed;
-  const bonusProrateDeduction = requestsBonusProrateDeduction + bonusProrateConfirmed;
+  const attendanceDeduction = leaveWageConfirmed;
+  const bonusProrateDeduction = bonusProrateConfirmed;
 
   const laborInsuranceFee = Number(emp.labor_insurance_fee) || 0;
   const healthInsuranceFee = Number(emp.health_insurance_fee) || 0;
@@ -292,8 +275,8 @@ function computePayrollRow(emp, empShifts, empRequests, empAdjustments) {
   const totalDeduction = attendanceDeduction + bonusProrateDeduction + lateDeduction + laborInsuranceFee + healthInsuranceFee + incomeTax;
   const total = grossPay - totalDeduction;
   return {
-    emp, workedHours, overtimeHours, personalLeaveHours, leaveHoursByType, basePay, mealAllowance, positionAllowance,
-    overtimePay, fullAttendanceBonus, attendanceDeduction, personalLeaveDeduction, sickLeaveHours, sickLeaveDeduction,
+    emp, workedHours, overtimeHours, basePay, mealAllowance, positionAllowance,
+    overtimePay, fullAttendanceBonus, attendanceDeduction,
     bonusProrateDeduction, leaveWageAdj, leaveBonusProrateAdj, lateDeduction, lateDeductionAdj, laborInsuranceFee, healthInsuranceFee, incomeTax,
     empAdjustments: confirmedAdjustments, pendingAdjustments, adjustmentsTotal, grossPay, taxableIncome, totalDeduction, total,
     // 這次算加班費實際採用的核准列（一定是 status='approved'，因為呼叫端查 requests 時
@@ -4852,8 +4835,6 @@ function PayslipModal({ store, ym, periodLabel, row, locked, onClose, onGotoRequ
               {row.empAdjustments.filter((a) => Number(a.amount) < 0).map((a) => (
                 <PayslipRow key={a.id} label={a.label} value={-a.amount} />
               ))}
-              {row.personalLeaveDeduction > 0 && <PayslipRow label="事假扣款（不給工資）" value={row.personalLeaveDeduction} />}
-              {row.sickLeaveDeduction > 0 && <PayslipRow label="普通傷病假扣款（工資折半）" value={row.sickLeaveDeduction} />}
               {row.leaveWageAdj && row.leaveWageAdj.confirmed !== false && Number(row.leaveWageAdj.amount) !== 0 && (
                 <PayslipRow label={row.leaveWageAdj.label} value={-Number(row.leaveWageAdj.amount)} />
               )}
