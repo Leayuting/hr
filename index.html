@@ -3256,18 +3256,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     const pendingProofCount = roster.filter((r) => ["pending", "needs_resubmit"].includes(entries[r.id]?.leave_proof_status)).length;
     setActionBusy(true);
     try {
-      let reportId = report?.id;
-      let expectedUpdatedAt = report?.updated_at || null;
-      if (!reportId) {
-        const { data, error } = await sb.from("daily_reports").insert({ store_id: storeId, report_date: date, status: "draft" }).select().single();
-        if (error) { toast("送出失敗：" + error.message); return; }
-        reportId = data.id;
-        expectedUpdatedAt = data.updated_at;
-      }
-      for (const r of roster) {
+      // 找/建report、檢查樂觀鎖、逐筆寫入entries＋連動加班申請、（非kiosk
+      // 模式）設定為已送出，整段在單一RPC交易內完成——避免逐筆獨立REST
+      // 呼叫時，樂觀鎖涵蓋不到entries寫入、中途失敗不會回滾的問題
+      const p_entries = roster.map((r) => {
         const e = entries[r.id];
-        const { data: entryRow, error: entryErr } = await sb.from("daily_report_entries").upsert({
-          daily_report_id: reportId, store_id: storeId, employee_id: r.id,
+        return {
+          employee_id: r.id,
           late: e.late, late_minutes: e.late ? Number(e.late_minutes) : null,
           missed_punch: e.missed_punch, leave: e.leave, leave_hours: e.leave ? Number(e.leave_hours) : null,
           leave_type: e.leave ? (e.leave_type || null) : null,
@@ -3285,14 +3280,20 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           missed_punch_fix_start: e.missed_punch ? (e.missed_punch_fix_start || null) : null,
           missed_punch_fix_end: e.missed_punch ? (e.missed_punch_fix_end || null) : null,
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
-        }, { onConflict: "daily_report_id,employee_id" }).select("id").single();
-        // 每日回報的加班連動薪資：不論這次是否勾加班都呼叫，RPC 內部自己判斷
-        // 建立/更新/撤回連結的加班申請，未勾加班且沒有既有連結時是安全的no-op
-        if (!entryErr && entryRow) {
-          const { error: linkErr } = await sb.rpc("submit_daily_report_overtime_link", { p_entry_id: entryRow.id });
-          if (linkErr) console.error("submit_daily_report_overtime_link", linkErr);
-        }
+        };
+      });
+      const { data: saveRows, error: saveErr } = await sb.rpc("submit_daily_report_entries", {
+        p_store_id: storeId, p_date: date, p_entries,
+        p_expected_updated_at: report?.updated_at || null,
+        p_finalize_now: !kioskMode,
+      });
+      if (saveErr) {
+        toast((saveErr.message.includes("CONFLICT") ? "" : "送出失敗：") + saveErr.message);
+        if (saveErr.message.includes("CONFLICT")) load();
+        return;
       }
+      const saveData = saveRows?.[0];
+      const reportId = saveData?.report_id;
       if (kioskMode) {
         const blob = await signaturePadRef.current.exportPng();
         const path = `${reportId}/signature_${Date.now()}.png`;
@@ -3301,14 +3302,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         const { error: finErr } = await sb.rpc("finalize_daily_report_submission", {
           p_store_id: storeId, p_report_date: date, p_report_id: reportId,
           p_storage_path: path, p_mime_type: "image/png", p_file_size: blob.size,
-          p_pos_verified: true, p_expected_updated_at: expectedUpdatedAt,
+          p_pos_verified: true, p_expected_updated_at: saveData?.report_updated_at || null,
         });
         if (finErr) { toast((finErr.message.includes("CONFLICT") ? "" : "送出失敗：") + finErr.message); if (finErr.message.includes("CONFLICT")) load(); return; }
-      } else {
-        const { data, error } = await sb.from("daily_reports").update({ status: "submitted", pos_verified: true, submitted_by: me.id, submitted_at: new Date().toISOString(), signed_by: null, signed_at: null })
-          .eq("id", reportId).eq("updated_at", expectedUpdatedAt).select();
-        if (error) { toast("送出失敗：" + error.message); return; }
-        if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
       }
       await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
       toast(pendingProofCount > 0 ? `已送出，等待領班簽核（本次有 ${pendingProofCount} 筆請假證明待補，送出後仍可補交）` : "已送出，等待領班簽核");
