@@ -6183,6 +6183,33 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const [pinErr, setPinErr] = useState("");
   const [pinBusy, setPinBusy] = useState(false);
   const hasPersonalAccount = accessTier === "super_admin" || accessTier === "admin_specialist";
+  // 薪資/門市/計薪方式改成走「生效記錄」而不是直接覆蓋，需要填生效日期＋原因；
+  // 只有isHr（super_admin）看得到/改得動這些欄位，跟既有 guard_employee_
+  // sensitive_write 保護的欄位範圍一致（employment_type/position不在guard保護
+  // 範圍內，維持原本非HR也能改的行為，不併入生效記錄）
+  const [effectiveFrom, setEffectiveFrom] = useState(todayStr());
+  const [changeReason, setChangeReason] = useState("");
+  const [history, setHistory] = useState([]);
+  const compFieldsChanged = !editing.isNew && isHr && (
+    String(editing.store_id || "") !== String(storeIdSel) ||
+    Number(editing.base_salary ?? 0) !== Number(baseSalary || 0) ||
+    Number(editing.hourly_rate ?? 0) !== Number(hourlyRate || 0) ||
+    Number(editing.bonus ?? 0) !== Number(bonus || 0) ||
+    Number(editing.meal_allowance ?? 0) !== Number(mealAllowance || 0) ||
+    Number(editing.position_allowance ?? 0) !== Number(positionAllowance || 0) ||
+    Number(editing.labor_insurance_fee ?? 0) !== Number(laborInsuranceFee || 0) ||
+    Number(editing.health_insurance_fee ?? 0) !== Number(healthInsuranceFee || 0) ||
+    Number(editing.income_tax ?? 0) !== Number(incomeTax || 0)
+  );
+
+  useEffect(() => {
+    if (editing.isNew || !isHr) return;
+    sb.from("employee_effective_records").select("*").eq("employee_id", editing.id)
+      .order("effective_from", { ascending: false }).then(({ data, error }) => {
+        if (error) { console.error("effective history load", error); return; }
+        setHistory(data || []);
+      });
+  }, [editing.id, editing.isNew, isHr]);
 
   async function callSetPin(employeeId, pin) {
     const { data, error } = await sb.functions.invoke("admin-set-pin", { body: { employee_id: employeeId, pin } });
@@ -6199,29 +6226,69 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   async function save() {
     if (!name.trim()) { setErr("請輸入姓名"); return; }
     if (!storeIdSel) { setErr("請選擇所屬門市"); return; }
+    if (compFieldsChanged && !changeReason.trim()) { setErr("薪資／門市有異動，請填寫這次異動的原因"); return; }
+    if (compFieldsChanged && !effectiveFrom) { setErr("請填寫生效日期"); return; }
     setErr(""); setBusy(true);
     if (!active && !terminationDate) { setErr("停用需要填寫離職日"); setBusy(false); return; }
-    const payload = { name: name.trim(), position, employment_type: employmentType, active, store_id: storeIdSel, hire_date: hireDate || null, termination_date: active ? null : terminationDate };
+    // 薪資/門市/計薪方式/職務改走生效記錄（set_employee_effective_record），
+    // 不直接覆蓋employees表；這裡的payload只放不需要生效日期的一般欄位
+    const payload = { name: name.trim(), active, hire_date: hireDate || null, termination_date: active ? null : terminationDate };
+    if (!isHr) { payload.position = position; payload.employment_type = employmentType; }
+    if (!isHr && editing.isNew) payload.store_id = storeIdSel;
     if (isHr) {
       payload.access_tier = accessTier;
-      payload.base_salary = Number(baseSalary) || 0;
-      payload.hourly_rate = Number(hourlyRate) || 0;
-      payload.bonus = Number(bonus) || 0;
-      payload.meal_allowance = Number(mealAllowance) || 0;
-      payload.position_allowance = Number(positionAllowance) || 0;
-      payload.labor_insurance_fee = Number(laborInsuranceFee) || 0;
-      payload.health_insurance_fee = Number(healthInsuranceFee) || 0;
-      payload.income_tax = Number(incomeTax) || 0;
       payload.annual_leave_days = annualLeaveDays === "" ? null : Number(annualLeaveDays);
       if (hasPersonalAccount) payload.email = email.trim() || null;
+      if (editing.isNew) {
+        // 新增夥伴：comp欄位隨建立時的初始insert一起寫入，之後再補一筆
+        // 起始生效記錄（effective_from=到職日），讓歷史從一開始就完整
+        payload.store_id = storeIdSel;
+        payload.position = position;
+        payload.employment_type = employmentType;
+        payload.base_salary = Number(baseSalary) || 0;
+        payload.hourly_rate = Number(hourlyRate) || 0;
+        payload.bonus = Number(bonus) || 0;
+        payload.meal_allowance = Number(mealAllowance) || 0;
+        payload.position_allowance = Number(positionAllowance) || 0;
+        payload.labor_insurance_fee = Number(laborInsuranceFee) || 0;
+        payload.health_insurance_fee = Number(healthInsuranceFee) || 0;
+        payload.income_tax = Number(incomeTax) || 0;
+      }
     }
     let error, newId = editing.id;
     if (editing.isNew) {
       const res = await sb.from("employees").insert(payload).select().single();
       error = res.error;
       newId = res.data?.id;
+      if (!error && isHr && newId) {
+        const { error: histErr } = await sb.rpc("set_employee_effective_record", {
+          p_employee_id: newId, p_effective_from: hireDate || todayStr(),
+          p_store_id: storeIdSel, p_employment_type: employmentType, p_position: position,
+          p_base_salary: Number(baseSalary) || 0, p_hourly_rate: Number(hourlyRate) || 0,
+          p_meal_allowance: Number(mealAllowance) || 0, p_position_allowance: Number(positionAllowance) || 0,
+          p_bonus: Number(bonus) || 0, p_labor_insurance_fee: Number(laborInsuranceFee) || 0,
+          p_health_insurance_fee: Number(healthInsuranceFee) || 0, p_income_tax: Number(incomeTax) || 0,
+          p_reason: "新增夥伴，建立起始生效記錄",
+        });
+        if (histErr) console.error("set_employee_effective_record (new)", histErr);
+      }
     } else {
       ({ error } = await sb.from("employees").update(payload).eq("id", editing.id));
+      if (!error && isHr && compFieldsChanged) {
+        const { error: histErr } = await sb.rpc("set_employee_effective_record", {
+          p_employee_id: editing.id, p_effective_from: effectiveFrom,
+          p_store_id: storeIdSel, p_employment_type: employmentType, p_position: position,
+          p_base_salary: Number(baseSalary) || 0, p_hourly_rate: Number(hourlyRate) || 0,
+          p_meal_allowance: Number(mealAllowance) || 0, p_position_allowance: Number(positionAllowance) || 0,
+          p_bonus: Number(bonus) || 0, p_labor_insurance_fee: Number(laborInsuranceFee) || 0,
+          p_health_insurance_fee: Number(healthInsuranceFee) || 0, p_income_tax: Number(incomeTax) || 0,
+          p_reason: changeReason.trim(),
+        });
+        if (histErr) { setBusy(false); setErr("薪資歷史記錄儲存失敗：" + histErr.message); return; }
+      } else if (!error && isHr && !compFieldsChanged && (position !== editing.position || employmentType !== editing.employment_type)) {
+        // 只改了職務/計薪方式（不併入生效記錄範圍），維持原本直接覆蓋
+        await sb.from("employees").update({ position, employment_type: employmentType }).eq("id", editing.id);
+      }
     }
     if (error) { setBusy(false); setErr(error.message); return; }
     await logAudit(me.name, editing.isNew ? "create_employee" : "update_employee", editing.id || name);
@@ -6294,6 +6361,31 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
         <Field label={"健保費（自付額）" + (isHr ? "" : "（僅管理者可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={healthInsuranceFee} onChange={(e) => setHealthInsuranceFee(e.target.value)} /></Field>
       </div>
       <Field label={"所得稅代扣" + (isHr ? "" : "（僅管理者可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={incomeTax} onChange={(e) => setIncomeTax(e.target.value)} /></Field>
+      {isHr && !editing.isNew && compFieldsChanged && (
+        <div className="ph-card" style={{ padding: 12, marginBottom: 14, background: "#fffaf0" }}>
+          <p style={{ fontSize: 12.5, fontWeight: 600, margin: "0 0 8px" }}>薪資／門市有異動，需填寫生效日期與原因</p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Field label="生效日期"><input className="ph-input" type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} /></Field>
+          </div>
+          <Field label="異動原因"><input className="ph-input" placeholder="例如：調薪、調店、資料訂正" value={changeReason} onChange={(e) => setChangeReason(e.target.value)} /></Field>
+          <p style={{ color: T.sub, fontSize: 11.5, margin: "6px 0 0" }}>
+            儲存後不會覆蓋過去的薪資紀錄——未鎖定的過去月份薪資試算仍會用「當時生效」的資料計算，只有{effectiveFrom}（含）之後的月份才會採用這次的新數字。若生效日期是未來日期，要等到那天才會變成目前生效值。
+          </p>
+        </div>
+      )}
+      {isHr && !editing.isNew && history.length > 0 && (
+        <details style={{ marginBottom: 14 }}>
+          <summary style={{ cursor: "pointer", fontSize: 12.5, color: T.sub }}>薪資／門市異動歷史（{history.length}筆）</summary>
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+            {history.map((h) => (
+              <div key={h.id} style={{ fontSize: 11.5, color: T.sub, borderLeft: `2px solid ${T.line}`, paddingLeft: 8 }}>
+                <b style={{ color: T.ink }}>{h.effective_from} 起</b>　本薪 {money(h.base_salary)}／時薪 {money(h.hourly_rate)}／全勤 {money(h.bonus)}／門市 {stores.find((s) => s.id === h.store_id)?.name || "—"}
+                <br />原因：{h.reason}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       <Field label="在職狀態">
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input type="checkbox" checked={active} onChange={(e) => {
