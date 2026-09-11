@@ -879,9 +879,16 @@ function Login() {
     e.preventDefault();
     setErr(""); setBusy(true);
     try {
-      const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
+      const trimmedEmail = email.trim();
+      const { data: lockedUntil } = await sb.rpc("is_login_locked", { p_email: trimmedEmail });
+      if (lockedUntil && new Date(lockedUntil) > new Date()) {
+        setErr(`登入嘗試次數過多，帳號暫時鎖定，請於 ${new Date(lockedUntil).toLocaleTimeString("zh-TW")} 後再試`);
+        setBusy(false);
+        return;
+      }
+      const { error } = await sb.auth.signInWithPassword({ email: trimmedEmail, password: pw });
       if (error) {
-        try { await sb.rpc("record_failed_login", { p_email: email.trim() }); } catch (e3) { /* 記錄失敗次數失敗不影響登入流程 */ }
+        try { await sb.rpc("record_failed_login", { p_email: trimmedEmail }); } catch (e3) { /* 記錄失敗次數失敗不影響登入流程 */ }
         setErr("登入失敗，請確認帳號密碼（" + error.message + "）");
       } else {
         try { await sb.rpc("reset_my_failed_logins"); } catch (e4) { /* 不影響登入流程 */ }
@@ -955,11 +962,19 @@ function StorePinLogin() {
       const { data: candidates } = await sb.rpc("store_pin_emails", { p_store_id: selected.store_id });
       if (!candidates || candidates.length === 0) { setErr("此門市尚未設定 PIN，請洽管理者"); return; }
       let loggedIn = false;
+      let allLocked = candidates.length > 0;
       for (const c of candidates) {
+        const { data: lockedUntil } = await sb.rpc("is_login_locked", { p_email: c.email });
+        if (lockedUntil && new Date(lockedUntil) > new Date()) continue;
+        allLocked = false;
         const { error } = await sb.auth.signInWithPassword({ email: c.email, password: pin });
-        if (!error) { loggedIn = true; break; }
+        if (!error) { loggedIn = true; try { await sb.rpc("reset_my_failed_logins"); } catch (e4) { /* 不影響登入流程 */ } break; }
+        try { await sb.rpc("record_failed_login", { p_email: c.email }); } catch (e3) { /* 記錄失敗次數失敗不影響登入流程 */ }
       }
-      if (!loggedIn) { setErr("PIN 錯誤，請再試一次"); setPin(""); }
+      if (!loggedIn) {
+        setErr(allLocked ? "此門市 PIN 登入嘗試次數過多，已暫時鎖定，請稍後再試或洽管理者" : "PIN 錯誤，請再試一次");
+        setPin("");
+      }
     } catch (e2) {
       setErr("登入時發生錯誤：" + (e2?.message || String(e2)));
     } finally {
@@ -5024,7 +5039,103 @@ function PayslipModal({ store, ym, periodLabel, row, locked, onClose, onGotoRequ
   );
 }
 
-function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope, toast, onGotoRequests }) {
+// 薪資頁PIN二次驗證：已經有payroll權限（RLS已經擋住沒權限的人）的個人，
+// 額外設一組4位數字PIN當螢幕鎖概念，防止離開座位沒鎖螢幕被看到別人薪資。
+// pinVerified是這個元件自己的state，離開頁面（unmount）/重新整理（重新
+// mount整個App）都會歸零，天然滿足「離開/重新整理需要重新驗證」；登出
+// 也是整個App重新mount，同樣天然滿足。真正的資料查詢（PayrollPageInner
+// 的useEffect）在還沒verified之前完全不會mount，不會有任何薪資資料被
+// 提前抓到瀏覽器記憶體或畫面上。
+function PayrollPage(props) {
+  const [checking, setChecking] = useState(true);
+  const [hasPin, setHasPin] = useState(false);
+  const [verified, setVerified] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+  const [pinInput2, setPinInput2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showChangePin, setShowChangePin] = useState(false);
+
+  useEffect(() => {
+    sb.rpc("has_my_payroll_pin").then(({ data, error }) => {
+      if (error) { setErr(error.message); setChecking(false); return; }
+      setHasPin(!!data);
+      setChecking(false);
+    });
+  }, []);
+
+  async function submitSetPin(e) {
+    e.preventDefault();
+    if (!/^[0-9]{4}$/.test(pinInput)) { setErr("PIN須為4位數字"); return; }
+    if (pinInput !== pinInput2) { setErr("兩次輸入的PIN不一致"); return; }
+    setErr(""); setBusy(true);
+    try {
+      const { error } = await sb.rpc("set_my_payroll_pin", { p_pin: pinInput });
+      if (error) { setErr(error.message); return; }
+      setHasPin(true); setShowChangePin(false); setPinInput(""); setPinInput2("");
+      setVerified(false); // 設定/變更PIN後要求用新PIN重新驗證一次，確認設定正確
+    } finally { setBusy(false); }
+  }
+
+  async function submitVerify(e) {
+    e.preventDefault();
+    setErr(""); setBusy(true);
+    try {
+      const { data, error } = await sb.rpc("verify_my_payroll_pin", { p_pin: pinInput });
+      if (error) { setErr(error.message); setPinInput(""); return; }
+      if (!data) { setErr("PIN錯誤，請再試一次"); setPinInput(""); return; }
+      setVerified(true); setPinInput("");
+    } finally { setBusy(false); }
+  }
+
+  if (checking) return <p style={{ color: T.sub }}>載入中…</p>;
+
+  if (!hasPin || showChangePin) {
+    return (
+      <div className="ph-card" style={{ maxWidth: 360, margin: "40px auto", padding: 24 }}>
+        <h3 className="ph-serif" style={{ marginTop: 0 }}>{hasPin ? "變更薪資頁PIN" : "設定薪資頁PIN"}</h3>
+        <p style={{ color: T.sub, fontSize: 12.5 }}>
+          {hasPin ? "設定新的4位數字PIN，之後每次進入薪資頁都需要輸入。" : "第一次使用薪資頁，請先設定一組4位數字PIN——之後每次進入薪資頁（含重新整理、重新登入）都需要輸入這組PIN，用來防止離開座位時薪資資料被看到。"}
+        </p>
+        <form onSubmit={submitSetPin}>
+          <Field label="新PIN（4位數字）">
+            <input className="ph-input" style={{ letterSpacing: 4, fontSize: 20, textAlign: "center" }} type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} autoFocus required
+              value={pinInput} onChange={(e) => setPinInput(e.target.value.replace(/[^0-9]/g, "").slice(0, 4))} />
+          </Field>
+          <Field label="再輸入一次">
+            <input className="ph-input" style={{ letterSpacing: 4, fontSize: 20, textAlign: "center" }} type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} required
+              value={pinInput2} onChange={(e) => setPinInput2(e.target.value.replace(/[^0-9]/g, "").slice(0, 4))} />
+          </Field>
+          {err && <div className="ph-err">{err}</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            {hasPin && <button type="button" className="ph-btn" onClick={() => { setShowChangePin(false); setErr(""); setPinInput(""); setPinInput2(""); }}>取消</button>}
+            <button className="ph-btn primary" style={{ flex: 1 }} disabled={busy} type="submit">{busy ? "處理中…" : "設定"}</button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
+  if (!verified) {
+    return (
+      <div className="ph-card" style={{ maxWidth: 360, margin: "40px auto", padding: 24 }}>
+        <h3 className="ph-serif" style={{ marginTop: 0 }}>請輸入薪資頁PIN</h3>
+        <form onSubmit={submitVerify}>
+          <Field label="4位數字PIN">
+            <input className="ph-input" style={{ letterSpacing: 4, fontSize: 20, textAlign: "center" }} type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} autoFocus required
+              value={pinInput} onChange={(e) => setPinInput(e.target.value.replace(/[^0-9]/g, "").slice(0, 4))} />
+          </Field>
+          {err && <div className="ph-err">{err}</div>}
+          <button className="ph-btn primary" style={{ width: "100%", marginTop: 10 }} disabled={busy} type="submit">{busy ? "驗證中…" : "確認"}</button>
+        </form>
+      </div>
+    );
+  }
+
+  return <PayrollPageInner {...props} onChangePayrollPin={() => setShowChangePin(true)} />;
+}
+
+function PayrollPageInner({ me, stores, scope, scopeStoreIds, activeStoreId, setScope, toast, onGotoRequests, onChangePayrollPin }) {
   const [ym, setYm] = useState(thisMonthStr());
   const [roster, setRoster] = useState([]);
   const [shifts, setShifts] = useState([]);
@@ -5267,6 +5378,7 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
           </button>
         )}
         {locked && <Badge tone="brown">{storeById[activeStoreId]?.name} 已鎖定</Badge>}
+        {onChangePayrollPin && <button className="ph-btn small" style={{ marginLeft: "auto" }} onClick={onChangePayrollPin}>變更薪資頁PIN</button>}
       </div>
       <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 4 }}>
         {storeById[activeStoreId]?.name}・{ym.slice(0, 4)}年{Number(ym.slice(5, 7))}月份薪資明細表　薪資計算區間：{periodLabel}
