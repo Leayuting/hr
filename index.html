@@ -62,8 +62,8 @@ const TIER_LABEL = {
 // 2026-08-12 權限架構簡化：只有「管理者」「行政專責」是總部個人帳號（帳密登入），
 // 固定權限表，不再逐人可覆寫；店長／一般夥伴沒有個人登入，一律用門市共用 PIN。
 const TIER_PERMISSIONS = {
-  super_admin: { dashboard: "edit", schedule: "edit", daily_report: "all", requests: "full_review", payroll: "edit", staff: "edit", backup: "manage", permission_admin: "manage" },
-  admin_specialist: { dashboard: "view", schedule: "unit", daily_report: "all", requests: "submit", payroll: "edit", staff: "edit", backup: "none", permission_admin: "none" },
+  super_admin: { dashboard: "edit", schedule: "edit", daily_report: "all", daily_report_approval: "approve", requests: "full_review", payroll: "edit", staff: "edit", backup: "manage", permission_admin: "manage" },
+  admin_specialist: { dashboard: "view", schedule: "unit", daily_report: "all", daily_report_approval: "approve", requests: "submit", payroll: "edit", staff: "edit", backup: "none", permission_admin: "none" },
 };
 // 2026-08-12 門市 PIN 一分為二：一般門市 PIN（全體人員，查看班表＋填每日回報）
 // ／店長 PIN（多了編輯班表、審核本店申請），跟 DB 端 feature_level() 的兩個分支一一對應
@@ -2652,7 +2652,13 @@ function classifyReportDay(row, dateStr, today, launch) {
 // kiosk 完全走另一條路 DailyReportKioskShell→DailyReportDetail，從不會出現在這裡，
 // 所以這裡不用再保留「填寫」分支，整頁直接就是管理者視角）
 function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
-  const [tab, setTab] = useState("matrix"); // 'matrix' | 'anomalies'
+  const canApprove = me.permissions?.daily_report_approval === "approve";
+  const [tab, setTab] = useState("matrix"); // 'matrix' | 'anomalies' | 'review'
+  const [reviewYm, setReviewYm] = useState(thisMonthStr());
+  const [reviewQueue, setReviewQueue] = useState([]);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewEmployeeFilter, setReviewEmployeeFilter] = useState("all");
+  const [reviewTypeFilter, setReviewTypeFilter] = useState("all"); // all/late/missed_punch/leave/overtime
   const [dateMode, setDateMode] = useState("week");
   const [customFrom, setCustomFrom] = useState(todayStr());
   const [customTo, setCustomTo] = useState(todayStr());
@@ -2691,6 +2697,23 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
+
+  const loadReviewQueue = useCallback(async () => {
+    if (!canApprove || !filterStoreIds.length) return;
+    setReviewLoading(true);
+    const { data, error } = await sb.rpc("hr_review_queue", { p_store_ids: filterStoreIds, p_year_month: reviewYm });
+    if (error) { console.error("hr_review_queue", error); setReviewLoading(false); return; }
+    setReviewQueue(data || []);
+    setReviewLoading(false);
+  }, [canApprove, filterStoreIds, reviewYm]);
+  useEffect(() => { loadReviewQueue(); }, [loadReviewQueue]);
+  useEffect(() => {
+    if (!canApprove) return;
+    const ch = sb.channel("hr_review_queue_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_reports" }, loadReviewQueue)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [canApprove, loadReviewQueue]);
 
   const dateList = useMemo(() => {
     const list = []; let d = from;
@@ -2759,11 +2782,21 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
             <StatTile label="逾期未繳" value={loading ? "…" : kpi.overdue} unit="天次" tone={kpi.overdue > 0 ? "red" : undefined} />
             <StatTile label="未結案異常（待確認＋待補件）" value={loading ? "…" : kpi.openAnomalies} unit="人次" tone={kpi.openAnomalies > 0 ? "yellow" : undefined} />
           </div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
             <button className={"ph-btn small" + (tab === "matrix" ? " primary" : "")} onClick={() => setTab("matrix")}>繳交總表</button>
             <button className={"ph-btn small" + (tab === "anomalies" ? " primary" : "")} onClick={() => setTab("anomalies")}>異常清單</button>
+            {canApprove && (
+              <button className={"ph-btn small" + (tab === "review" ? " primary" : "")} onClick={() => setTab("review")}>
+                人資審核佇列{reviewQueue.filter((r) => r.hr_review_status === "pending").length > 0 ? `（${new Set(reviewQueue.filter((r) => r.hr_review_status === "pending").map((r) => r.report_id)).size}）` : ""}
+              </button>
+            )}
           </div>
-          {loading ? <p style={{ color: T.sub }}>載入中…</p> : tab === "matrix" ? (
+          {tab === "review" ? (
+            <HrReviewQueueTab ym={reviewYm} setYm={setReviewYm} queue={reviewQueue} loading={reviewLoading}
+              employeeFilter={reviewEmployeeFilter} setEmployeeFilter={setReviewEmployeeFilter}
+              typeFilter={reviewTypeFilter} setTypeFilter={setReviewTypeFilter}
+              onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
+          ) : loading ? <p style={{ color: T.sub }}>載入中…</p> : tab === "matrix" ? (
             <DailyReportMatrixTab visibleStores={storeFilter === "all" ? visibleStores : visibleStores.filter((s) => s.id === storeFilter)}
               dateList={dateList} rowsByStore={rowsByStore} today={today} onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
           ) : (
@@ -2813,6 +2846,77 @@ function DailyReportMatrixTab({ visibleStores, dateList, rowsByStore, today, onO
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// 人資審核統一待審清單：一列一個異常明細（不是一列一份回報），可依員工/
+// 類型客戶端篩選；核准/退回動作集中在 DailyReportDetail（點「查看並審核」
+// 開啟），這裡不重複寫一套審核UI，避免多處各寫一套核准邏輯
+function HrReviewQueueTab({ ym, setYm, queue, loading, employeeFilter, setEmployeeFilter, typeFilter, setTypeFilter, onOpenDetail }) {
+  const employeeOptions = useMemo(() => {
+    const seen = new Map();
+    queue.forEach((r) => seen.set(r.employee_id, r.employee_name));
+    return Array.from(seen.entries());
+  }, [queue]);
+
+  const filtered = queue.filter((r) => {
+    if (employeeFilter !== "all" && r.employee_id !== employeeFilter) return false;
+    if (typeFilter === "late" && !r.late) return false;
+    if (typeFilter === "missed_punch" && !r.missed_punch) return false;
+    if (typeFilter === "leave" && !r.leave) return false;
+    if (typeFilter === "overtime" && !r.overtime) return false;
+    return true;
+  });
+
+  const pendingReportIds = new Set(queue.filter((r) => r.hr_review_status === "pending").map((r) => r.report_id));
+  const rejectedReportIds = new Set(queue.filter((r) => r.hr_review_status === "rejected").map((r) => r.report_id));
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <input className="ph-input" style={{ width: 140 }} type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+        <select className="ph-input" style={{ width: 160 }} value={employeeFilter} onChange={(e) => setEmployeeFilter(e.target.value)}>
+          <option value="all">全部員工</option>
+          {employeeOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+        </select>
+        <select className="ph-input" style={{ width: 140 }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <option value="all">全部異常類型</option>
+          {Object.entries(ANOMALY_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+        </select>
+      </div>
+      <p style={{ color: T.sub, fontSize: 12, marginBottom: 14 }}>
+        待人資審核 {pendingReportIds.size} 份回報、已退回待補正 {rejectedReportIds.size} 份。送出／更正後的內容須經人資核准才會計入薪資試算，核准前維持上一次有效核准版本；退回不會撤除原有效版本。
+      </p>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : filtered.length === 0 ? (
+        <div className="ph-card" style={{ padding: 24, textAlign: "center", color: T.sub }}>本月沒有待人資審核的項目</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table className="ph-table">
+            <thead><tr><th>日期</th><th>門市</th><th>員工</th><th>異常</th><th>狀態</th><th></th></tr></thead>
+            <tbody>
+              {filtered.map((r) => (
+                <tr key={`${r.report_id}:${r.employee_id}`}>
+                  <td>{r.report_date}</td>
+                  <td>{r.store_name}</td>
+                  <td>{r.employee_name}</td>
+                  <td style={{ fontSize: 12 }}>
+                    {r.late && <span className="ph-pill" style={{ marginRight: 4 }}>遲到{r.late_minutes ?? ""}分</span>}
+                    {r.missed_punch && <span className="ph-pill" style={{ marginRight: 4 }}>漏打卡</span>}
+                    {r.leave && <span className="ph-pill" style={{ marginRight: 4 }}>請假{r.leave_type ? `・${r.leave_type}` : ""}</span>}
+                    {r.overtime && <span className="ph-pill" style={{ marginRight: 4 }}>加班{r.overtime_link_status === "pending" ? "（申請待核）" : ""}</span>}
+                  </td>
+                  <td>
+                    {r.hr_review_status === "pending" && <span style={{ color: T.yellow }}>待審</span>}
+                    {r.hr_review_status === "rejected" && <span style={{ color: T.red }}>已退回：{r.hr_review_reason || ""}</span>}
+                  </td>
+                  <td><button className="ph-btn small" onClick={() => onOpenDetail(r.store_id, r.report_date)}>查看並審核</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -2993,6 +3097,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const signaturePadRef = useRef(null);
   const [signatureHistory, setSignatureHistory] = useState(null); // null=未開啟；陣列=已載入
   const [returnModal, setReturnModal] = useState(false);
+  const [hrRejectModal, setHrRejectModal] = useState(false);
+  const canApproveReport = !kioskMode && me.permissions?.daily_report_approval === "approve";
   const [leaveTypeSettings, setLeaveTypeSettings] = useState([]);
   const canManageAnomaly = !kioskMode && (me.access_tier === "super_admin" || me.permissions?.daily_report === "all");
   const leaveTypeByCode = useMemo(() => Object.fromEntries(leaveTypeSettings.map((t) => [t.code, t])), [leaveTypeSettings]);
@@ -3307,7 +3413,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         if (finErr) { toast((finErr.message.includes("CONFLICT") ? "" : "送出失敗：") + finErr.message); if (finErr.message.includes("CONFLICT")) load(); return; }
       }
       await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
-      toast(pendingProofCount > 0 ? `已送出，等待領班簽核（本次有 ${pendingProofCount} 筆請假證明待補，送出後仍可補交）` : "已送出，等待領班簽核");
+      toast(pendingProofCount > 0 ? `已送出，等待人資審核（本次有 ${pendingProofCount} 筆請假證明待補，送出後仍可補交）` : "已送出，等待人資審核");
       load();
     } finally {
       setActionBusy(false);
@@ -3359,7 +3465,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         return;
       }
       await logAudit(me.name, isAdminCorrection ? "admin_correct_daily_report" : "admin_fill_daily_report", `${storeId}:${date}`);
-      toast(isAdminCorrection ? "已保存更正，回報已退回待重新簽核" : "已補填回報");
+      toast(isAdminCorrection ? "已保存更正，待人資重新審核才會更新薪資" : "已補填回報，待人資審核");
       setAdminReason("");
       load();
     } finally {
@@ -3413,6 +3519,35 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     }
   }
 
+  // 人資審核：獨立於一般管理者編輯權限之外的權限，核准後才把目前entries凍結成
+  // 有效計薪快照；退回不動既有快照（上一次有效核准版本仍然是目前計薪來源）
+  async function hrApprove() {
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      const { error } = await sb.rpc("hr_approve_daily_report", { p_report_id: report.id, p_reason: "" });
+      if (error) { toast("核准失敗：" + error.message); return; }
+      toast("已核准，薪資試算已更新");
+      load();
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function hrReject(reason) {
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      const { error } = await sb.rpc("hr_reject_daily_report", { p_report_id: report.id, p_reason: reason });
+      if (error) { toast("退回失敗：" + error.message); return; }
+      toast("已退回，原有效薪資版本維持不變");
+      setHrRejectModal(false);
+      load();
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function changeEntryAnomalyStatus(entryId, status) {
     const { error } = await sb.rpc("set_anomaly_status", { p_entry_id: entryId, p_status: status });
     if (error) { toast("更新失敗：" + error.message); return; }
@@ -3424,7 +3559,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   async function correctEntry(entryId, patch, reason) {
     const { error } = await sb.rpc("correct_daily_report_entry", { p_entry_id: entryId, p_patch: patch, p_reason: reason });
     if (error) { toast("更正失敗：" + error.message); return false; }
-    toast("已保存更正，回報已退回待重新簽核");
+    toast("已保存更正，待人資重新審核才會更新薪資");
     load();
     return true;
   }
@@ -3884,10 +4019,39 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
               )}
             </div>
           </div>
+          {report && report.status !== "draft" && (
+            <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: T.subBg, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+              <div style={{ fontSize: 12.5 }}>
+                <strong>人資審核狀態：</strong>
+                {report.hr_review_status === "approved" && <span style={{ color: T.green }}>已核准，計入薪資試算</span>}
+                {report.hr_review_status === "pending" && <span style={{ color: T.yellow }}>待人資審核（尚未計入薪資試算，若先前已核准過，仍以上一次核准版本計薪）</span>}
+                {report.hr_review_status === "rejected" && <span style={{ color: T.red }}>已退回：{report.hr_review_reason || "（無原因）"}</span>}
+                {Object.values(overtimeLinkByEntry).some((l) => l?.status === "pending" || l?.pending_submitted_at) && (
+                  <span style={{ marginLeft: 10, color: T.brown }}>
+                    ・有加班待核准（計薪分鐘數以加班申請審核結果為準，不因回報審核取代）
+                    {onGotoRequests && <button className="ph-btn small" style={{ marginLeft: 6 }} onClick={() => onGotoRequests({ month: date.slice(0, 7) })}>前往加班審核</button>}
+                  </span>
+                )}
+              </div>
+              {canApproveReport && (
+                <div style={{ display: "flex", gap: 8 }}>
+                  {report.hr_review_status !== "approved" && (
+                    <button className="ph-btn primary" disabled={actionBusy} onClick={hrApprove}>{actionBusy ? "處理中…" : "核准並更新薪資"}</button>
+                  )}
+                  {report.hr_review_status === "pending" && (
+                    <button className="ph-btn danger" disabled={actionBusy} onClick={() => setHrRejectModal(true)}>退回補正</button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
       {returnModal && (
         <ReturnReportModal busy={actionBusy} onClose={() => setReturnModal(false)} onConfirm={returnReport} />
+      )}
+      {hrRejectModal && (
+        <ReturnReportModal busy={actionBusy} onClose={() => setHrRejectModal(false)} onConfirm={hrReject} />
       )}
       {signatureHistory !== null && report && (
         <SignatureHistoryModal reportId={report.id} onClose={() => setSignatureHistory(null)} />
@@ -4938,13 +5102,15 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
     return { empId: emp.id, ...rest };
   }
 
-  function doLock() {
+  async function doLock() {
     if (lockBusy || !activeStoreId) return;
     // 鎖定不會自動套用「更正待審」，鎖定前先列出來提醒人資——這些列本來就在
     // requests state 裡（status 仍是 approved，只是多了 pending_submitted_at），
     // 不用另外查詢
     const pending = requests.filter((r) => r.store_id === activeStoreId && r.pending_submitted_at);
-    if (pending.length) { setLockWarning(pending); return; }
+    // 每日回報待人資審核（送出/更正後尚未核准，鎖定不會讓這些內容生效）
+    const { data: pendingReviewCount } = await sb.rpc("count_pending_hr_review", { p_store_id: activeStoreId, p_year_month: ym });
+    if (pending.length || pendingReviewCount > 0) { setLockWarning({ overtime: pending, hrPendingCount: pendingReviewCount || 0 }); return; }
     doLockConfirmed();
   }
 
@@ -5185,30 +5351,41 @@ function PayrollPage({ me, stores, scope, scopeStoreIds, activeStoreId, setScope
           onClose={() => setUnlockRun(null)} onConfirm={doUnlock} />
       )}
       {lockWarning && (
-        <LockWarningModal pending={lockWarning} nameById={Object.fromEntries(roster.map((e) => [e.id, e.name]))}
+        <LockWarningModal pending={lockWarning.overtime} hrPendingCount={lockWarning.hrPendingCount} nameById={Object.fromEntries(roster.map((e) => [e.id, e.name]))}
           busy={lockBusy} onClose={() => setLockWarning(null)} onConfirm={doLockConfirmed} />
       )}
     </div>
   );
 }
 
-function LockWarningModal({ pending, nameById, busy, onClose, onConfirm }) {
+function LockWarningModal({ pending, hrPendingCount, nameById, busy, onClose, onConfirm }) {
   return (
-    <Modal title="鎖定前請確認：有加班更正待審" onClose={onClose} wide>
-      <p style={{ fontSize: 12.5, color: T.sub, marginTop: -6 }}>
-        以下加班申請已核准後又被更正，目前仍採用原核准值計薪。鎖定不會自動套用這些更正，
-        需要人資到「加班申請」頁逐筆確認或駁回。確定要先鎖定嗎？
-      </p>
-      <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
-        {pending.map((r) => {
-          const legacyApprovedMinutes = r.approved_minutes ?? (r.hours != null ? Math.round(Number(r.hours) * 60) : null);
-          return (
-            <li key={r.id} style={{ marginBottom: 4 }}>
-              {nameById[r.employee_id] || "—"}・{fmtDateShort(r.start_at)}・原核准 {legacyApprovedMinutes ?? "—"} 分鐘 → 提議 {r.pending_minutes ?? "未核定"} 分鐘
-            </li>
-          );
-        })}
-      </ul>
+    <Modal title="鎖定前請確認：有待處理事項" onClose={onClose} wide>
+      {hrPendingCount > 0 && (
+        <p style={{ fontSize: 12.5, color: T.red, marginTop: -6 }}>
+          本月還有 {hrPendingCount} 份每日回報尚未經人資審核（送出或更正後未核准的內容不會計入薪資）。
+          鎖定後這些內容仍不會生效，需要之後解鎖才能補算，建議先到「每日異常回報→人資審核佇列」處理完再鎖定。
+        </p>
+      )}
+      {pending.length > 0 && (
+        <>
+          <p style={{ fontSize: 12.5, color: T.sub, marginTop: hrPendingCount > 0 ? 10 : -6 }}>
+            以下加班申請已核准後又被更正，目前仍採用原核准值計薪。鎖定不會自動套用這些更正，
+            需要人資到「加班申請」頁逐筆確認或駁回。
+          </p>
+          <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
+            {pending.map((r) => {
+              const legacyApprovedMinutes = r.approved_minutes ?? (r.hours != null ? Math.round(Number(r.hours) * 60) : null);
+              return (
+                <li key={r.id} style={{ marginBottom: 4 }}>
+                  {nameById[r.employee_id] || "—"}・{fmtDateShort(r.start_at)}・原核准 {legacyApprovedMinutes ?? "—"} 分鐘 → 提議 {r.pending_minutes ?? "未核定"} 分鐘
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
+      <p style={{ fontSize: 12.5, color: T.sub }}>確定要先鎖定嗎？</p>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
         <button className="ph-btn" onClick={onClose} disabled={busy}>先不鎖定</button>
         <button className="ph-btn primary" disabled={busy} onClick={onConfirm}>{busy ? "處理中…" : "仍要鎖定"}</button>
