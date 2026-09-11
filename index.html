@@ -3125,6 +3125,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const [scheduledShiftByEmployee, setScheduledShiftByEmployee] = useState({}); // employeeId -> {start,end} | null，排定班次；end 用來預填加班的原定下班時間
   const [overtimeLinkByEntry, setOvertimeLinkByEntry] = useState({}); // entryId -> 連結的加班申請（requests 表精簡欄位）
   const [corrections, setCorrections] = useState([]); // daily_report_entry_corrections，這份回報全部異常明細的更正歷程
+  const [signHistory, setSignHistory] = useState([]); // daily_report_sign_history，領班簽核／人資交接的永久歷程（不受更正清空影響）
   const [correctModal, setCorrectModal] = useState(null); // { r, e } | null
   const [adminReason, setAdminReason] = useState(""); // 管理者更正已送出回報時的必填修改原因
 
@@ -3156,11 +3157,14 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     let attachRows = [];
     let overtimeLinkMap = {};
     let corrections = [];
+    let signHist = [];
     if (rep) {
-      const [entriesRes, attachRes] = await Promise.all([
+      const [entriesRes, attachRes, signHistRes] = await Promise.all([
         sb.from("daily_report_entries").select("*").eq("daily_report_id", rep.id),
         sb.from("daily_report_attachments").select("*").eq("daily_report_id", rep.id),
+        sb.from("daily_report_sign_history").select("*").eq("daily_report_id", rep.id).order("occurred_at", { ascending: false }),
       ]);
+      signHist = signHistRes.data || [];
       (entriesRes.data || []).forEach((e) => { entryMap[e.employee_id] = e; });
       attachRows = attachRes.data || [];
       const entryIds = (entriesRes.data || []).map((e) => e.id);
@@ -3175,6 +3179,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     }
     setOvertimeLinkByEntry(overtimeLinkMap);
     setCorrections(corrections);
+    setSignHistory(signHist);
     const draft = {};
     rosterActive.forEach((r) => {
       const e = entryMap[r.id];
@@ -3488,15 +3493,15 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     }
   }
 
+  // 領班簽核／人資交接改走RPC：更新daily_reports當下欄位＋寫入
+  // daily_report_sign_history（永久保留「哪個版本被誰簽核」的事實）在
+  // 同一個交易內完成，不再是前端兩步驟各自獨立呼叫
   async function signReport() {
     if (actionBusy) return;
     setActionBusy(true);
     try {
-      const { data, error } = await sb.from("daily_reports").update({ status: "signed", signed_by: me.id, signed_at: new Date().toISOString() })
-        .eq("id", report.id).eq("updated_at", report.updated_at).select();
-      if (error) { toast("簽核失敗：" + error.message); return; }
-      if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
-      await logAudit(me.name, "sign_daily_report", report.id);
+      const { error } = await sb.rpc("sign_daily_report", { p_report_id: report.id, p_expected_updated_at: report.updated_at });
+      if (error) { toast((error.message.includes("CONFLICT") ? "" : "簽核失敗：") + error.message); if (error.message.includes("CONFLICT")) load(); return; }
       toast("已完成領班簽核");
       load();
     } finally {
@@ -3508,11 +3513,8 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     if (actionBusy) return;
     setActionBusy(true);
     try {
-      const { data, error } = await sb.from("daily_reports").update({ status: "hr_received", hr_received_by: me.id, hr_received_at: new Date().toISOString() })
-        .eq("id", report.id).eq("updated_at", report.updated_at).select();
-      if (error) { toast("交接失敗：" + error.message); return; }
-      if (!data?.length) { toast("此回報已被其他人更新，請重新整理後再繼續"); load(); return; }
-      await logAudit(me.name, "handoff_daily_report", report.id);
+      const { error } = await sb.rpc("handoff_daily_report", { p_report_id: report.id, p_expected_updated_at: report.updated_at });
+      if (error) { toast((error.message.includes("CONFLICT") ? "" : "交接失敗：") + error.message); if (error.message.includes("CONFLICT")) load(); return; }
       toast("已完成人資交接");
       load();
     } finally {
@@ -4057,6 +4059,25 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                     <button className="ph-btn danger" disabled={actionBusy} onClick={() => setHrRejectModal(true)}>退回補正</button>
                   )}
                 </div>
+              )}
+            </div>
+          )}
+          {report && report.status !== "draft" && (
+            <div style={{ marginTop: 10, fontSize: 12.5, color: T.sub }}>
+              <strong style={{ color: T.ink }}>領班簽核（選用，不影響人資審核與薪資）：</strong>
+              {report.signed_by ? `目前版本（v${report.version}）已簽核` : "目前版本尚未簽核"}
+              {signHistory.length > 0 && (
+                <details style={{ marginTop: 4 }}>
+                  <summary style={{ cursor: "pointer" }}>簽核歷程（{signHistory.length}筆，含已被更正取代的舊版本）</summary>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                    {signHistory.map((h) => (
+                      <li key={h.id}>
+                        v{h.report_version}・{h.event_type === "signed" ? "領班簽核" : "人資交接"}・{h.actor_name_snapshot || "—"}・{new Date(h.occurred_at).toLocaleString("zh-TW")}
+                        {h.report_version < report.version && <span style={{ color: T.yellow }}>（此版本已被更正取代）</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               )}
             </div>
           )}
