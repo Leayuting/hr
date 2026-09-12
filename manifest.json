@@ -1,6 +1,6 @@
 {
-  "name": "PHASE 人事排班系統",
-  "short_name": "人事排班",
+  "name": "Phase ERP",
+  "short_name": "Phase ERP",
   "start_url": "./index.html",
   "scope": "./index.html",
   "display": "standalone",

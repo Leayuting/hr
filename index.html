@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  PHASE 人事排班系統 · Supabase 正式版
+  Phase ERP（原人事排班系統，已擴充為人事/排班/薪資/審核一體的營運管理系統）· Supabase 正式版
   架構：單頁 React（無建置流程），Supabase Auth 登入 + 逐表 RLS 依角色/門市限制，
   詳見同目錄 phase-hr_schema.sql。直接把這份檔案當 index.html 部署到 GitHub Pages 即可。
 -->
@@ -8,7 +8,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-<title>PHASE 人事排班系統</title>
+<title>Phase ERP</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
@@ -32,7 +32,7 @@ const { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImpera
 const { createClient } = supabase;
 
 /* ────────────────────────────────────────────
-   PHASE 人事排班系統
+   Phase ERP（原人事排班系統）
    設計語言沿用 phase-ledger／phase-attendance 的共同語言：
    暖白底・深墨字・低飽和棕主色，明體標題（Noto Serif TC）＋ 黑體內文（Noto Sans TC）
 ──────────────────────────────────────────── */
@@ -908,7 +908,7 @@ function Login() {
   return (
     <div className="ph-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div className="ph-card" style={{ width: 360, padding: 28 }}>
-        <h1 className="ph-serif" style={{ fontSize: 20, marginTop: 0, marginBottom: 4 }}>PHASE 人事排班系統</h1>
+        <h1 className="ph-serif" style={{ fontSize: 20, marginTop: 0, marginBottom: 4 }}>Phase ERP</h1>
         <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 16 }}>排班・請假加班・電子日總表・薪資試算</p>
         <div style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap" }}>
           <button type="button" className="ph-btn small" style={{ flex: 1, minWidth: 100, ...(mode === "password" ? { background: T.brown, color: "#fff", borderColor: T.brown } : {}) }} onClick={() => { setMode("password"); setErr(""); }}>個人帳號登入</button>
@@ -7669,7 +7669,7 @@ function AppShell({ session }) {
       <aside className={"ph-sidebar" + (sidebarOpen ? " open" : "")}>
         <div className="ph-sidebar-brand">
           <div className="ph-word">PHASE</div>
-          <div className="ph-sub">PEOPLE &amp; SHIFT</div>
+          <div className="ph-sub">ERP</div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           {navs.map(([k, l, icon]) => (
