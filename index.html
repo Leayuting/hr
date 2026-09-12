@@ -72,15 +72,16 @@ const KIOSK_MANAGER_PERMISSIONS = { schedule: "edit", daily_report: "fill", requ
 
 // 系統中心：整合採購／咖啡豆盤點等外部作業系統入口，名稱/說明/網址/
 // 權限集中在這裡設定，之後要改網址或新增系統只要改這個陣列，不用動
-// SystemHubPage 或側邊選單邏輯。
+// SystemHubCards 或呼叫端（一般管理介面側邊選單／Kiosk首頁功能區）邏輯。
 //
-// 權限對應說明（2026-09-12）：目前系統沒有「採購」「廠務/烘豆」專屬的
-// 權限欄位可對應，這裡暫時對應到最接近的既有身分分級——採購系統／
-// 咖啡豆盤點工廠端只開放總部角色（super_admin／admin_specialist）與
-// 門市共用PIN的店長層級（dept_manager，比照店長本來就能編輯班表/審核
-// 申請的較高權限）；門市端盤點開放所有在職身分（含一般共用PIN），
-// 比照現有排班/每日回報頁面的開放範圍。**這組對應是待確認的猜測，
-// 不是查證過的既有規則，需要使用者確認是否符合實際需要的人員範圍。**
+// 權限對應說明（2026-09-12更新）：目前系統沒有「採購」「廠務/烘豆」專屬的
+// 權限欄位可對應。使用者已明確指示：採購系統／咖啡豆盤點工廠端**現階段
+// 只限總部角色**（super_admin／admin_specialist）——這是暫行設定，不是
+// 已查證的公司權限，門市或其他人員是否也該開放待確認，之後若要開放
+// 只改下面visibleFor那一行。咖啡豆盤點門市端則明確開放給「已通過驗證的
+// 門市操作身分」，也就是共用門市PIN（不分一般/店長）＋總部個人帳號，
+// 用is_shared_pin_account／access_tier判斷，刻意不用active（PIN帳號的
+// active不代表任何人的在職狀態，用在職判斷概念上不對）。
 const EXTERNAL_SYSTEMS = [
   {
     key: "procurement",
@@ -90,7 +91,8 @@ const EXTERNAL_SYSTEMS = [
       {
         label: "開啟採購系統",
         url: "https://leayuting.github.io/phase-procurement/",
-        visibleFor: (me) => me.access_tier === "super_admin" || me.access_tier === "admin_specialist" || (me.is_shared_pin_account && me.access_tier === "dept_manager"),
+        // 現階段限總部：待確認是否也要開放給門市或其他人員
+        visibleFor: (me) => me.access_tier === "super_admin" || me.access_tier === "admin_specialist",
       },
     ],
   },
@@ -102,34 +104,39 @@ const EXTERNAL_SYSTEMS = [
       {
         label: "工廠端",
         url: "https://leayuting.github.io/phase-coffee-ops/factory.html",
+        // 現階段限總部：待確認是否也要開放給門市或其他人員
         visibleFor: (me) => me.access_tier === "super_admin" || me.access_tier === "admin_specialist",
       },
       {
         label: "門市端",
         url: "https://leayuting.github.io/phase-coffee-ops/",
-        visibleFor: () => true,
+        // 已通過驗證的門市操作身分：共用門市PIN（一般＋店長）＋總部個人帳號
+        visibleFor: (me) => me.is_shared_pin_account || me.access_tier === "super_admin" || me.access_tier === "admin_specialist",
       },
     ],
   },
 ];
 function visibleExternalSystems(me) {
+  if (!me) return [];
   return EXTERNAL_SYSTEMS.map((sys) => ({ ...sys, buttons: sys.buttons.filter((b) => b.visibleFor(me)) }))
     .filter((sys) => sys.buttons.length > 0);
 }
 
-function SystemHubPage({ me }) {
+// 只負責卡片內容，不含頁面標題／外層容器——一般管理介面（側邊選單觸發）
+// 與Kiosk（首頁功能區按鈕觸發）都用<Modal>包這個元件顯示，兩邊共用同一份
+// 設定與卡片樣式，不維護兩套。用Modal（不是切換page/tab）顯示，原本頁面
+// 元件不會unmount，填寫到一半的表單內容不會遺失。
+function SystemHubCards({ me }) {
   const systems = visibleExternalSystems(me);
   return (
     <div>
-      <div style={{ marginBottom: 20 }}>
-        <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>SYSTEM HUB</p>
-        <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>系統中心</h2>
-        <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>採購與咖啡豆盤點作業系統的統一入口，點擊後以新分頁開啟，不影響目前頁面內容；帳號密碼／權限由對方系統各自驗證，不會透過網址傳遞。</p>
-      </div>
+      <p style={{ color: T.sub, fontSize: 12.5, margin: "0 0 16px" }}>
+        採購與咖啡豆盤點作業系統的入口，點擊後以新分頁開啟，不影響目前頁面內容。看得到入口不代表在對方系統一定有權限，各系統各自驗證登入與權限，不會透過網址傳遞帳號密碼或PIN。
+      </p>
       {systems.length === 0 ? (
         <div className="ph-card" style={{ padding: 24, textAlign: "center", color: T.sub }}>目前沒有可使用的外部系統入口，如有需要請洽管理者確認權限。</div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 16 }}>
           {systems.map((sys) => (
             <div key={sys.key} className="ph-card" style={{ padding: 20 }}>
               <h3 className="ph-serif" style={{ margin: "0 0 6px", fontSize: 17 }}>{sys.title}</h3>
@@ -4491,6 +4498,8 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
   const [date, setDate] = useState(todayStr());
   const isManager = me.access_tier === "dept_manager";
   const [tab, setTab] = useState("daily_report"); // 'daily_report' | 'self_schedule' | 'schedule_view' | 'requests_review'
+  const [systemHubOpen, setSystemHubOpen] = useState(false); // 跟一般管理介面共用同一份EXTERNAL_SYSTEMS設定與SystemHubCards元件，Modal顯示不切換tab，不會弄丟填寫到一半的內容
+  const showSystemHub = visibleExternalSystems(me).length > 0; // 共用PIN帳號目前只會通過coffee_ops門市端那一條，實際只會顯示「咖啡豆盤點」卡片
   const KIOSK_TABS = [
     ["schedule_view", isManager ? "門市排班" : "查看本店班表"],
     ["daily_report", "每日回報"],
@@ -4507,9 +4516,19 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
           </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
             <span className="ph-pill">{isManager ? "店長 PIN 模式" : "門市 PIN 模式"}</span>
+            {showSystemHub && (
+              <button className="ph-btn small" onClick={() => setSystemHubOpen(true)}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="hub" size={14} />系統中心</span>
+              </button>
+            )}
             <button className="ph-btn small" onClick={() => sb.auth.signOut()}>登出</button>
           </div>
         </div>
+        {systemHubOpen && (
+          <Modal title="系統中心" onClose={() => setSystemHubOpen(false)} wide>
+            <SystemHubCards me={me} />
+          </Modal>
+        )}
         <main className="ph-main-pad" style={{ flex: 1, padding: "24px 40px", minWidth: 0 }}>
           <div style={{ maxWidth: 1460, margin: "0 auto" }}>
             <div style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap", maxWidth: 560 }}>
@@ -7644,7 +7663,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
 const PAGE_TITLE = {
   dashboard: "營運總覽", schedule: "門市排班", daily_report: "每日回報", requests: "申請審核",
   payroll: "薪資試算", staff: "人員資料", monthly_summary: "每月總結", backup: "備份",
-  permissions: "權限管理", audit_log: "異動紀錄", system_hub: "系統中心",
+  permissions: "權限管理", audit_log: "異動紀錄",
 };
 
 function AppShell({ session }) {
@@ -7657,6 +7676,7 @@ function AppShell({ session }) {
   function gotoRequests(focus) { setRequestsFocus(focus || null); setPage("requests"); }
   const [toastMsg, setToastMsg] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [systemHubOpen, setSystemHubOpen] = useState(false); // 系統中心用Modal顯示，不透過setPage切換，目前頁面元件不會unmount、填寫到一半的內容不會遺失
   const [pendingCount, setPendingCount] = useState(0);
   const [showChangePassword, setShowChangePassword] = useState(false);
 
@@ -7744,8 +7764,8 @@ function AppShell({ session }) {
     ...(perm.backup && perm.backup !== "none" ? [["backup", "備份", "backup"]] : []),
     ...(perm.permission_admin === "manage" ? [["permissions", "權限管理", "permissions"]] : []),
     ...(perm.permission_admin === "manage" ? [["audit_log", "異動紀錄", "audit_log"]] : []),
-    ...(visibleExternalSystems(me).length > 0 ? [["system_hub", "系統中心", "hub"]] : []),
   ];
+  const showSystemHub = visibleExternalSystems(me).length > 0;
 
   return (
     <div className="ph-root ph-shell">
@@ -7763,6 +7783,14 @@ function AppShell({ session }) {
               {k === "requests" && canReview && pendingCount > 0 && <span className="ph-nav-badge">{pendingCount}</span>}
             </button>
           ))}
+          {showSystemHub && (
+            // 系統中心開Modal（見systemHubOpen），不是setPage切換頁面，所以
+            // 不會有「page === k」的選取樣式（本來就不是在瀏覽的頁面）
+            <button className="ph-nav-item" onClick={() => setSystemHubOpen(true)}>
+              <span className="ph-nav-icon"><Icon name="hub" /></span>
+              <span>系統中心</span>
+            </button>
+          )}
         </div>
         <div className="ph-sidebar-foot">
           <div className="ph-sidebar-foot-id">
@@ -7823,12 +7851,16 @@ function AppShell({ session }) {
             {page === "backup" && perm.backup && perm.backup !== "none" && <BackupPage me={me} toast={toast} />}
             {page === "permissions" && perm.permission_admin === "manage" && <PermissionsPage me={me} stores={stores} toast={toast} />}
             {page === "audit_log" && perm.permission_admin === "manage" && <AuditLogPage stores={stores} />}
-            {page === "system_hub" && visibleExternalSystems(me).length > 0 && <SystemHubPage me={me} />}
           </div>
         </main>
       </div>
       {toastMsg && <div className="ph-toast">{toastMsg}</div>}
       {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} toast={toast} />}
+      {systemHubOpen && (
+        <Modal title="系統中心" onClose={() => setSystemHubOpen(false)} wide>
+          <SystemHubCards me={me} />
+        </Modal>
+      )}
     </div>
   );
 }
