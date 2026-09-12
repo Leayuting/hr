@@ -626,6 +626,7 @@ const ICON_PATHS = {
   chevron: <><path d="M9 6l6 6-6 6" /></>,
   hub: <><circle cx="5" cy="5" r="1.6" /><circle cx="12" cy="5" r="1.6" /><circle cx="19" cy="5" r="1.6" /><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /><circle cx="5" cy="19" r="1.6" /><circle cx="12" cy="19" r="1.6" /><circle cx="19" cy="19" r="1.6" /></>,
   external_link: <><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><path d="M15 3h6v6" /><path d="M10 14L21 3" /></>,
+  history: <><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l4 2" /></>,
 };
 function Icon({ name, size = 18 }) {
   return (
@@ -7763,7 +7764,7 @@ function AppShell({ session }) {
     ...(perm.staff === "edit" ? [["monthly_summary", "每月總結", "monthly_summary"]] : []),
     ...(perm.backup && perm.backup !== "none" ? [["backup", "備份", "backup"]] : []),
     ...(perm.permission_admin === "manage" ? [["permissions", "權限管理", "permissions"]] : []),
-    ...(perm.permission_admin === "manage" ? [["audit_log", "異動紀錄", "audit_log"]] : []),
+    ...(perm.permission_admin === "manage" ? [["audit_log", "異動紀錄", "history"]] : []),
   ];
   const showSystemHub = visibleExternalSystems(me).length > 0;
 
