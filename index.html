@@ -74,14 +74,13 @@ const KIOSK_MANAGER_PERMISSIONS = { schedule: "edit", daily_report: "fill", requ
 // 權限集中在這裡設定，之後要改網址或新增系統只要改這個陣列，不用動
 // SystemHubCards 或呼叫端（一般管理介面側邊選單／Kiosk首頁功能區）邏輯。
 //
-// 權限對應說明（2026-09-12更新）：目前系統沒有「採購」「廠務/烘豆」專屬的
-// 權限欄位可對應。使用者已明確指示：採購系統／咖啡豆盤點工廠端**現階段
-// 只限總部角色**（super_admin／admin_specialist）——這是暫行設定，不是
-// 已查證的公司權限，門市或其他人員是否也該開放待確認，之後若要開放
-// 只改下面visibleFor那一行。咖啡豆盤點門市端則明確開放給「已通過驗證的
-// 門市操作身分」，也就是共用門市PIN（不分一般/店長）＋總部個人帳號，
-// 用is_shared_pin_account／access_tier判斷，刻意不用active（PIN帳號的
-// active不代表任何人的在職狀態，用在職判斷概念上不對）。
+// 權限對應說明（2026-09-12更新，使用者已確認）：目前系統沒有「採購」
+// 「廠務/烘豆」專屬的權限欄位可對應。採購系統／咖啡豆盤點門市端開放給
+// 「已通過驗證的門市操作身分」＋總部——也就是共用門市PIN（不分一般/
+// 店長）＋總部個人帳號，用is_shared_pin_account／access_tier判斷，刻意
+// 不用active（PIN帳號的active不代表任何人的在職狀態，用在職判斷概念上
+// 不對）。咖啡豆盤點工廠端維持**只限總部角色**（super_admin／
+// admin_specialist），不開放門市共用PIN。
 const EXTERNAL_SYSTEMS = [
   {
     key: "procurement",
@@ -91,8 +90,9 @@ const EXTERNAL_SYSTEMS = [
       {
         label: "開啟採購系統",
         url: "https://leayuting.github.io/phase-procurement/",
-        // 現階段限總部：待確認是否也要開放給門市或其他人員
-        visibleFor: (me) => me.access_tier === "super_admin" || me.access_tier === "admin_specialist",
+        // 2026-09-12使用者確認：開放總部＋所有門市共用PIN（一般＋店長），
+        // 跟咖啡豆盤點門市端同一組判斷式
+        visibleFor: (me) => me.is_shared_pin_account || me.access_tier === "super_admin" || me.access_tier === "admin_specialist",
       },
     ],
   },
