@@ -69,6 +69,86 @@ const TIER_PERMISSIONS = {
 // ／店長 PIN（多了編輯班表、審核本店申請），跟 DB 端 feature_level() 的兩個分支一一對應
 const KIOSK_STAFF_PERMISSIONS = { schedule: "unit", daily_report: "fill" };
 const KIOSK_MANAGER_PERMISSIONS = { schedule: "edit", daily_report: "fill", requests: "first_review" };
+
+// 系統中心：整合採購／咖啡豆盤點等外部作業系統入口，名稱/說明/網址/
+// 權限集中在這裡設定，之後要改網址或新增系統只要改這個陣列，不用動
+// SystemHubPage 或側邊選單邏輯。
+//
+// 權限對應說明（2026-09-12）：目前系統沒有「採購」「廠務/烘豆」專屬的
+// 權限欄位可對應，這裡暫時對應到最接近的既有身分分級——採購系統／
+// 咖啡豆盤點工廠端只開放總部角色（super_admin／admin_specialist）與
+// 門市共用PIN的店長層級（dept_manager，比照店長本來就能編輯班表/審核
+// 申請的較高權限）；門市端盤點開放所有在職身分（含一般共用PIN），
+// 比照現有排班/每日回報頁面的開放範圍。**這組對應是待確認的猜測，
+// 不是查證過的既有規則，需要使用者確認是否符合實際需要的人員範圍。**
+const EXTERNAL_SYSTEMS = [
+  {
+    key: "procurement",
+    title: "採購系統",
+    description: "進入採購作業系統。",
+    buttons: [
+      {
+        label: "開啟採購系統",
+        url: "https://leayuting.github.io/phase-procurement/",
+        visibleFor: (me) => me.access_tier === "super_admin" || me.access_tier === "admin_specialist" || (me.is_shared_pin_account && me.access_tier === "dept_manager"),
+      },
+    ],
+  },
+  {
+    key: "coffee_ops",
+    title: "咖啡豆盤點",
+    description: "依作業場域選擇入口。",
+    buttons: [
+      {
+        label: "工廠端",
+        url: "https://leayuting.github.io/phase-coffee-ops/factory.html",
+        visibleFor: (me) => me.access_tier === "super_admin" || me.access_tier === "admin_specialist",
+      },
+      {
+        label: "門市端",
+        url: "https://leayuting.github.io/phase-coffee-ops/",
+        visibleFor: () => true,
+      },
+    ],
+  },
+];
+function visibleExternalSystems(me) {
+  return EXTERNAL_SYSTEMS.map((sys) => ({ ...sys, buttons: sys.buttons.filter((b) => b.visibleFor(me)) }))
+    .filter((sys) => sys.buttons.length > 0);
+}
+
+function SystemHubPage({ me }) {
+  const systems = visibleExternalSystems(me);
+  return (
+    <div>
+      <div style={{ marginBottom: 20 }}>
+        <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>SYSTEM HUB</p>
+        <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>系統中心</h2>
+        <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>採購與咖啡豆盤點作業系統的統一入口，點擊後以新分頁開啟，不影響目前頁面內容；帳號密碼／權限由對方系統各自驗證，不會透過網址傳遞。</p>
+      </div>
+      {systems.length === 0 ? (
+        <div className="ph-card" style={{ padding: 24, textAlign: "center", color: T.sub }}>目前沒有可使用的外部系統入口，如有需要請洽管理者確認權限。</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
+          {systems.map((sys) => (
+            <div key={sys.key} className="ph-card" style={{ padding: 20 }}>
+              <h3 className="ph-serif" style={{ margin: "0 0 6px", fontSize: 17 }}>{sys.title}</h3>
+              <p style={{ color: T.sub, fontSize: 12.5, margin: "0 0 16px" }}>{sys.description}</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {sys.buttons.map((b) => (
+                  <a key={b.label} className="ph-btn primary" href={b.url} target="_blank" rel="noopener noreferrer"
+                    style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, textDecoration: "none" }}>
+                    {b.label}<Icon name="external_link" size={14} />
+                  </a>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 const REQ_TYPE_LABEL = {
   annual_leave: "特休", personal_leave: "事假", marriage_leave: "婚假", bereavement_leave: "喪假",
   sick_leave: "普通傷病假", official_leave: "公假", injury_leave: "公傷病假", family_care_leave: "家庭照顧假", overtime: "加班",
@@ -537,6 +617,8 @@ const ICON_PATHS = {
   hamburger: <><path d="M3.5 6.5h17M3.5 12h17M3.5 17.5h17" /></>,
   close: <><path d="M5 5l14 14M19 5L5 19" /></>,
   chevron: <><path d="M9 6l6 6-6 6" /></>,
+  hub: <><circle cx="5" cy="5" r="1.6" /><circle cx="12" cy="5" r="1.6" /><circle cx="19" cy="5" r="1.6" /><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /><circle cx="5" cy="19" r="1.6" /><circle cx="12" cy="19" r="1.6" /><circle cx="19" cy="19" r="1.6" /></>,
+  external_link: <><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><path d="M15 3h6v6" /><path d="M10 14L21 3" /></>,
 };
 function Icon({ name, size = 18 }) {
   return (
@@ -7562,7 +7644,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
 const PAGE_TITLE = {
   dashboard: "營運總覽", schedule: "門市排班", daily_report: "每日回報", requests: "申請審核",
   payroll: "薪資試算", staff: "人員資料", monthly_summary: "每月總結", backup: "備份",
-  permissions: "權限管理", audit_log: "異動紀錄",
+  permissions: "權限管理", audit_log: "異動紀錄", system_hub: "系統中心",
 };
 
 function AppShell({ session }) {
@@ -7662,6 +7744,7 @@ function AppShell({ session }) {
     ...(perm.backup && perm.backup !== "none" ? [["backup", "備份", "backup"]] : []),
     ...(perm.permission_admin === "manage" ? [["permissions", "權限管理", "permissions"]] : []),
     ...(perm.permission_admin === "manage" ? [["audit_log", "異動紀錄", "audit_log"]] : []),
+    ...(visibleExternalSystems(me).length > 0 ? [["system_hub", "系統中心", "hub"]] : []),
   ];
 
   return (
@@ -7740,6 +7823,7 @@ function AppShell({ session }) {
             {page === "backup" && perm.backup && perm.backup !== "none" && <BackupPage me={me} toast={toast} />}
             {page === "permissions" && perm.permission_admin === "manage" && <PermissionsPage me={me} stores={stores} toast={toast} />}
             {page === "audit_log" && perm.permission_admin === "manage" && <AuditLogPage stores={stores} />}
+            {page === "system_hub" && visibleExternalSystems(me).length > 0 && <SystemHubPage me={me} />}
           </div>
         </main>
       </div>
