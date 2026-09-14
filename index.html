@@ -12,7 +12,7 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
-<meta name="theme-color" content="#A34F2D">
+<meta name="theme-color" content="#A64F2D">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -37,17 +37,29 @@ const { createClient } = supabase;
    暖白底・深墨字・低飽和棕主色，明體標題（Noto Serif TC）＋ 黑體內文（Noto Sans TC）
 ──────────────────────────────────────────── */
 
+// 2026-09-14 視覺改版：色碼與間距/圓角尺度統一，詳見設計規範討論。olive/handoff/gold
+// 三色維持原值（分別是核准類按鈕的非橘色替代色、交接狀態色、側邊選單徽章色，跟這次
+// 使用者給的色票是不同用途，沒有被要求對照，故不動，避免無依據亂改既有可用的區分色）
 const T = {
-  bg: "#F3EFE7", card: "#FFFCF7", ink: "#292520", sub: "#8B8984", subBg: "#EDEBE6",
-  brown: "#A34F2D", brownSoft: "#EFE0CF", line: "#D8D0C4",
+  bg: "#F6F4F0", card: "#FFFFFF", ink: "#29241F", sub: "#6D665E", subBg: "#EEEBE5",
+  brown: "#A64F2D", brownSoft: "#F5E8DF", line: "#DDD7CF",
   olive: "#667054", oliveBg: "#E7EAE1",
-  green: "#3F6952", greenBg: "#E3ECE6",
-  yellow: "#C77935", yellowBg: "#FBEADA",
-  red: "#A0443E", redBg: "#F5E2E0",
+  green: "#3F7A4E", greenBg: "#E8F1E9",
+  yellow: "#A8631A", yellowBg: "#F7EBDC",
+  red: "#AA3B34", redBg: "#FBEAE9",
   handoff: "#78845F", handoffBg: "#E7EAE0",
+  info: "#3D6E8C", infoBg: "#E7EFF3",
+  mute: "#8B8478", muteBg: "#EEEBE5",
   gold: "#C9A24B",
-  sidebar: "#241C16", sidebarInk: "#EDE6DC", sidebarSub: "#B3A899", sidebarLine: "#3A2F26",
+  sidebar: "#29231E", sidebarCard: "#3A2E25", sidebarInk: "#EDE7DF", sidebarSub: "#9A9186", sidebarLine: "#3B342C",
 };
+// 門市分類色，僅用於標示是哪間店（不代表成功/警告/審核結果），依店名比對，跟
+// 門市在資料庫裡的實際 id 無關；未列在對照表的門市（例如「總部」）用中性色
+const STORE_TONE = { "中山": "#A64F2D", "勤美": "#0C7A9E", "水湳": "#B08A2E" };
+function storeColorFor(storeName) {
+  const key = Object.keys(STORE_TONE).find((k) => storeName?.includes(k));
+  return key ? STORE_TONE[key] : T.sub;
+}
 
 const SB_URL = "https://msrjtjpanejszhlxuqyd.supabase.co";
 const SB_KEY = "sb_publishable_1clgZF2darBDVaoPyC1zdQ_ez_4OiWb";
@@ -533,11 +545,12 @@ const css = `
 .ph-sidebar-brand { padding:0 10px 22px; }
 .ph-sidebar-brand .ph-word { font-family:'Noto Serif TC',serif; font-size:22px; font-weight:700; letter-spacing:.06em; color:#fff; line-height:1; }
 .ph-sidebar-brand .ph-sub { font-size:10.5px; letter-spacing:.18em; color:${T.sidebarSub}; margin-top:6px; }
-.ph-nav-item { position:relative; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:9px; cursor:pointer; color:${T.sidebarInk}; border:none; background:none; width:100%; text-align:left; font-size:13.5px; }
-.ph-nav-item:hover { background:rgba(255,255,255,.06); }
-.ph-nav-item.on { background:${T.brown}; color:#fff; }
-.ph-nav-item.on::before { content:""; position:absolute; left:-14px; top:8px; bottom:8px; width:3px; border-radius:2px; background:${T.gold}; }
-.ph-nav-item .ph-nav-icon { display:flex; flex-shrink:0; opacity:.9; }
+.ph-nav-item { position:relative; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:10px; cursor:pointer; color:${T.sidebarSub}; border:none; background:none; width:100%; text-align:left; font-size:13.5px; }
+.ph-nav-item:hover { background:rgba(255,255,255,.06); color:${T.sidebarInk}; }
+.ph-nav-item.on { background:${T.sidebarCard}; color:#F5F0E8; }
+.ph-nav-item.on .ph-nav-icon { color:${T.brown}; }
+.ph-nav-item.on::before { content:""; position:absolute; left:-10px; top:6px; bottom:6px; width:3px; border-radius:3px; background:${T.brown}; }
+.ph-nav-item .ph-nav-icon { display:flex; flex-shrink:0; }
 .ph-nav-item .ph-nav-badge { margin-left:auto; background:${T.gold}; color:#241C16; font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px; }
 .ph-sidebar-foot { margin-top:auto; padding-top:14px; border-top:1px solid ${T.sidebarLine}; display:flex; flex-direction:column; gap:10px; }
 .ph-sidebar-foot-id { display:flex; align-items:center; gap:10px; min-width:0; }
@@ -552,7 +565,7 @@ const css = `
 .ph-sidebar-backdrop { display:none; }
 .ph-stat-card { position:relative; background:${T.card}; border:1px solid ${T.line}; border-radius:11px; padding:16px 18px 16px 20px; box-shadow:0 1px 2px rgba(41,37,32,.05); cursor:pointer; text-align:left; }
 .ph-stat-card::before { content:""; position:absolute; left:0; top:14px; bottom:14px; width:3px; border-radius:2px; background:${T.line}; }
-.ph-stat-card.accent-brick::before { background:#A34F2D; }
+.ph-stat-card.accent-brick::before { background:#A64F2D; }
 .ph-stat-card.accent-olive::before { background:#4B5530; }
 .ph-stat-card.accent-gold::before { background:#C9A24B; }
 .ph-stat-card.accent-maroon::before { background:#2E2018; }
@@ -3885,10 +3898,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>處理門店</p><p style={{ fontWeight: 600, margin: 0 }}>{store?.name}</p></div>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>回報日期</p><p style={{ fontWeight: 600, margin: 0 }}>{date}</p></div>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>目前狀態</p><p style={{ fontWeight: 600, margin: 0 }}>{DAILY_REPORT_STATUS_LABEL[report?.status || "not_submitted"]}</p></div>
-          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>POS 核對</p><p style={{ fontWeight: 600, margin: 0, color: posVerified ? T.green : T.brown }}>{posVerified ? "已確認" : "待確認"}</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>POS 核對</p><p style={{ fontWeight: 600, margin: 0, color: posVerified ? T.green : T.yellow }}>{posVerified ? "已確認" : "待確認"}</p></div>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>異常人數</p><p style={{ fontWeight: 600, margin: 0 }}>{anomalyCount} 人</p></div>
-          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>領班簽核</p><p style={{ fontWeight: 600, margin: 0, color: signDone ? T.green : T.brown }}>{signDone ? "已完成" : "尚未完成"}</p></div>
-          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>人資交接</p><p style={{ fontWeight: 600, margin: 0, color: handoffDone ? T.green : T.brown }}>{handoffDone ? "已完成" : "未繳交"}</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>領班簽核</p><p style={{ fontWeight: 600, margin: 0, color: signDone ? T.green : T.yellow }}>{signDone ? "已完成" : "尚未完成"}</p></div>
+          <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>人資交接</p><p style={{ fontWeight: 600, margin: 0, color: handoffDone ? T.green : T.yellow }}>{handoffDone ? "已完成" : "未繳交"}</p></div>
         </div>
       )}
 
@@ -5569,7 +5582,7 @@ function PayrollPageInner({ me, stores, scope, scopeStoreIds, activeStoreId, set
                   <td>{money(r.effectiveTaxableIncome)}</td>
                   <td>{money(r.effectiveGrossPay)}</td>
                   <td>{money(r.effectiveTotalDeduction)}</td>
-                  <td style={{ fontWeight: 600 }}>NT$ {money(r.effectiveTotal)}</td>
+                  <td style={{ fontWeight: 700, fontSize: 14.5, color: T.brown }}>NT$ {money(r.effectiveTotal)}</td>
                   <td><button className="ph-btn small" onClick={() => setPayslipRow(r)}>薪資明細 →</button></td>
                 </tr>
               ))}
@@ -7411,11 +7424,13 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
   const [todayReports, setTodayReports] = useState([]);
   const [payrollRuns, setPayrollRuns] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [mobileDayIdx, setMobileDayIdx] = useState(() => Math.max(0, weekDates.indexOf(today)));
 
   const load = useCallback(async () => {
     if (!canReview || !scopeStoreIds.length) return;
     setLoading(true);
+    setLoadError(false);
     const [empResList, shiftRes, reqRes, repRes, payRes] = await Promise.all([
       Promise.all(scopeStoreIds.map((sid) => sb.rpc("store_roster", { p_store_id: sid }).then((r) => ({ ...r, data: (r.data || []).map((row) => ({ ...row, store_id: sid })) })))),
       sb.from("shifts").select("*").in("store_id", allStoreIds).gte("work_date", monthRange[0]).lte("work_date", monthRange[1]),
@@ -7423,6 +7438,14 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
       sb.from("daily_reports").select("*").in("store_id", allStoreIds).eq("report_date", today),
       sb.from("payroll_runs").select("*").in("store_id", allStoreIds).eq("year_month", ym),
     ]);
+    // 儀表板資料來源多，任一查詢失敗都不該讓畫面靜默顯示 0（看起來像「真的沒有」），
+    // 一律視為整頁載入失敗，明確呈現錯誤狀態並提供重新查詢
+    if (empResList.some((r) => r.error) || shiftRes.error || reqRes.error || repRes.error || payRes.error) {
+      console.error("dashboard load", empResList.find((r) => r.error)?.error, shiftRes.error, reqRes.error, repRes.error, payRes.error);
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
     setRoster(empResList.flatMap((r) => r.data || []).filter((r) => r.active));
     setMonthShifts(shiftRes.data || []);
     setPendingReqs(reqRes.data || []);
@@ -7510,7 +7533,41 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
         <button className="ph-btn primary" onClick={() => setPage("schedule")}>＋ 新增／編輯班表</button>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16, marginTop: 22 }}>
+      {loadError && (
+        <div className="ph-card" style={{ marginTop: 24, padding: "32px 20px", textAlign: "center" }}>
+          <p style={{ color: T.red, fontWeight: 600, margin: "0 0 6px" }}>儀表板資料載入失敗</p>
+          <p style={{ color: T.sub, fontSize: 12.5, margin: "0 0 14px" }}>與伺服器連線發生問題，以下畫面沒有顯示，不代表資料為 0，請重新查詢。</p>
+          <button className="ph-btn" onClick={load}>重新查詢</button>
+        </div>
+      )}
+
+      {!loadError && (
+      <div className="ph-card" style={{ marginTop: 24, padding: 18 }}>
+        <p className="ph-eyebrow" style={{ margin: "0 0 4px", color: T.brown }}>REMINDER</p>
+        <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>待辦事項</h3>
+        {nearMonthEnd && unlockedPayrollStores.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: "pointer" }} onClick={() => setPage("payroll")}>
+            <div style={{ width: 52, textAlign: "center", background: T.brownSoft, borderRadius: 8, padding: "6px 0", flexShrink: 0 }}>
+              <div className="ph-serif" style={{ fontSize: 20, fontWeight: 700, color: T.brown, lineHeight: 1 }}>{monthDaysTotal - 6}</div>
+              <div style={{ fontSize: 9.5, color: T.brown, letterSpacing: ".08em" }}>{MONTH_EN[Number(today.slice(5, 7)) - 1]}</div>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 500, fontSize: 13.5 }}>{monthLabel}薪資資料確認</div>
+              <div style={{ fontSize: 12, color: T.sub }}>請於 {monthDaysTotal - 6} 日前完成請假、加班與異動確認。</div>
+            </div>
+            <span style={{ fontSize: 12.5, color: T.brown, whiteSpace: "nowrap" }}>前往薪資試算 →</span>
+          </div>
+        )}
+        <TodoRow label="請假申請待審核" count={pendingLeave} onClick={() => setPage("requests")} />
+        <TodoRow label="加班申請待審核" count={pendingOvertime} onClick={() => setPage("requests")} />
+        <TodoRow label="電子日總表待處理" count={reportScopeStoreIds.length - reportDoneCount} unit="間門市" onClick={() => setPage("daily_report")} />
+        {!loading && noTodo && <p style={{ color: T.sub, fontSize: 13, textAlign: "center", padding: "16px 0" }}>目前沒有待辦事項</p>}
+      </div>
+      )}
+
+      {!loadError && (
+      <>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16, marginTop: 24 }}>
         <div className="ph-stat-card accent-brick" onClick={() => setPage("schedule")}>
           <p className="ph-eyebrow" style={{ marginBottom: 8 }}>本月排班人數</p>
           <p className="ph-serif" style={{ fontSize: 32, margin: "0 0 8px" }}>{loading ? "…" : monthScheduledCount}<span style={{ fontSize: 14, color: T.sub, fontFamily: "'Noto Sans TC',sans-serif" }}> 人</span></p>
@@ -7541,7 +7598,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
         )}
       </div>
 
-      <div className="ph-card" style={{ marginTop: 22, padding: 18 }}>
+      <div className="ph-card" style={{ marginTop: 24, padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
           <div>
             <p className="ph-eyebrow" style={{ margin: 0, color: T.brown }}>THIS WEEK</p>
@@ -7600,68 +7657,54 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
         )}
       </div>
 
-      <div className={me.isGlobalScope ? "ph-dash-grid wide" : "ph-dash-grid"} style={{ marginTop: 22 }}>
-        {me.isGlobalScope && (
-          <div className="ph-card" style={{ padding: 18 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <p className="ph-eyebrow" style={{ margin: "0 0 4px", color: T.brown }}>TODAY</p>
-                <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>今日各店人力</h3>
-              </div>
-              <span className="ph-pill">{Number(today.slice(8, 10))}/{Number(today.slice(5, 7))}　週{weekdayZh(today)}</span>
+      {me.isGlobalScope && (
+        <div className="ph-card" style={{ marginTop: 24, padding: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div>
+              <p className="ph-eyebrow" style={{ margin: "0 0 4px", color: T.brown }}>TODAY</p>
+              <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>今日各店人力</h3>
             </div>
-            {loading ? <p style={{ color: T.sub }}>載入中…</p> : stores.filter((s) => s.name !== "總部").map((s) => {
-              const storeRoster = roster.filter((r) => r.store_id === s.id);
-              const { main, internal } = splitRosterByPosition(storeRoster);
-              const manpowerRow = (label, group) => {
-                const groupShifts = todayShifts.filter((sh) => group.some((r) => r.id === sh.employee_id));
-                const workingCount = groupShifts.filter((sh) => !sh.is_day_off).length;
-                const ratio = group.length ? workingCount / group.length : 0;
-                const statusLabel = group.length === 0 ? "尚無夥伴" : ratio >= 0.8 ? "人力充足" : ratio >= 0.5 ? "人力吃緊" : "人力不足";
-                const dotColor = group.length === 0 ? T.sub : ratio >= 0.8 ? T.green : ratio >= 0.5 ? T.yellow : T.red;
-                return (
-                  <div key={label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0" }}>
-                    <span style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: "999px", background: dotColor, flexShrink: 0 }} />
-                      {label}
-                    </span>
-                    <span style={{ fontSize: 13, color: T.sub }}>{workingCount}／{group.length} 人</span>
-                    <span style={{ fontSize: 12.5, color: dotColor }}>{statusLabel}</span>
-                  </div>
-                );
-              };
+            <span className="ph-pill">{Number(today.slice(8, 10))}/{Number(today.slice(5, 7))}　週{weekdayZh(today)}</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16 }}>
+          {loading ? <p style={{ color: T.sub }}>載入中…</p> : stores.filter((s) => s.name !== "總部").map((s) => {
+            const storeRoster = roster.filter((r) => r.store_id === s.id);
+            const { main, internal } = splitRosterByPosition(storeRoster);
+            const manpowerRow = (label, group) => {
+              const groupShifts = todayShifts.filter((sh) => group.some((r) => r.id === sh.employee_id));
+              const workingCount = groupShifts.filter((sh) => !sh.is_day_off).length;
+              const ratio = group.length ? workingCount / group.length : 0;
+              // 人力充足/吃緊/不足是判斷結果（語意色），跟門店本身是哪一間（分類色）分開表達，
+              // 不會出現「同一格既是門店色又是狀態色」混用不清的情況
+              const statusLabel = group.length === 0 ? "尚無夥伴" : ratio >= 0.8 ? "人力充足" : ratio >= 0.5 ? "人力吃緊" : "人力不足";
+              const dotColor = group.length === 0 ? T.sub : ratio >= 0.8 ? T.green : ratio >= 0.5 ? T.yellow : T.red;
               return (
-                <div key={s.id} style={{ padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 500, marginBottom: 2 }}>{s.name}</div>
-                  {manpowerRow("門店人員", main)}
-                  {internal.length > 0 && manpowerRow("內場夥伴", internal)}
+                <div key={label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0" }}>
+                  <span style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "999px", background: dotColor, flexShrink: 0 }} />
+                    {label}
+                  </span>
+                  <span style={{ fontSize: 13, color: T.sub }}>{workingCount}／{group.length} 人</span>
+                  <span style={{ fontSize: 12.5, color: dotColor }}>{statusLabel}</span>
                 </div>
               );
-            })}
+            };
+            return (
+              <div key={s.id} style={{ padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
+                <div style={{ fontSize: 13.5, fontWeight: 500, marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: storeColorFor(s.name), flexShrink: 0 }} />
+                  {s.name}
+                </div>
+                {manpowerRow("門店人員", main)}
+                {internal.length > 0 && manpowerRow("內場夥伴", internal)}
+              </div>
+            );
+          })}
           </div>
-        )}
-        <div className="ph-card" style={{ padding: 18 }}>
-          <p className="ph-eyebrow" style={{ margin: "0 0 4px", color: T.brown }}>REMINDER</p>
-          <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>待辦與月結提醒</h3>
-          {nearMonthEnd && unlockedPayrollStores.length > 0 && (
-            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.line}`, cursor: "pointer" }} onClick={() => setPage("payroll")}>
-              <div style={{ width: 52, textAlign: "center", background: T.brownSoft, borderRadius: 8, padding: "6px 0", flexShrink: 0 }}>
-                <div className="ph-serif" style={{ fontSize: 20, fontWeight: 700, color: T.brown, lineHeight: 1 }}>{monthDaysTotal - 6}</div>
-                <div style={{ fontSize: 9.5, color: T.brown, letterSpacing: ".08em" }}>{MONTH_EN[Number(today.slice(5, 7)) - 1]}</div>
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 500, fontSize: 13.5 }}>{monthLabel}薪資資料確認</div>
-                <div style={{ fontSize: 12, color: T.sub }}>請於 {monthDaysTotal - 6} 日前完成請假、加班與異動確認。</div>
-              </div>
-              <span style={{ fontSize: 12.5, color: T.brown, whiteSpace: "nowrap" }}>前往薪資試算 →</span>
-            </div>
-          )}
-          <TodoRow label="請假申請待審核" count={pendingLeave} onClick={() => setPage("requests")} />
-          <TodoRow label="加班申請待審核" count={pendingOvertime} onClick={() => setPage("requests")} />
-          <TodoRow label="電子日總表待處理" count={reportScopeStoreIds.length - reportDoneCount} unit="間門市" onClick={() => setPage("daily_report")} />
-          {!loading && noTodo && <p style={{ color: T.sub, fontSize: 13, textAlign: "center", padding: "16px 0" }}>目前沒有待辦事項</p>}
         </div>
-      </div>
+      )}
+      </>
+      )}
     </div>
   );
 }
