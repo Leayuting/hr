@@ -636,16 +636,19 @@ function Icon({ name, size = 18 }) {
   );
 }
 
-const AVATAR_PALETTE = [
-  { bg: "#EAC4B7", fg: "#8B4B3A" },
-  { bg: "#D6DAC0", fg: "#5C6B3E" },
-  { bg: "#E8D2A0", fg: "#8A6A2A" },
-  { bg: "#E3C2B0", fg: "#7A4A38" },
-];
-function RosterAvatar({ name, index, size = 32 }) {
-  const c = AVATAR_PALETTE[index % AVATAR_PALETTE.length];
+// 頭像底色／文字邊框色依「職務」決定，不是依列數輪替；職務欄位出現對照表外的
+// 新職稱（含沒有職務資料的情況）一律用中性淺褐色 fallback，不留白也不報錯
+const ROLE_COLORS = {
+  "店長": { text: "#B84C6B", bg: "#F5E2E7" },
+  "咖啡師": { text: "#0C7A9E", bg: "#DCEEF2" },
+  "內場夥伴": { text: "#B08A2E", bg: "#F3ECD8" },
+  "外場夥伴": { text: "#4E5D0E", bg: "#EDFEE7" },
+};
+const ROLE_COLOR_FALLBACK = { text: "#A64F2D", bg: "#F5E8DF" };
+function RosterAvatar({ name, position, size = 32 }) {
+  const c = ROLE_COLORS[position] || ROLE_COLOR_FALLBACK;
   return (
-    <div style={{ width: size, height: size, borderRadius: "999px", background: c.bg, color: c.fg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: Math.round(size * 0.42), fontWeight: 600, flexShrink: 0 }}>
+    <div style={{ width: size, height: size, borderRadius: "999px", background: c.bg, color: c.text, border: `1.5px solid ${c.text}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: Math.round(size * 0.42), fontWeight: 600, flexShrink: 0 }}>
       {name?.slice(0, 1)}
     </div>
   );
@@ -804,7 +807,7 @@ async function exportSimpleWorkbook(title, headers, rows, filename) {
 function RosterCell({ r, index, showStore, storeName }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <RosterAvatar name={r.name} index={index} />
+      <RosterAvatar name={r.name} position={r.position} />
       <div style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 500 }}>{r.name}</div>
         <div style={{ fontSize: 11.5, color: T.sub }}>{r.position}{showStore && storeName ? `・${storeName}` : ""}</div>
@@ -2221,7 +2224,7 @@ function SchedulePage({ me, stores, scope, scopeStoreIds, activeStoreId, toast, 
                 return (
                   <div key={r.id} style={{ fontSize: 12.5 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                      <RosterAvatar name={r.name} index={idx} />
+                      <RosterAvatar name={r.name} position={r.position} />
                       <span style={{ fontWeight: 500, minWidth: 70 }}>{r.name}</span>
                       {!isHqAdmin && <span style={{ color: T.sub }}>{offDates.length ? `本月排休：${offDates.map((d) => `${d}日`).join("、")}` : "本月尚無排休登記"}</span>}
                     </div>
@@ -2428,6 +2431,7 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast, focus, onFocu
   const canReview = me.permissions?.requests && me.permissions.requests !== "submit";
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const [nameById, setNameById] = useState({});
+  const [positionById, setPositionById] = useState({});
 
   useEffect(() => {
     if (!focus) return;
@@ -2451,6 +2455,9 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast, focus, onFocu
     setNameById(canReview
       ? Object.fromEntries(rosterResList.flatMap((r) => r.data || []).map((e) => [e.id, e.name]))
       : { [me.id]: me.name });
+    setPositionById(canReview
+      ? Object.fromEntries(rosterResList.flatMap((r) => r.data || []).map((e) => [e.id, e.position]))
+      : { [me.id]: me.position });
     setTruncated((data || []).length >= 300);
     setLoading(false);
   }, [scopeStoreIds, canReview, me.id, me.name]);
@@ -2548,7 +2555,7 @@ function RequestsPage({ me, stores, storeId, scopeStoreIds, toast, focus, onFocu
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {filteredRows.map((r, idx) => (
-            <RequestRow key={r.id} r={r} idx={idx} nameById={nameById} storeById={storeById} canReview={canReview}
+            <RequestRow key={r.id} r={r} idx={idx} nameById={nameById} positionById={positionById} storeById={storeById} canReview={canReview}
               decidingId={decidingId} hoursEdit={hoursEdit} setHoursEdit={setHoursEdit}
               onDecide={decide} onReviewOvertime={reviewOvertime} />
           ))}
@@ -2629,7 +2636,7 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
 // 共用同一個元件，兩處呼叫同一支 review_overtime_request RPC，不會各自維護一套
 // 判斷邏輯而產生分歧結果。hours 可能是 null（原始加班時間 <15 分鐘、捨入建議值
 // 不明確，需要人工核定），此時核准/確認按鈕必須先輸入時數才能按下。
-function RequestRow({ r, idx, nameById, storeById, canReview, decidingId, hoursEdit, setHoursEdit, onDecide, onReviewOvertime }) {
+function RequestRow({ r, idx, nameById, positionById, storeById, canReview, decidingId, hoursEdit, setHoursEdit, onDecide, onReviewOvertime }) {
   const pill = REQ_TYPE_PILL[r.type];
   const isRevisionPending = !!r.pending_submitted_at;
   const isFromReport = r.source_minutes != null; // 每日回報連結的申請：分鐘為準，不借用小時輸入
@@ -2643,7 +2650,7 @@ function RequestRow({ r, idx, nameById, storeById, canReview, decidingId, hoursE
   return (
     <div className="ph-card" style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 190, flex: 1 }}>
-        <RosterAvatar name={nameById[r.employee_id]} index={idx} />
+        <RosterAvatar name={nameById[r.employee_id]} position={positionById?.[r.employee_id]} />
         <div style={{ minWidth: 0 }}>
           <div style={{ fontWeight: 500 }}>{nameById[r.employee_id] || "—"}</div>
           <div style={{ fontSize: 11.5, color: T.sub }}>{storeById?.[r.store_id]?.name}{storeById ? "・" : ""}{fmtDateTimeShort(r.submitted_at)} 提交</div>
@@ -4678,6 +4685,7 @@ function KioskScheduleView({ store, stores }) {
 function KioskRequestsReview({ me, store, toast }) {
   const [rows, setRows] = useState([]);
   const [nameById, setNameById] = useState({});
+  const [positionById, setPositionById] = useState({});
   const [loading, setLoading] = useState(true);
   const [decidingId, setDecidingId] = useState(null);
   const [hoursEdit, setHoursEdit] = useState({});
@@ -4692,6 +4700,7 @@ function KioskRequestsReview({ me, store, toast }) {
     if (reqRes.error) console.error("requests load", reqRes.error);
     setRows(reqRes.data || []);
     setNameById(Object.fromEntries((rosterRes.data || []).map((e) => [e.id, e.name])));
+    setPositionById(Object.fromEntries((rosterRes.data || []).map((e) => [e.id, e.position])));
     setLoading(false);
   }, [store?.id]);
 
@@ -4742,7 +4751,7 @@ function KioskRequestsReview({ me, store, toast }) {
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {pendingRows.map((r, idx) => (
-            <RequestRow key={r.id} r={r} idx={idx} nameById={nameById} storeById={null} canReview
+            <RequestRow key={r.id} r={r} idx={idx} nameById={nameById} positionById={positionById} storeById={null} canReview
               decidingId={decidingId} hoursEdit={hoursEdit} setHoursEdit={setHoursEdit}
               onDecide={decide} onReviewOvertime={reviewOvertime} />
           ))}
@@ -6491,7 +6500,7 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
       <div key={r.id} className="ph-card" style={{ padding: 18, opacity: r.active ? 1 : 0.75 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <RosterAvatar name={r.name} index={idx} />
+            <RosterAvatar name={r.name} position={r.position} />
             <div style={{ fontWeight: 500 }}>{r.name}</div>
           </div>
           <span className="ph-pill">{storeById[r.store_id]?.name}</span>
