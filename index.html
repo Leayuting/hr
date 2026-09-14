@@ -45,7 +45,10 @@ const T = {
   brown: "#A64F2D", brownSoft: "#F5E8DF", line: "#DDD7CF",
   olive: "#667054", oliveBg: "#E7EAE1",
   green: "#3F7A4E", greenBg: "#E8F1E9",
-  yellow: "#A8631A", yellowBg: "#F7EBDC",
+  // 2026-09-14 補修：原本的 #A8631A 剛好落在主色(#A64F2D)與金黃職務色(#B08A2E)
+  // 之間的色相區間，三者放在一起會撞色；改用飽和度更高、更接近純黃的色調拉開距離，
+  // 「待審/警示」語意跟哪裡在用不變，只換色碼
+  yellow: "#C99A00", yellowBg: "#FBF0D2",
   red: "#AA3B34", redBg: "#FBEAE9",
   handoff: "#78845F", handoffBg: "#E7EAE0",
   info: "#3D6E8C", infoBg: "#E7EFF3",
@@ -55,7 +58,10 @@ const T = {
 };
 // 門市分類色，僅用於標示是哪間店（不代表成功/警告/審核結果），依店名比對，跟
 // 門市在資料庫裡的實際 id 無關；未列在對照表的門市（例如「總部」）用中性色
-const STORE_TONE = { "中山": "#A64F2D", "勤美": "#0C7A9E", "水湳": "#B08A2E" };
+// 2026-09-14 補修：原本三色分別跟主色(中山)、職務色-咖啡師(勤美)、職務色-內場夥伴
+// (水湳)完全同色碼，同畫面若同時出現頭像/主要操作按鈕會分不清是門店還是別的意思；
+// 改成三個跟品牌主色/所有職務色都不重疊色相的新色，門市分類色功能本身保留不變
+const STORE_TONE = { "中山": "#7D4468", "勤美": "#5B5A8C", "水湳": "#2E7D6B" };
 function storeColorFor(storeName) {
   const key = Object.keys(STORE_TONE).find((k) => storeName?.includes(k));
   return key ? STORE_TONE[key] : T.sub;
@@ -652,7 +658,7 @@ function Icon({ name, size = 18 }) {
 // 頭像底色／文字邊框色依「職務」決定，不是依列數輪替；職務欄位出現對照表外的
 // 新職稱（含沒有職務資料的情況）一律用中性淺褐色 fallback，不留白也不報錯
 const ROLE_COLORS = {
-  "店長": { text: "#B84C6B", bg: "#F5E2E7" },
+  "店長": { text: "#29241F", bg: "#EAE9E9" },
   "咖啡師": { text: "#0C7A9E", bg: "#DCEEF2" },
   "內場夥伴": { text: "#B08A2E", bg: "#F3ECD8" },
   "外場夥伴": { text: "#4E5D0E", bg: "#EDFEE7" },
