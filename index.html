@@ -43,18 +43,19 @@ const { createClient } = supabase;
 const T = {
   bg: "#F6F4F0", card: "#FFFFFF", ink: "#29241F", sub: "#6D665E", subBg: "#EEEBE5",
   brown: "#A64F2D", brownSoft: "#F5E8DF", line: "#DDD7CF",
-  olive: "#667054", oliveBg: "#E7EAE1",
-  green: "#3F7A4E", greenBg: "#E8F1E9",
-  // 2026-09-14 補修：原本的 #A8631A 剛好落在主色(#A64F2D)與金黃職務色(#B08A2E)
-  // 之間的色相區間，三者放在一起會撞色；改用飽和度更高、更接近純黃的色調拉開距離，
-  // 「待審/警示」語意跟哪裡在用不變，只換色碼
-  yellow: "#C99A00", yellowBg: "#FBF0D2",
+  // 2026-09-17 WCAG對比實測修正：green/yellow/mute/olive/handoff文字在各自淺底
+  // 上原本都沒過4.5:1，同色系加深，色相與底色不動（若之前有其他地方直接用這幾個
+  // token當純色塊底＋白字，加深只會讓白字對比更好不會變差，不需要另外調整）
+  olive: "#636C51", oliveBg: "#E7EAE1",
+  green: "#3E784D", greenBg: "#E8F1E9",
+  yellow: "#896900", yellowBg: "#FBF0D2",
   red: "#AA3B34", redBg: "#FBEAE9",
-  handoff: "#78845F", handoffBg: "#E7EAE0",
+  handoff: "#636D4F", handoffBg: "#E7EAE0",
   info: "#3D6E8C", infoBg: "#E7EFF3",
-  mute: "#8B8478", muteBg: "#EEEBE5",
+  mute: "#706A60", muteBg: "#EEEBE5",
   gold: "#C9A24B",
   sidebar: "#29231E", sidebarCard: "#3A2E25", sidebarInk: "#EDE7DF", sidebarSub: "#9A9186", sidebarLine: "#3B342C",
+  inkStroke: "#4A362A",
 };
 // 門市分類色，僅用於標示是哪間店（不代表成功/警告/審核結果），依店名比對，跟
 // 門市在資料庫裡的實際 id 無關；未列在對照表的門市（例如「總部」）用中性色
@@ -577,22 +578,37 @@ const css = `
 .ph-root { font-family:'Noto Sans TC', sans-serif; background:${T.bg}; color:${T.ink}; min-height:100vh; font-size:14px; }
 .ph-serif { font-family:'Noto Serif TC', serif; }
 .ph-root input, .ph-root select, .ph-root textarea, .ph-root button { font-family:'Noto Sans TC', sans-serif; font-size:14px; }
-.ph-input { width:100%; padding:8px 10px; border:1px solid ${T.line}; border-radius:6px; background:#fff; color:${T.ink}; }
+.ph-input { width:100%; padding:8px 10px; border:1px solid ${T.sub}; border-radius:6px; background:#fff; color:${T.ink}; }
 .ph-input:focus { outline:2px solid ${T.brown}33; border-color:${T.brown}; }
 .ph-input[disabled] { background:#F5F1EA; color:${T.sub}; }
 .ph-btn { padding:8px 16px; border-radius:6px; border:1px solid ${T.line}; background:#fff; color:${T.ink}; cursor:pointer; transition:background .15s; white-space:nowrap; }
 .ph-btn:hover { background:#F5F0E8; }
-.ph-btn.primary { background:${T.brown}; border-color:${T.brown}; color:#fff; }
+.ph-btn:focus-visible { outline:2px solid ${T.brown}; outline-offset:1px; }
+.ph-btn.primary { background:${T.brown}; border:1.5px solid ${T.inkStroke}; color:#fff; box-shadow:2px 2px 0 ${T.inkStroke}; transition:background .15s, transform .08s ease, box-shadow .08s ease; }
 .ph-btn.primary:hover { background:#6A3920; }
+.ph-btn.primary:active { transform:translate(2px,2px); box-shadow:none; }
+@media (prefers-reduced-motion: reduce) { .ph-btn.primary { transition:background .15s; } }
 .ph-btn.danger { color:${T.red}; border-color:${T.red}55; }
 .ph-btn.danger:hover { background:${T.redBg}; }
 .ph-btn.small { padding:4px 10px; font-size:12.5px; }
+/* 分段控制：今日/本週/本月/自訂等篩選共用 */
+.ph-seg { display:inline-flex; background:#fff; border:1.5px solid ${T.line}; border-radius:999px; padding:3px; gap:2px; }
+.ph-seg button { padding:6px 13px; border-radius:999px; border:none; background:transparent; color:${T.sub}; cursor:pointer; font-size:12.5px; white-space:nowrap; }
+.ph-seg button.on { background:${T.brown}; color:#fff; font-weight:600; }
+.ph-seg button:hover:not(.on) { background:${T.brownSoft}; color:${T.brown}; }
+.ph-seg button:focus-visible { outline:2px solid ${T.brown}; outline-offset:1px; }
 .ph-btn[disabled] { opacity:.4; cursor:not-allowed; }
 .ph-table { width:100%; border-collapse:separate; border-spacing:0; background:#fff; }
+/* 薪資試算整表專用：確認過這張表已包在overflow-x:auto的容器內，才加min-width避免
+   窄螢幕被壓成逐字換行；其餘18處ph-table用法這次沒有逐一核對是否都有捲動容器，
+   維持原樣不加min-width，避免引入未驗證過的溢出風險 */
+.ph-table.wide-min { min-width:900px; }
 .ph-table th { text-align:left; padding:8px 10px; font-weight:500; color:${T.sub}; border-bottom:1px solid ${T.line}; font-size:12px; white-space:nowrap; background:#FCFAF6; }
 .ph-table td { padding:8px 10px; border-bottom:1px solid ${T.line}; vertical-align:middle; font-size:13px; }
 .ph-table tr:hover td { background:#FBF8F2; }
 .ph-card { background:${T.card}; border:1px solid ${T.line}; border-radius:11px; box-shadow:0 1px 2px rgba(41,37,32,.05); }
+/* 重點容器（KPI/摘要卡/PIN閘門等少數地方），一般卡片維持ph-card不變 */
+.ph-card-strong { background:${T.card}; border:1.5px solid ${T.inkStroke}; border-radius:14px; box-shadow:3px 3px 0 ${T.inkStroke}; }
 .ph-eyebrow { font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:${T.sub}; margin:0 0 4px; }
 .ph-shell { display:flex; min-height:100vh; }
 .ph-sidebar { width:230px; flex-shrink:0; background:${T.sidebar}; color:${T.sidebarInk}; display:flex; flex-direction:column; padding:calc(22px + env(safe-area-inset-top)) 14px 22px; }
@@ -601,8 +617,9 @@ const css = `
 .ph-sidebar-brand .ph-sub { font-size:10.5px; letter-spacing:.18em; color:${T.sidebarSub}; margin-top:6px; }
 .ph-nav-item { position:relative; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:10px; cursor:pointer; color:${T.sidebarSub}; border:none; background:none; width:100%; text-align:left; font-size:13.5px; }
 .ph-nav-item:hover { background:rgba(255,255,255,.06); color:${T.sidebarInk}; }
+.ph-nav-item:focus-visible { outline:2px solid ${T.gold}; outline-offset:-2px; }
 .ph-nav-item.on { background:${T.sidebarCard}; color:#F5F0E8; }
-.ph-nav-item.on .ph-nav-icon { color:${T.brown}; }
+.ph-nav-item.on .ph-nav-icon { color:${T.gold}; } /* 主色在深色選中卡片底對比不足(2.36:1)，改用既有的T.gold（5.48:1），不是新色 */
 .ph-nav-item.on::before { content:""; position:absolute; left:-10px; top:6px; bottom:6px; width:3px; border-radius:3px; background:${T.brown}; }
 .ph-nav-item .ph-nav-icon { display:flex; flex-shrink:0; }
 .ph-nav-item .ph-nav-badge { margin-left:auto; background:${T.gold}; color:#241C16; font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px; }
@@ -617,7 +634,7 @@ const css = `
 .ph-bell-btn .ph-nav-badge { position:absolute; top:-4px; right:-4px; background:${T.brown}; color:#fff; font-size:10px; font-weight:700; min-width:16px; height:16px; border-radius:999px; display:flex; align-items:center; justify-content:center; padding:0 3px; }
 .ph-hamburger-btn { display:none; background:none; border:1px solid ${T.line}; border-radius:8px; width:36px; height:36px; align-items:center; justify-content:center; cursor:pointer; color:${T.ink}; }
 .ph-sidebar-backdrop { display:none; }
-.ph-stat-card { position:relative; background:${T.card}; border:1px solid ${T.line}; border-radius:11px; padding:16px 18px 16px 20px; box-shadow:0 1px 2px rgba(41,37,32,.05); cursor:pointer; text-align:left; }
+.ph-stat-card { position:relative; background:${T.card}; border:1.5px solid ${T.inkStroke}; border-radius:14px; padding:16px 18px 16px 20px; box-shadow:3px 3px 0 ${T.inkStroke}; cursor:pointer; text-align:left; }
 .ph-stat-card::before { content:""; position:absolute; left:0; top:14px; bottom:14px; width:3px; border-radius:2px; background:${T.line}; }
 .ph-stat-card.accent-brick::before { background:#A64F2D; }
 .ph-stat-card.accent-olive::before { background:#4B5530; }
@@ -1016,7 +1033,7 @@ const SignaturePad = forwardRef(function SignaturePad({ height = 160 }, ref) {
   return (
     <div ref={containerRef} style={{ width: "100%" }}>
       <canvas ref={canvasRef}
-        style={{ display: "block", width: "100%", height, touchAction: "none", border: `1px solid ${T.line}`, borderRadius: 8, background: "#fff", cursor: "crosshair" }}
+        style={{ display: "block", width: "100%", height, touchAction: "none", border: `1.5px dashed ${T.inkStroke}`, borderRadius: 8, background: "#fff", cursor: "crosshair" }}
         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp} />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
         <span style={{ fontSize: 11.5, color: isEmptyState ? T.red : T.green }}>{isEmptyState ? "尚未簽名" : "已簽名"}</span>
@@ -2933,9 +2950,11 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
         </div>
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
-        {[["today", "今日"], ["week", "本週"], ["month", "本月"], ["custom", "自訂"]].map(([k, label]) => (
-          <button key={k} className={"ph-btn small" + (dateMode === k ? " primary" : "")} onClick={() => setDateMode(k)}>{label}</button>
-        ))}
+        <div className="ph-seg" role="group" aria-label="日期範圍">
+          {[["today", "今日"], ["week", "本週"], ["month", "本月"], ["custom", "自訂"]].map(([k, label]) => (
+            <button key={k} className={dateMode === k ? "on" : ""} aria-pressed={dateMode === k} onClick={() => setDateMode(k)}>{label}</button>
+          ))}
+        </div>
         {dateMode === "custom" && (
           <>
             <input className="ph-input" style={{ width: 150 }} type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} />
@@ -4202,12 +4221,12 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <>
           {!opsApplicable ? (
-            <div className="ph-card" style={{ padding: 16, marginBottom: 14, background: T.muteBg }}>
+            <div className="ph-card-strong" style={{ padding: 16, marginBottom: 14, background: T.muteBg }}>
               <strong style={{ fontSize: 13 }}>當日營運數據</strong>
               <p style={{ color: T.sub, fontSize: 12.5, margin: "4px 0 0" }}>舊版未收集：{OPS_LAUNCH_DATE} 之前的日報沒有營運數據欄位，不補 0，也不影響本筆回報的繳交狀態。</p>
             </div>
           ) : !OPS_ATOMIC_WRITE_READY ? (
-            <div className="ph-card" style={{ padding: 16, marginBottom: 14, background: T.yellowBg, border: `1px solid ${T.yellow}55` }}>
+            <div className="ph-card-strong" style={{ padding: 16, marginBottom: 14, background: T.yellowBg }}>
               <strong style={{ fontSize: 13 }}>當日營運數據</strong>
               <p style={{ color: "#5C4600", fontSize: 12.5, margin: "4px 0 0" }}>
                 此功能暫停填寫中：原本的寫入方式不是單一交易，可能留下「已送出但缺營運資料」的半套狀態，正在改成後端原子化寫入，上線後會恢復。既有的每日回報送出／簽核／人資審核流程不受影響，可正常使用。
@@ -4219,7 +4238,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
               )}
             </div>
           ) : (
-            <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+            <div className="ph-card-strong" style={{ padding: 16, marginBottom: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
                 <strong style={{ fontSize: 13 }}>當日營運數據</strong>
                 <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.sub }}>
@@ -4413,7 +4432,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           </div>
 
           {kioskMode && canWrite && (
-            <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
+            <div className="ph-card-strong" style={{ padding: 16, marginBottom: 14 }}>
               <strong style={{ fontSize: 13 }}>當日主管簽名</strong>
               <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 10px" }}>請當日主管親自簽署完整姓名，系統將自動記錄送出時間。</p>
               <SignaturePad ref={signaturePadRef} />
@@ -5633,7 +5652,7 @@ function PayrollPage(props) {
 
   if (!verified) {
     return (
-      <div className="ph-card" style={{ maxWidth: 360, margin: "40px auto", padding: 24 }}>
+      <div className="ph-card-strong" style={{ maxWidth: 360, margin: "40px auto", padding: 24 }}>
         <h3 className="ph-serif" style={{ marginTop: 0 }}>請輸入薪資頁PIN</h3>
         <form onSubmit={submitVerify}>
           <Field label="4位數字PIN">
@@ -5902,8 +5921,8 @@ function PayrollPageInner({ me, stores, scope, scopeStoreIds, activeStoreId, set
         ※ 此頁為內部薪資試算，正式發薪前仍須人工複核；加班費／遲到請假曠職扣款為系統估算值，勞健保費與所得稅為人資於「人員資料」設定的固定金額，實際金額仍以官方級距表與正式扣繳為準。
       </p>
       {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
-        <div className="ph-card" style={{ overflowX: "auto" }}>
-          <table className="ph-table">
+        <div className="ph-card-strong" style={{ overflowX: "auto" }}>
+          <table className="ph-table wide-min">
             <thead>
               <tr>
                 <th rowSpan={2} style={{ position: "sticky", left: 0, background: "#FCFAF6", zIndex: 1, minWidth: 140 }}>夥伴</th>
@@ -7911,7 +7930,7 @@ function Dashboard({ me, stores, storeId, scopeStoreIds, scope, setPage }) {
       )}
 
       {!loadError && (
-      <div className="ph-card" style={{ marginTop: 24, padding: 18 }}>
+      <div className="ph-card-strong" style={{ marginTop: 24, padding: 18 }}>
         <p className="ph-eyebrow" style={{ margin: "0 0 4px", color: T.brown }}>REMINDER</p>
         <h3 className="ph-serif" style={{ margin: "0 0 14px", fontSize: 16 }}>待辦事項</h3>
         {nearMonthEnd && unlockedPayrollStores.length > 0 && (
@@ -8098,6 +8117,32 @@ function AppShell({ session }) {
   function gotoRequests(focus) { setRequestsFocus(focus || null); setPage("requests"); }
   const [toastMsg, setToastMsg] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // 抽屜開啟時焦點移入(關閉鈕)，關閉時焦點回到觸發的漢堡按鈕；開啟中Tab/Shift+Tab
+  // 只在側欄內循環（簡易focus trap），Escape可關閉——原本完全沒有鍵盤焦點管理
+  const hamburgerBtnRef = useRef(null);
+  const sidebarCloseBtnRef = useRef(null);
+  const sidebarEverOpenedRef = useRef(false); // 避免第一次mount(sidebarOpen初始值false)就搶走焦點回漢堡鈕
+  useEffect(() => {
+    if (sidebarOpen) {
+      sidebarEverOpenedRef.current = true;
+      sidebarCloseBtnRef.current?.focus();
+      const onKeydown = (e) => {
+        if (e.key === "Escape") { e.preventDefault(); setSidebarOpen(false); return; }
+        if (e.key !== "Tab") return;
+        const sidebarEl = document.querySelector(".ph-sidebar.open");
+        if (!sidebarEl) return;
+        const focusables = Array.from(sidebarEl.querySelectorAll('button,[href],[tabindex]:not([tabindex="-1"])')).filter((el) => el.offsetParent !== null);
+        if (!focusables.length) return;
+        const first = focusables[0], last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      };
+      document.addEventListener("keydown", onKeydown);
+      return () => document.removeEventListener("keydown", onKeydown);
+    } else if (sidebarEverOpenedRef.current) {
+      hamburgerBtnRef.current?.focus();
+    }
+  }, [sidebarOpen]);
   const [systemHubOpen, setSystemHubOpen] = useState(false); // 系統中心用Modal顯示，不透過setPage切換，目前頁面元件不會unmount、填寫到一半的內容不會遺失
   const [pendingCount, setPendingCount] = useState(0);
   const [showChangePassword, setShowChangePassword] = useState(false);
@@ -8193,9 +8238,13 @@ function AppShell({ session }) {
     <div className="ph-root ph-shell">
       <div className={"ph-sidebar-backdrop" + (sidebarOpen ? " open" : "")} onClick={() => setSidebarOpen(false)} />
       <aside className={"ph-sidebar" + (sidebarOpen ? " open" : "")}>
-        <div className="ph-sidebar-brand">
-          <div className="ph-word">PHASE</div>
-          <div className="ph-sub">ERP</div>
+        <div className="ph-sidebar-brand" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+          <div><div className="ph-word">PHASE</div><div className="ph-sub">ERP</div></div>
+          {sidebarOpen && (
+            <button ref={sidebarCloseBtnRef} className="ph-btn small" style={{ background: "transparent", borderColor: T.sidebarLine, color: T.sidebarInk }} onClick={() => setSidebarOpen(false)} aria-label="關閉選單">
+              <Icon name="close" />
+            </button>
+          )}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           {navs.map(([k, l, icon]) => (
@@ -8231,7 +8280,7 @@ function AppShell({ session }) {
 
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
         <div className="ph-topbar">
-          <button className="ph-hamburger-btn" onClick={() => setSidebarOpen(true)} aria-label="開啟選單"><Icon name="hamburger" /></button>
+          <button ref={hamburgerBtnRef} className="ph-hamburger-btn" onClick={() => setSidebarOpen(true)} aria-label="開啟選單" aria-haspopup="true" aria-expanded={sidebarOpen}><Icon name="hamburger" /></button>
           <div style={{ minWidth: 0 }}>
             <p className="ph-eyebrow" style={{ margin: 0 }}>PHASE COFFEE ROASTERS</p>
             <h1 className="ph-serif" style={{ fontSize: 19, margin: 0 }}>{PAGE_TITLE[page]}</h1>
