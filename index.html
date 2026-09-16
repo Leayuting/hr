@@ -3739,6 +3739,19 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     if (error) console.error("saveOpsFields", error);
   }
 
+  // 給 *_with_ops atomic RPC 用的營運欄位參數，跟 saveOpsFields 用同一套值來源，
+  // 只在 OPS_ATOMIC_WRITE_READY=true（新RPC已部署確認）時才會被呼叫到
+  function opsRpcParams() {
+    return {
+      p_ops_closed: opsClosed,
+      p_ops_total_revenue: opsClosed ? null : (opsTotal === "" ? null : Number(opsTotal)),
+      p_ops_bean_revenue: opsClosed ? null : (opsBean === "" ? null : Number(opsBean)),
+      p_ops_goods_revenue: opsClosed ? null : (opsGoods === "" ? null : Number(opsGoods)),
+      p_ops_note: opsNote || null,
+      p_ops_hours_snapshot: opsClosed ? null : liveOpsHours,
+    };
+  }
+
   async function submitReport() {
     if (actionBusy) return;
     if (!posVerified) { toast("請先勾選已完成 POS 出缺勤與加班核對"); return; }
@@ -3777,11 +3790,11 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
         };
       });
-      const { data: saveRows, error: saveErr } = await sb.rpc("submit_daily_report_entries", {
-        p_store_id: storeId, p_date: date, p_entries,
-        p_expected_updated_at: report?.updated_at || null,
-        p_finalize_now: !kioskMode,
-      });
+      const submitRpcName = OPS_ATOMIC_WRITE_READY ? "submit_daily_report_entries_with_ops" : "submit_daily_report_entries";
+      const submitRpcArgs = OPS_ATOMIC_WRITE_READY
+        ? { p_store_id: storeId, p_date: date, p_entries, p_expected_updated_at: report?.updated_at || null, p_finalize_now: !kioskMode, ...opsRpcParams() }
+        : { p_store_id: storeId, p_date: date, p_entries, p_expected_updated_at: report?.updated_at || null, p_finalize_now: !kioskMode };
+      const { data: saveRows, error: saveErr } = await sb.rpc(submitRpcName, submitRpcArgs);
       if (saveErr) {
         toast((saveErr.message.includes("CONFLICT") ? "" : "送出失敗：") + saveErr.message);
         if (saveErr.message.includes("CONFLICT")) load();
@@ -3794,14 +3807,17 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         const path = `${reportId}/signature_${Date.now()}.png`;
         const { error: upErr } = await sb.storage.from("daily-report-attachments").upload(path, blob, { contentType: "image/png" });
         if (upErr) { toast("簽名上傳失敗：" + upErr.message); return; }
-        const { error: finErr } = await sb.rpc("finalize_daily_report_submission", {
-          p_store_id: storeId, p_report_date: date, p_report_id: reportId,
-          p_storage_path: path, p_mime_type: "image/png", p_file_size: blob.size,
-          p_pos_verified: true, p_expected_updated_at: saveData?.report_updated_at || null,
-        });
+        const finalizeRpcName = OPS_ATOMIC_WRITE_READY ? "finalize_daily_report_submission_with_ops" : "finalize_daily_report_submission";
+        const finalizeRpcArgs = OPS_ATOMIC_WRITE_READY
+          ? { p_store_id: storeId, p_report_date: date, p_report_id: reportId, p_storage_path: path, p_mime_type: "image/png", p_file_size: blob.size, p_pos_verified: true, p_expected_updated_at: saveData?.report_updated_at || null, ...opsRpcParams() }
+          : { p_store_id: storeId, p_report_date: date, p_report_id: reportId, p_storage_path: path, p_mime_type: "image/png", p_file_size: blob.size, p_pos_verified: true, p_expected_updated_at: saveData?.report_updated_at || null };
+        const { error: finErr } = await sb.rpc(finalizeRpcName, finalizeRpcArgs);
         if (finErr) { toast((finErr.message.includes("CONFLICT") ? "" : "送出失敗：") + finErr.message); if (finErr.message.includes("CONFLICT")) load(); return; }
       }
-      await saveOpsFields(reportId);
+      // ops欄位在atomic模式下已經隨上面的RPC呼叫一起交易寫入，這裡不再重複寫；
+      // 非atomic模式（目前，OPS_ATOMIC_WRITE_READY=false）saveOpsFields內部會
+      // 直接return不做事，維持「暫停填寫」的狀態，兩種模式都不會是redundant寫入
+      if (!OPS_ATOMIC_WRITE_READY) await saveOpsFields(reportId);
       await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
       toast(pendingProofCount > 0 ? `已送出，等待人資審核（本次有 ${pendingProofCount} 筆請假證明待補，送出後仍可補交）` : "已送出，等待人資審核");
       load();
@@ -3844,21 +3860,25 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
         };
       });
-      const { error } = await sb.rpc("admin_save_daily_report", {
-        p_store_id: storeId, p_date: date, p_pos_verified: posVerified, p_entries,
-        p_reason: isAdminCorrection ? adminReason.trim() : null,
-        p_expected_updated_at: report?.updated_at || null,
-      });
+      const adminRpcName = OPS_ATOMIC_WRITE_READY ? "admin_save_daily_report_with_ops" : "admin_save_daily_report";
+      const adminRpcArgs = OPS_ATOMIC_WRITE_READY
+        ? { p_store_id: storeId, p_date: date, p_pos_verified: posVerified, p_entries, p_reason: isAdminCorrection ? adminReason.trim() : null, p_expected_updated_at: report?.updated_at || null, ...opsRpcParams() }
+        : { p_store_id: storeId, p_date: date, p_pos_verified: posVerified, p_entries, p_reason: isAdminCorrection ? adminReason.trim() : null, p_expected_updated_at: report?.updated_at || null };
+      const { error } = await sb.rpc(adminRpcName, adminRpcArgs);
       if (error) {
         toast((error.message.includes("CONFLICT") ? "" : "儲存失敗：") + error.message);
         if (error.message.includes("CONFLICT")) load();
         return;
       }
-      // admin_save_daily_report RPC 沒有回傳 report_id（跟 submit_daily_report_entries
-      // 不同），補填情境下report列可能是這次呼叫才第一次建立，用store_id+date查一次
+      // ops欄位在atomic模式下已經隨上面的RPC一起交易寫入；非atomic模式（目前）
+      // 才需要下面這段舊的分開寫入方式（saveOpsFields內部會直接return不做事，
+      // 維持暫停填寫狀態）。admin_save_daily_report本身沒有回傳report_id，
+      // 補填情境下report列可能是這次呼叫才第一次建立，用store_id+date查一次
       // 現有id最保險，不假設RPC回傳格式
-      const { data: idRow } = await sb.from("daily_reports").select("id").eq("store_id", storeId).eq("report_date", date).maybeSingle();
-      await saveOpsFields(idRow?.id);
+      if (!OPS_ATOMIC_WRITE_READY) {
+        const { data: idRow } = await sb.from("daily_reports").select("id").eq("store_id", storeId).eq("report_date", date).maybeSingle();
+        await saveOpsFields(idRow?.id);
+      }
       await logAudit(me.name, isAdminCorrection ? "admin_correct_daily_report" : "admin_fill_daily_report", `${storeId}:${date}`);
       toast(isAdminCorrection ? "已保存更正，待人資重新審核才會更新薪資" : "已補填回報，待人資審核");
       setAdminReason("");
