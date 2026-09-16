@@ -338,6 +338,13 @@ function computeOpsHours(roster, shifts, entries, date) {
 // 營運數據追蹤功能啟用日：只適用這天（含）之後應填報的日期，之前的舊日報一律
 // 標示「舊版未收集」，不補 0、也不因此把已繳回報改判成漏繳
 const OPS_LAUNCH_DATE = "2026-09-16";
+// 2026-09-16 緊急暫停：原本的營運數據寫入是「entries RPC成功→前端再另外呼叫一次
+// update」兩步式，不是單一交易，任一步失敗會留下「已送出但缺營運資料」的半套
+// 狀態。正式的atomic RPC（submit_daily_report_entries_with_ops等）已寫好但還沒
+// 部署（見 phase-hr_migration_20260916b_ops_atomic_rpc.sql），部署前先關閉這個
+// 功能的填寫/寫入，只保留唯讀顯示既有資料——既有日報送出/簽核/審核流程完全不受
+// 影響，繼續用原本沒有ops欄位的RPC。這個flag部署後改true即可原子化上線
+const OPS_ATOMIC_WRITE_READY = false;
 // 候選公式集中維護：實際產能營業額／每日產能都是「待確認」版本，只用於數據追蹤
 // 預覽，不直接作為獎金依據（見營運數據分頁的提示文字）
 function computeOpsDerived(totalRevenue, beanRevenue, goodsRevenue, hoursUsed) {
@@ -3119,6 +3126,13 @@ function DailyReportOpsTab({ storeIds, storeById, from, to, today, onOpenDetail 
   }
   return (
     <div>
+      {!OPS_ATOMIC_WRITE_READY && (
+        <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, background: T.yellowBg, border: `1px solid ${T.yellow}55` }}>
+          <p style={{ color: "#5C4600", fontSize: 12.5, margin: 0 }}>
+            營運數據填寫功能暫停中（正在把寫入方式改成後端單一交易，避免半套資料）。以下為暫停前已記錄的資料，可能有本應填寫但因暫停而缺漏的日期，不代表當天真的沒有營運；功能恢復後才會有新資料進來。
+          </p>
+        </div>
+      )}
       <p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>
         候選公式（實際產能營業額＝總營業額－咖啡豆－其他商品；每日產能＝實際產能營業額÷使用工時），僅供數據追蹤預覽，不直接作為獎金依據；使用工時為估算值（無實際打卡時間戳記可用），一律標示「預估」。
       </p>
@@ -3446,12 +3460,12 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   ), [opsTotal, opsBean, opsGoods, liveOpsHours]);
   // 營運資料狀態跟日報送出/人資審核狀態分開顯示，避免互相混淆（例如營業額還沒
   // 填齊不代表日報沒送出，日報已核准也不代表營運數據已確認）
-  const opsStatus = !opsApplicable ? "舊版未收集" : opsClosed ? "休店"
+  const opsStatus = !opsApplicable ? "舊版未收集" : !OPS_ATOMIC_WRITE_READY ? "功能暫停中" : opsClosed ? "休店"
     : opsTotal === "" ? "未填"
     : (opsBean === "" || opsGoods === "") ? "分類待補"
     : liveOpsHours == null ? "工時待核對"
     : "已確認";
-  const opsStatusColor = opsStatus === "已確認" || opsStatus === "休店" ? T.green : (opsStatus === "舊版未收集" ? T.sub : T.yellow);
+  const opsStatusColor = opsStatus === "已確認" || opsStatus === "休店" ? T.green : (opsStatus === "舊版未收集" || opsStatus === "功能暫停中" ? T.sub : T.yellow);
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -3706,6 +3720,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   // 之後工時來源資料更新不會回頭覆蓋這個快照，畫面上的即時估算值(liveOpsHours)
   // 另外顯示，兩者分開，不偽裝成原簽署內容
   async function saveOpsFields(reportId) {
+    // 暫停中：見 OPS_ATOMIC_WRITE_READY 定義處說明，正式atomic RPC部署前不寫入，
+    // 避免留下「已送出但缺營運資料」的半套狀態
+    if (!OPS_ATOMIC_WRITE_READY) return;
     if (!reportId || !opsApplicable) return;
     const payload = opsClosed
       ? { ops_closed: true, ops_total_revenue: null, ops_bean_revenue: null, ops_goods_revenue: null, ops_note: opsNote || null, ops_hours_snapshot: null, ops_hours_snapshot_at: new Date().toISOString() }
@@ -4168,6 +4185,18 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
             <div className="ph-card" style={{ padding: 16, marginBottom: 14, background: T.muteBg }}>
               <strong style={{ fontSize: 13 }}>當日營運數據</strong>
               <p style={{ color: T.sub, fontSize: 12.5, margin: "4px 0 0" }}>舊版未收集：{OPS_LAUNCH_DATE} 之前的日報沒有營運數據欄位，不補 0，也不影響本筆回報的繳交狀態。</p>
+            </div>
+          ) : !OPS_ATOMIC_WRITE_READY ? (
+            <div className="ph-card" style={{ padding: 16, marginBottom: 14, background: T.yellowBg, border: `1px solid ${T.yellow}55` }}>
+              <strong style={{ fontSize: 13 }}>當日營運數據</strong>
+              <p style={{ color: "#5C4600", fontSize: 12.5, margin: "4px 0 0" }}>
+                此功能暫停填寫中：原本的寫入方式不是單一交易，可能留下「已送出但缺營運資料」的半套狀態，正在改成後端原子化寫入，上線後會恢復。既有的每日回報送出／簽核／人資審核流程不受影響，可正常使用。
+              </p>
+              {(report?.ops_total_revenue != null || report?.ops_closed) && (
+                <p style={{ color: T.sub, fontSize: 12, margin: "8px 0 0" }}>
+                  本筆回報在暫停前已記錄的營運數據（唯讀）：{report.ops_closed ? "休店" : `總營業額 ${money(report.ops_total_revenue)} 元`}，功能恢復後可重新確認或修改。
+                </p>
+              )}
             </div>
           ) : (
             <div className="ph-card" style={{ padding: 16, marginBottom: 14 }}>
