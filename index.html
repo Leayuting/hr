@@ -310,16 +310,27 @@ function shiftHours(startTime, endTime) {
 // 班表時數 ± 當日異常回報偏差」估算——遲到扣分鐘、請假扣時數、加班依原定/實際
 // 下班時間差額加算（跟 DailyReportDetail 加班明細用同一套 combineOvertimeDateTime
 // 換算，避免兩處算出不同結果）。roster 中當天沒有排班或整天休假的人不計入；當店
-// 當日完全沒有排班資料時回傳 null（無法計算，不是 0）。entries 是 employee_id ->
-// daily_report_entries 草稿/資料列的對照表，可能是空物件（尚未有任何回報內容）
-function computeOpsHours(roster, shifts, entries, date) {
+// 當日完全沒有排班資料時 total=null（無法計算，不是 0）。entries 是 employee_id ->
+// daily_report_entries 草稿/資料列的對照表，可能是空物件（尚未有任何回報內容）。
+// 2026-09-17：新增pendingMissedPunchEmployeeIds（當天有未確認漏打卡的員工id
+// 集合，預設空集合，向下相容——沒有這份資料時complete永遠是true，行為跟改版前
+// 完全一樣）：這些員工不計入total，且complete=false，呼叫端要依complete顯示
+// 「產能待確認」，不能只看total是否為0就當成完整實際工時
+function computeOpsHours(roster, shifts, entries, date, pendingMissedPunchEmployeeIds) {
+  const pendingIds = pendingMissedPunchEmployeeIds instanceof Set ? pendingMissedPunchEmployeeIds : new Set(pendingMissedPunchEmployeeIds || []);
   const shiftByEmp = {};
   (shifts || []).forEach((s) => { shiftByEmp[s.employee_id] = s; });
-  let total = 0, counted = false;
+  let total = 0, counted = false, complete = true;
+  const incompleteEmployeeIds = [];
   (roster || []).forEach((r) => {
     const s = shiftByEmp[r.id];
     if (!s || s.is_day_off) return;
     counted = true;
+    if (pendingIds.has(r.id)) {
+      complete = false;
+      incompleteEmployeeIds.push(r.id);
+      return; // 有未確認漏打卡：這個人不計入total，等人資核准補填後才計入
+    }
     let h = shiftHours(s.start_time, s.end_time);
     const e = entries?.[r.id];
     if (e) {
@@ -334,7 +345,7 @@ function computeOpsHours(roster, shifts, entries, date) {
     }
     total += Math.max(0, h);
   });
-  return counted ? total : null;
+  return { total: counted ? total : null, complete, incompleteEmployeeIds };
 }
 // 營運數據追蹤功能啟用日：只適用這天（含）之後應填報的日期，之前的舊日報一律
 // 標示「舊版未收集」，不補 0、也不因此把已繳回報改判成漏繳
@@ -346,6 +357,11 @@ const OPS_LAUNCH_DATE = "2026-09-16";
 // 功能的填寫/寫入，只保留唯讀顯示既有資料——既有日報送出/簽核/審核流程完全不受
 // 影響，繼續用原本沒有ops欄位的RPC。這個flag部署後改true即可原子化上線
 const OPS_ATOMIC_WRITE_READY = false;
+// 2026-09-17 漏打卡「時間待確認」功能：需要新的資料表(daily_report_missed_punch_
+// events等，見phase-hr_migration_20260917_missed_punch_pending.sql)與atomic
+// wrapper RPC，部署前先關閉新UI的寫入/查詢（不查詢還不存在的表，避免schema
+// cache錯誤），只保留既有漏打卡欄位可用——部署並核對後改true才會啟用新流程
+const MISSED_PUNCH_ATOMIC_READY = false;
 // 候選公式集中維護：實際產能營業額／每日產能都是「待確認」版本，只用於數據追蹤
 // 預覽，不直接作為獎金依據（見營運數據分頁的提示文字）
 function computeOpsDerived(totalRevenue, beanRevenue, goodsRevenue, hoursUsed) {
@@ -2897,6 +2913,29 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
     return () => sb.removeChannel(ch);
   }, [load]);
 
+  // 漏卡待補數量提示（2026-09-17新增，MISSED_PUNCH_ATOMIC_READY=false時完全不
+  // 查詢，避免打到還不存在的表/RPC造成schema cache錯誤）：只需要total_count，
+  // p_limit給1即可，不必把整批資料都抓回來
+  const [missedPunchCount, setMissedPunchCount] = useState(0);
+  const loadMissedPunchCount = useCallback(async () => {
+    if (!MISSED_PUNCH_ATOMIC_READY || !filterStoreIds.length) { setMissedPunchCount(0); return; }
+    const { data, error } = await sb.rpc("missed_punch_pending_list", {
+      p_store_ids: filterStoreIds, p_date_from: from, p_date_to: to,
+      p_status: ["pending_confirm", "pending_review", "needs_resubmit"],
+      p_limit: 1, p_offset: 0,
+    });
+    if (error) { console.error("missed_punch_pending_list count", error); return; }
+    setMissedPunchCount(data?.[0]?.total_count || 0);
+  }, [filterStoreIds.join(","), from, to]);
+  useEffect(() => { loadMissedPunchCount(); }, [loadMissedPunchCount]);
+  useEffect(() => {
+    if (!MISSED_PUNCH_ATOMIC_READY) return;
+    const ch = sb.channel("missed_punch_kpi_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_report_missed_punch_events" }, loadMissedPunchCount)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [loadMissedPunchCount]);
+
   const loadReviewQueue = useCallback(async () => {
     if (!canApprove || !filterStoreIds.length) return;
     setReviewLoading(true);
@@ -2982,11 +3021,17 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
             <StatTile label="已繳" value={loading ? "…" : kpi.submitted} unit="天次" tone="green" />
             <StatTile label="逾期未繳" value={loading ? "…" : kpi.overdue} unit="天次" tone={kpi.overdue > 0 ? "red" : undefined} />
             <StatTile label="未結案異常（待確認＋待補件）" value={loading ? "…" : kpi.openAnomalies} unit="人次" tone={kpi.openAnomalies > 0 ? "yellow" : undefined} />
+            {MISSED_PUNCH_ATOMIC_READY && (
+              <StatTile label="漏卡待補（待確認＋待審＋需重補）" value={missedPunchCount} unit="筆" tone={missedPunchCount > 0 ? "yellow" : undefined} />
+            )}
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
             <button className={"ph-btn small" + (tab === "matrix" ? " primary" : "")} onClick={() => setTab("matrix")}>繳交總表</button>
             <button className={"ph-btn small" + (tab === "anomalies" ? " primary" : "")} onClick={() => setTab("anomalies")}>異常清單</button>
             <button className={"ph-btn small" + (tab === "ops" ? " primary" : "")} onClick={() => setTab("ops")}>營運數據</button>
+            {MISSED_PUNCH_ATOMIC_READY && (
+              <button className={"ph-btn small" + (tab === "missed_punch" ? " primary" : "")} onClick={() => setTab("missed_punch")}>漏卡待補</button>
+            )}
             {canApprove && (
               <button className={"ph-btn small" + (tab === "review" ? " primary" : "")} onClick={() => setTab("review")}>
                 人資審核佇列{reviewQueue.filter((r) => r.hr_review_status === "pending").length > 0 ? `（${new Set(reviewQueue.filter((r) => r.hr_review_status === "pending").map((r) => r.report_id)).size}）` : ""}
@@ -3004,6 +3049,8 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
           ) : tab === "ops" ? (
             <DailyReportOpsTab storeIds={filterStoreIds} storeById={storeById} from={from} to={to} today={today}
               onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
+          ) : tab === "missed_punch" ? (
+            <DailyReportMissedPunchTab me={me} storeIds={filterStoreIds} storeById={storeById} from={from} to={to} toast={toast} />
           ) : (
             <DailyReportAnomalyTab me={me} storeIds={filterStoreIds} storeById={storeById} from={from} to={to} toast={toast}
               onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
@@ -3435,6 +3482,196 @@ function DailyReportAnomalyTab({ me, storeIds, storeById, from, to, toast, onOpe
   );
 }
 
+// 「漏卡待補」跨日查找分頁（2026-09-17新增，MISSED_PUNCH_ATOMIC_READY=true才
+// 會渲染這個分頁本身；渲染條件在DailyReportPage那邊控制，這裡假設一定是true
+// 才會被掛載，不用再判斷一次）。查missed_punch_pending_list（見migration檔），
+// 讓本人或授權人員不用重填整份日報就能補填實際時間，也讓人資能在這裡審核，
+// 不必逐筆從矩陣點進DailyReportDetail
+function DailyReportMissedPunchTab({ me, storeIds, storeById, from, to, toast }) {
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [modalRow, setModalRow] = useState(null);
+  const canFill = me.permissions?.daily_report === "fill" || me.permissions?.daily_report === "all";
+  const canApprove = me.permissions?.daily_report_approval === "approve";
+
+  const load = useCallback(async () => {
+    if (!storeIds.length || from > to) { setRows([]); setTotal(0); setLoading(false); return; }
+    setLoading(true); setLoadError(false);
+    const { data, error } = await sb.rpc("missed_punch_pending_list", {
+      p_store_ids: storeIds, p_date_from: from, p_date_to: to,
+      p_status: ["pending_confirm", "pending_review", "needs_resubmit"],
+      p_limit: 200, p_offset: 0,
+    });
+    if (error) { console.error("missed_punch_pending_list", error); setLoadError(true); setLoading(false); return; }
+    setRows(data || []);
+    setTotal(data?.[0]?.total_count || 0);
+    setLoading(false);
+  }, [storeIds.join(","), from, to]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("missed_punch_pending_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_report_missed_punch_events" }, load)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
+
+  async function handleFill(eventId, actualAt, infoSource, infoProvidedBy) {
+    const { error } = await sb.rpc("fill_missed_punch_event", {
+      p_event_id: eventId, p_actual_at: actualAt, p_info_source: infoSource, p_info_provided_by: infoProvidedBy || null,
+    });
+    if (error) { toast("補填失敗：" + error.message); return; }
+    toast("已補填，待人資審核");
+    setModalRow(null);
+    load();
+  }
+
+  // 這裡的審核不重算ops_hours_snapshot（p_new_ops_hours_snapshot留null）：要
+  // 準確重算需要當天完整shifts/entries資料，這個列表跨門市跨日期，一次載入
+  // 所有日期的排班資料成本太高；核准後若該店該日ops功能仍在追蹤中，工時快照
+  // 可以之後在「每日回報」明細頁（有完整當日資料）重新確認，不影響這裡「是否
+  // 為有效出勤」的核准本身
+  async function handleReview(eventId, decision, note) {
+    const { error } = await sb.rpc("review_missed_punch_event", {
+      p_event_id: eventId, p_decision: decision, p_note: note || null, p_new_ops_hours_snapshot: null,
+    });
+    if (error) { toast("審核失敗：" + error.message); return; }
+    toast(decision === "approve" ? "已核准，出勤已更新" : "已退回，待重新補填");
+    setModalRow(null);
+    load();
+  }
+
+  const STATUS_LABEL = { pending_confirm: "時間待確認", pending_review: "待人資審核", needs_resubmit: "需重補" };
+  const STATUS_TONE = { pending_confirm: "yellow", pending_review: "yellow", needs_resubmit: "red" };
+
+  if (loadError) {
+    return (
+      <div className="ph-card" style={{ padding: 24, textAlign: "center" }}>
+        <p style={{ color: T.red, marginBottom: 10 }}>查詢失敗，請重試。</p>
+        <button className="ph-btn small" onClick={load}>重新查詢</button>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <p style={{ fontSize: 12, color: T.sub, margin: "0 0 12px" }}>
+        列出此區間所有「時間待確認」「待人資審核」「需重補」的漏打卡事件，可跨日期直接補填或審核，不需要重新開啟整份回報。
+      </p>
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : rows.length === 0 ? (
+        <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>此範圍沒有待處理的漏打卡事件</p>
+      ) : (
+        <>
+          <div className="ph-card" style={{ overflowX: "auto" }}>
+            <table className="ph-table">
+              <thead>
+                <tr><th>日期</th><th>門市</th><th>員工</th><th>缺卡事件</th><th>狀態</th><th>原因</th><th>實際時間</th><th>資訊提供者</th><th></th></tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.event_id}>
+                    <td>{r.report_date}</td>
+                    <td>{r.store_name}</td>
+                    <td>{r.employee_name}</td>
+                    <td>{MISSED_PUNCH_EVENT_LABEL[r.event_type] || r.event_type}</td>
+                    <td><Badge tone={STATUS_TONE[r.status]}>{STATUS_LABEL[r.status] || r.status}</Badge></td>
+                    <td style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reason || "—"}</td>
+                    <td>{r.actual_at ? fmtTaipei(r.actual_at) : "—"}</td>
+                    <td>{r.info_provided_by_name || "—"}</td>
+                    <td>
+                      {(canFill && ["pending_confirm", "needs_resubmit"].includes(r.status)) || (canApprove && r.status === "pending_review") ? (
+                        <button className="ph-btn small" onClick={() => setModalRow(r)}>
+                          {r.status === "pending_review" ? "審核" : "補填"}
+                        </button>
+                      ) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p style={{ fontSize: 12, color: T.sub, marginTop: 8 }}>共 {total} 筆</p>
+        </>
+      )}
+      {modalRow && (
+        <MissedPunchFillModal
+          me={me} row={modalRow} canFill={canFill} canApprove={canApprove}
+          onFill={handleFill} onReview={handleReview} onClose={() => setModalRow(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// 補填/審核用的modal：資訊提供者改成門市名冊下拉（不是自由文字），開啟時現查
+// 該店在職個人帳號＋共用PIN以外的名冊（比照既有canReviewProof等處employees查詢
+// 條件），不是全公司名單
+function MissedPunchFillModal({ me, row, canFill, canApprove, onFill, onReview, onClose }) {
+  const [actualAt, setActualAt] = useState("");
+  const [infoSource, setInfoSource] = useState("manager_confirmed");
+  const [infoProvidedBy, setInfoProvidedBy] = useState("");
+  const [note, setNote] = useState("");
+  const [roster, setRoster] = useState([]);
+  const isSelf = !me.is_shared_pin_account && me.id === row.employee_id;
+
+  useEffect(() => {
+    sb.from("employees").select("id,name").eq("store_id", row.store_id).eq("active", true).eq("is_non_employee_account", false)
+      .order("name").then(({ data }) => setRoster(data || []));
+  }, [row.store_id]);
+
+  const showFillForm = canFill && ["pending_confirm", "needs_resubmit"].includes(row.status);
+  const showReviewForm = canApprove && row.status === "pending_review";
+
+  return (
+    <Modal title={`${row.employee_name}・${row.report_date}・${MISSED_PUNCH_EVENT_LABEL[row.event_type] || row.event_type}`} onClose={onClose}>
+      <p style={{ fontSize: 12.5 }}>門市：{row.store_name}</p>
+      <p style={{ fontSize: 12.5 }}>目前狀態：{{ pending_confirm: "時間待確認", pending_review: "待人資審核", needs_resubmit: "需重補", confirmed: "已核准" }[row.status] || row.status}</p>
+      {row.reason && <p style={{ fontSize: 12, color: T.sub }}>通報原因：{row.reason}</p>}
+      {row.actual_at && <p style={{ fontSize: 12, color: T.sub }}>目前填寫的實際時間：{fmtTaipei(row.actual_at)}</p>}
+
+      {showFillForm && (
+        <div style={{ marginTop: 12 }}>
+          <strong style={{ fontSize: 12.5 }}>補填實際時間</strong>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+            <input className="ph-input" type="datetime-local" value={actualAt} onChange={(e) => setActualAt(e.target.value)} />
+            <select className="ph-input" value={infoSource} onChange={(e) => setInfoSource(e.target.value)}>
+              {isSelf && <option value="self">本人確認</option>}
+              <option value="manager_confirmed">領班代填</option>
+              <option value="hr_confirmed">人資代填</option>
+              <option value="other">其他來源</option>
+            </select>
+            <select className="ph-input" value={infoProvidedBy} onChange={(e) => setInfoProvidedBy(e.target.value)}>
+              <option value="">資訊提供者（選填）</option>
+              {roster.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            </select>
+            <p style={{ fontSize: 11, color: T.sub, margin: 0 }}>共用門市PIN無法標記為「本人確認」，請選擇代填來源；補填後進入待人資審核，不會直接生效。</p>
+            <button className="ph-btn primary" disabled={!actualAt} onClick={() => onFill(row.event_id, new Date(actualAt).toISOString(), infoSource, infoProvidedBy || null)}>送出補填</button>
+          </div>
+        </div>
+      )}
+
+      {showReviewForm && (
+        <div style={{ marginTop: 14 }}>
+          <strong style={{ fontSize: 12.5 }}>人資審核</strong>
+          <p style={{ fontSize: 11.5, color: T.sub, margin: "4px 0" }}>核准後這筆才算有效出勤；退回會回到需重補，可再次補填，不會重複建立新事件。</p>
+          <textarea className="ph-input" rows={2} placeholder="審核意見（選填）" value={note} onChange={(e) => setNote(e.target.value)} />
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button className="ph-btn primary" onClick={() => onReview(row.event_id, "approve", note)}>核准</button>
+            <button className="ph-btn danger" onClick={() => onReview(row.event_id, "reject", note)}>退回需重補</button>
+          </div>
+        </div>
+      )}
+
+      {!showFillForm && !showReviewForm && <p style={{ color: T.sub, fontSize: 12.5, marginTop: 10 }}>目前沒有可對這筆紀錄執行的動作。</p>}
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+        <button className="ph-btn small" onClick={onClose}>關閉</button>
+      </div>
+    </Modal>
+  );
+}
+
 function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kioskMode, onGotoRequests }) {
   const storeId = store?.id;
   const [roster, setRoster] = useState([]);
@@ -3472,8 +3709,16 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const [opsGoods, setOpsGoods] = useState("");
   const [opsNote, setOpsNote] = useState("");
   const [dayShifts, setDayShifts] = useState([]);
+  // 漏打卡「時間待確認」事件（2026-09-17新增，MISSED_PUNCH_ATOMIC_READY=false時
+  // 不查詢新表，避免schema cache錯誤；roster裡誰today有未確認事件會排除在
+  // computeOpsHours的total之外）
+  const [missedPunchEvents, setMissedPunchEvents] = useState([]);
+  const pendingMissedPunchEmployeeIds = useMemo(() =>
+    new Set(missedPunchEvents.filter((ev) => !ev.is_effective && (ev.status === "pending_confirm" || ev.status === "pending_review")).map((ev) => ev.employee_id)),
+  [missedPunchEvents]);
   const opsApplicable = date >= OPS_LAUNCH_DATE;
-  const liveOpsHours = useMemo(() => computeOpsHours(roster, dayShifts, entries, date), [roster, dayShifts, entries, date]);
+  const opsHoursResult = useMemo(() => computeOpsHours(roster, dayShifts, entries, date, pendingMissedPunchEmployeeIds), [roster, dayShifts, entries, date, pendingMissedPunchEmployeeIds]);
+  const liveOpsHours = opsHoursResult.total;
   const opsDerived = useMemo(() => computeOpsDerived(
     opsTotal === "" ? null : Number(opsTotal), opsBean === "" ? null : Number(opsBean), opsGoods === "" ? null : Number(opsGoods), liveOpsHours
   ), [opsTotal, opsBean, opsGoods, liveOpsHours]);
@@ -3483,6 +3728,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     : opsTotal === "" ? "未填"
     : (opsBean === "" || opsGoods === "") ? "分類待補"
     : liveOpsHours == null ? "工時待核對"
+    : !opsHoursResult.complete ? "工時含漏卡待確認"
     : "已確認";
   const opsStatusColor = opsStatus === "已確認" || opsStatus === "休店" ? T.green : (opsStatus === "舊版未收集" || opsStatus === "功能暫停中" ? T.sub : T.yellow);
 
@@ -3543,18 +3789,35 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     setOvertimeLinkByEntry(overtimeLinkMap);
     setCorrections(corrections);
     setSignHistory(signHist);
+    // 漏打卡待確認事件：查詢新表，MISSED_PUNCH_ATOMIC_READY=false時新表可能還
+    // 沒部署，不查詢，避免schema cache錯誤
+    if (rep && MISSED_PUNCH_ATOMIC_READY) {
+      const mpRes = await sb.from("daily_report_missed_punch_events").select("*").eq("daily_report_id", rep.id);
+      if (mpRes.error) console.error("daily_report_missed_punch_events", mpRes.error);
+      setMissedPunchEvents(mpRes.data || []);
+    } else {
+      setMissedPunchEvents([]);
+    }
     const draft = {};
     rosterActive.forEach((r) => {
       const e = entryMap[r.id];
       const scheduled = splitOvertimeTimestamp(e?.overtime_scheduled_end, date);
       const actual = splitOvertimeTimestamp(e?.overtime_actual_end, date);
+      // 漏打卡新流程（時間待確認）用的本機草稿欄位，跟資料庫既有欄位分開，不
+      // 混用；MISSED_PUNCH_ATOMIC_READY=false時UI不顯示，這幾個值不會被送出
+      const missedPunchDraft = {
+        missed_punch_mode: "", // "confirmed" | "pending"
+        missed_punch_types: [], missed_punch_confirmed_times: {},
+        missed_punch_pending_types: [], missed_punch_pending_reason: "",
+      };
       draft[r.id] = e ? {
-        ...e,
+        ...e, ...missedPunchDraft,
         overtime_scheduled_time: scheduled.time, overtime_actual_time: actual.time, overtime_actual_next_day: actual.nextDay,
       } : {
         late: false, late_minutes: "", missed_punch: false, leave: false, leave_hours: "", overtime: false,
         overtime_scheduled_time: "", overtime_actual_time: "", overtime_actual_next_day: false, overtime_reason: "", overtime_category: "workday",
         missed_punch_reason: "", missed_punch_error_start: "", missed_punch_error_end: "", missed_punch_fix_start: "", missed_punch_fix_end: "",
+        ...missedPunchDraft,
         reason: "", improvement: "", note: "",
         leave_type: "", leave_proof_status: null, leave_proof_deferred_reason: "", leave_proof_deadline: null,
         leave_proof_confirmed_by: null, leave_proof_confirmed_at: null, leave_proof_review_note: "",
@@ -3771,6 +4034,28 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     };
   }
 
+  // 這次送出時，哪些人有漏打卡待建立——送給*_with_missed_punch wrapper RPC，
+  // 由它在同一交易內呼叫flag_missed_punch_event建立事件。「已確認時間」模式
+  // 和「時間待確認」模式都會建立事件，差別只在有沒有actual_at：兩種都還是要
+  // 經人資審核才算有效出勤，不因為領班當下已經知道時間就跳過審核（對應SQL
+  // flag_missed_punch_event的p_actual_at參數）
+  function buildNewMissedPunchPayload() {
+    const confirmedItems = roster
+      .filter((r) => entries[r.id]?.missed_punch && entries[r.id]?.missed_punch_mode === "confirmed" && entries[r.id]?.missed_punch_types?.length)
+      .flatMap((r) => entries[r.id].missed_punch_types
+        .filter((eventType) => entries[r.id].missed_punch_confirmed_times[eventType])
+        .map((eventType) => ({
+          employee_id: r.id, event_type: eventType, reason: null,
+          actual_at: new Date(entries[r.id].missed_punch_confirmed_times[eventType]).toISOString(),
+        })));
+    const pendingItems = roster
+      .filter((r) => entries[r.id]?.missed_punch && entries[r.id]?.missed_punch_mode === "pending" && entries[r.id]?.missed_punch_pending_types?.length)
+      .flatMap((r) => entries[r.id].missed_punch_pending_types.map((eventType) => ({
+        employee_id: r.id, event_type: eventType, reason: entries[r.id].missed_punch_pending_reason || null, actual_at: null,
+      })));
+    return [...confirmedItems, ...pendingItems];
+  }
+
   async function submitReport() {
     if (actionBusy) return;
     if (!posVerified) { toast("請先勾選已完成 POS 出缺勤與加班核對"); return; }
@@ -3781,6 +4066,9 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     }
     if (!validateReportEntries()) return;
     const pendingProofCount = roster.filter((r) => ["pending", "needs_resubmit"].includes(entries[r.id]?.leave_proof_status)).length;
+    const pendingMissedPunchCount = MISSED_PUNCH_ATOMIC_READY
+      ? roster.filter((r) => entries[r.id]?.missed_punch && entries[r.id]?.missed_punch_mode === "pending" && entries[r.id]?.missed_punch_pending_types?.length).length
+      : 0;
     setActionBusy(true);
     try {
       // 找/建report、檢查樂觀鎖、逐筆寫入entries＋連動加班申請、（非kiosk
@@ -3809,10 +4097,21 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
         };
       });
-      const submitRpcName = OPS_ATOMIC_WRITE_READY ? "submit_daily_report_entries_with_ops" : "submit_daily_report_entries";
-      const submitRpcArgs = OPS_ATOMIC_WRITE_READY
-        ? { p_store_id: storeId, p_date: date, p_entries, p_expected_updated_at: report?.updated_at || null, p_finalize_now: !kioskMode, ...opsRpcParams() }
-        : { p_store_id: storeId, p_date: date, p_entries, p_expected_updated_at: report?.updated_at || null, p_finalize_now: !kioskMode };
+      // OPS_ATOMIC_WRITE_READY跟MISSED_PUNCH_ATOMIC_READY是兩支各自獨立的
+      // wrapper RPC（都只包裝base的submit_daily_report_entries，沒有互相
+      // 包裝），目前沒有同時支援兩者的合併版本。兩者只會依序各自開放測試，
+      // 不會同時為true；真的同時為true會漏掉其中一邊的atomic寫入，寧可在
+      // 這裡直接擋下來，不要默默做半套
+      if (OPS_ATOMIC_WRITE_READY && MISSED_PUNCH_ATOMIC_READY) {
+        throw new Error("OPS_ATOMIC_WRITE_READY與MISSED_PUNCH_ATOMIC_READY不支援同時為true，尚無合併版wrapper RPC");
+      }
+      const baseSubmitArgs = { p_store_id: storeId, p_date: date, p_entries, p_expected_updated_at: report?.updated_at || null, p_finalize_now: !kioskMode };
+      const submitRpcName = OPS_ATOMIC_WRITE_READY ? "submit_daily_report_entries_with_ops"
+        : MISSED_PUNCH_ATOMIC_READY ? "submit_daily_report_entries_with_missed_punch"
+        : "submit_daily_report_entries";
+      const submitRpcArgs = OPS_ATOMIC_WRITE_READY ? { ...baseSubmitArgs, ...opsRpcParams() }
+        : MISSED_PUNCH_ATOMIC_READY ? { ...baseSubmitArgs, p_new_missed_punch: buildNewMissedPunchPayload() }
+        : baseSubmitArgs;
       const { data: saveRows, error: saveErr } = await sb.rpc(submitRpcName, submitRpcArgs);
       if (saveErr) {
         toast((saveErr.message.includes("CONFLICT") ? "" : "送出失敗：") + saveErr.message);
@@ -3838,7 +4137,12 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       // 直接return不做事，維持「暫停填寫」的狀態，兩種模式都不會是redundant寫入
       if (!OPS_ATOMIC_WRITE_READY) await saveOpsFields(reportId);
       await logAudit(me.name, "submit_daily_report", `${storeId}:${date}`);
-      toast(pendingProofCount > 0 ? `已送出，等待人資審核（本次有 ${pendingProofCount} 筆請假證明待補，送出後仍可補交）` : "已送出，等待人資審核");
+      {
+        const notes = [];
+        if (pendingProofCount > 0) notes.push(`${pendingProofCount} 筆請假證明待補`);
+        if (pendingMissedPunchCount > 0) notes.push(`${pendingMissedPunchCount} 筆漏卡時間待補`);
+        toast(notes.length > 0 ? `日報已送出／${notes.join("、")}，送出後仍可補交` : "已送出，等待人資審核");
+      }
       load();
     } finally {
       setActionBusy(false);
@@ -3879,10 +4183,17 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           reason: e.reason || "", improvement: e.improvement || "", note: e.note || "",
         };
       });
-      const adminRpcName = OPS_ATOMIC_WRITE_READY ? "admin_save_daily_report_with_ops" : "admin_save_daily_report";
-      const adminRpcArgs = OPS_ATOMIC_WRITE_READY
-        ? { p_store_id: storeId, p_date: date, p_pos_verified: posVerified, p_entries, p_reason: isAdminCorrection ? adminReason.trim() : null, p_expected_updated_at: report?.updated_at || null, ...opsRpcParams() }
-        : { p_store_id: storeId, p_date: date, p_pos_verified: posVerified, p_entries, p_reason: isAdminCorrection ? adminReason.trim() : null, p_expected_updated_at: report?.updated_at || null };
+      // 同submitReport()：兩支atomic旗標目前沒有合併版wrapper RPC，不支援同時開啟
+      if (OPS_ATOMIC_WRITE_READY && MISSED_PUNCH_ATOMIC_READY) {
+        throw new Error("OPS_ATOMIC_WRITE_READY與MISSED_PUNCH_ATOMIC_READY不支援同時為true，尚無合併版wrapper RPC");
+      }
+      const baseAdminArgs = { p_store_id: storeId, p_date: date, p_pos_verified: posVerified, p_entries, p_reason: isAdminCorrection ? adminReason.trim() : null, p_expected_updated_at: report?.updated_at || null };
+      const adminRpcName = OPS_ATOMIC_WRITE_READY ? "admin_save_daily_report_with_ops"
+        : MISSED_PUNCH_ATOMIC_READY ? "admin_save_daily_report_with_missed_punch"
+        : "admin_save_daily_report";
+      const adminRpcArgs = OPS_ATOMIC_WRITE_READY ? { ...baseAdminArgs, ...opsRpcParams() }
+        : MISSED_PUNCH_ATOMIC_READY ? { ...baseAdminArgs, p_new_missed_punch: buildNewMissedPunchPayload() }
+        : baseAdminArgs;
       const { error } = await sb.rpc(adminRpcName, adminRpcArgs);
       if (error) {
         toast((error.message.includes("CONFLICT") ? "" : "儲存失敗：") + error.message);
@@ -4013,7 +4324,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           )}
         </div>
 
-        {e.missed_punch && (
+        {e.missed_punch && !MISSED_PUNCH_ATOMIC_READY && (
           <div style={{ marginTop: 8 }}>
             <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>補打卡單</p>
             <textarea className="ph-input" rows={2} disabled={dis} placeholder="事由（如去客戶／廠商端出差，請填寫客戶／廠商名稱）"
@@ -4043,8 +4354,12 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
             </div>
             <p style={{ color: T.sub, fontSize: 11, margin: "6px 0 0" }}>
               請於二日內申請補卡；若當月個人因忘記打卡事由累計達 3 次（含）以上，扣除全勤獎金。嚴禁代打卡，若有發生此情形連坐罰各記一支大過。不需要另外上傳附件。
+              新版「時間待確認」流程正在準備中，目前沿用原有欄位。
             </p>
           </div>
+        )}
+        {e.missed_punch && MISSED_PUNCH_ATOMIC_READY && (
+          <MissedPunchBlock r={r} e={e} dis={dis} onUpdate={(patch) => updateEntry(r.id, patch)} errField={errField} />
         )}
 
         {e.leave && (
@@ -4206,6 +4521,14 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>領班簽核</p><p style={{ fontWeight: 600, margin: 0, color: signDone ? T.green : T.yellow }}>{signDone ? "已完成" : "尚未完成"}</p></div>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>人資交接</p><p style={{ fontWeight: 600, margin: 0, color: handoffDone ? T.green : T.yellow }}>{handoffDone ? "已完成" : "未繳交"}</p></div>
           <div><p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>營運資料</p><p style={{ fontWeight: 600, margin: 0, color: opsStatusColor }}>{opsStatus}</p></div>
+          {MISSED_PUNCH_ATOMIC_READY && (
+            <div>
+              <p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>漏卡時間待補</p>
+              <p style={{ fontWeight: 600, margin: 0, color: pendingMissedPunchEmployeeIds.size > 0 ? T.yellow : T.green }}>
+                {pendingMissedPunchEmployeeIds.size > 0 ? `${pendingMissedPunchEmployeeIds.size} 人待補／待審` : "無"}
+              </p>
+            </div>
+          )}
         </div>
       )}
 
@@ -4719,6 +5042,76 @@ function DeferInline({ dis, onDefer }) {
 
 // 請假憑證區：requires_proof 依 leave_type_settings 動態判斷，不寫死；待補/上傳都不要求
 // 重新簽名（clearSignatureOnChange 不會被這裡的動作觸發）
+// 漏打卡「時間待確認／已確認時間」新流程UI（2026-09-17新增，
+// MISSED_PUNCH_ATOMIC_READY=true才會渲染）。這裡只操作本機草稿欄位
+// （missed_punch_mode等），實際建立事件是在送出當下（submitReport/
+// adminSaveReport，經buildNewMissedPunchPayload）才呼叫flag_missed_punch_event，
+// 不是這裡即時呼叫——維持跟其他異常欄位一樣「先在本機累積，送出時一次寫入」的
+// 既有慣例，不單獨開一條寫入路徑
+const MISSED_PUNCH_EVENT_LABEL = { clock_in: "上班", clock_out: "下班", break_start: "休息開始", break_end: "休息結束", unknown: "尚待確認" };
+function MissedPunchBlock({ r, e, dis, onUpdate }) {
+  const mode = e.missed_punch_mode || "";
+  const types = ["clock_in", "clock_out", "break_start", "break_end"];
+  function toggleType(list, type) { return list.includes(type) ? list.filter((t) => t !== type) : [...list, type]; }
+  return (
+    <div style={{ marginTop: 8 }}>
+      <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>漏打卡處理方式</p>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <button type="button" className={"ph-btn small" + (mode === "confirmed" ? " primary" : "")} disabled={dis}
+          onClick={() => onUpdate({ missed_punch_mode: "confirmed" })}>已確認時間：填寫補卡資料</button>
+        <button type="button" className={"ph-btn small" + (mode === "pending" ? " primary" : "")} disabled={dis}
+          onClick={() => onUpdate({ missed_punch_mode: "pending" })}>時間待確認：先通報缺卡，後續補填</button>
+      </div>
+
+      {mode === "confirmed" && (
+        <div>
+          <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>缺少的打卡事件（可複選；原始打卡紀錄無資料，顯示「缺卡」，不虛構）</p>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
+            {types.map((t) => (
+              <label key={t} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}>
+                <input type="checkbox" disabled={dis} checked={e.missed_punch_types.includes(t)}
+                  onChange={() => onUpdate({ missed_punch_types: toggleType(e.missed_punch_types, t) })} />
+                {MISSED_PUNCH_EVENT_LABEL[t]}（缺卡）
+              </label>
+            ))}
+          </div>
+          {e.missed_punch_types.map((t) => (
+            <div key={t} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12.5, minWidth: 76 }}>{MISSED_PUNCH_EVENT_LABEL[t]}實際時間</span>
+              <input className="ph-input" style={{ width: 210 }} type="datetime-local" disabled={dis}
+                value={e.missed_punch_confirmed_times[t] || ""}
+                onChange={(ev) => onUpdate({ missed_punch_confirmed_times: { ...e.missed_punch_confirmed_times, [t]: ev.target.value } })} />
+            </div>
+          ))}
+          {e.missed_punch_types.length === 0 && <p style={{ color: T.yellow, fontSize: 12 }}>請至少勾選一個缺少的打卡事件</p>}
+          <p style={{ color: T.sub, fontSize: 11, margin: "6px 0 0" }}>支援跨午夜；日期時間需完整填寫，不套用班表時間當實際值。</p>
+        </div>
+      )}
+
+      {mode === "pending" && (
+        <div>
+          <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 4px" }}>缺卡類型（可複選）</p>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
+            {[...types, "unknown"].map((t) => (
+              <label key={t} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}>
+                <input type="checkbox" disabled={dis} checked={e.missed_punch_pending_types.includes(t)}
+                  onChange={() => onUpdate({ missed_punch_pending_types: toggleType(e.missed_punch_pending_types, t) })} />
+                {MISSED_PUNCH_EVENT_LABEL[t]}
+              </label>
+            ))}
+          </div>
+          <textarea className="ph-input" rows={2} disabled={dis} placeholder='簡短原因，例如「當事人已離店，待本人確認」'
+            value={e.missed_punch_pending_reason} onChange={(ev) => onUpdate({ missed_punch_pending_reason: ev.target.value })} />
+          <p style={{ color: T.sub, fontSize: 11, margin: "6px 0 0" }}>
+            不強制填寫未知時間或完整補卡事由，可先送出整份日報，之後在「補填漏卡時間」補上；不需要另外上傳附件。
+          </p>
+        </div>
+      )}
+      {!mode && <p style={{ color: T.sub, fontSize: 12 }}>請選擇處理方式</p>}
+    </div>
+  );
+}
+
 function LeaveProofBlock({ e, leaveTypeSettings, leaveTypeByCode, attachments, dis, deadlineDays, onChooseType, onUploadNow, onDefer }) {
   const setting = leaveTypeByCode[e.leave_type];
   const requiresProof = !!setting?.requires_proof;
