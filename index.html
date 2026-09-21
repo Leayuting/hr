@@ -365,11 +365,33 @@ const OPS_ATOMIC_WRITE_READY = true;
 // wrapper RPC，部署前先關閉新UI的寫入/查詢（不查詢還不存在的表，避免schema
 // cache錯誤），只保留既有漏打卡欄位可用——部署並核對後改true才會啟用新流程
 const MISSED_PUNCH_ATOMIC_READY = false;
+// 2026-09-21 每月營業報表簡化：咖啡豆／其他商品原本是兩個獨立欄位，簡化成一個
+// 「咖啡豆／商品營業額」欄位。不新增資料庫欄位（不新增重複來源）——合併後的
+// 單一欄位繼續寫入既有的 ops_bean_revenue 欄位，ops_goods_revenue 這天之後
+// 不再收集，一律傳null（欄位本身不刪除，舊資料不受影響）。用這個日期常數區分
+// 新舊規則：這天（含）之後的日報，商品營業額＝ops_bean_revenue本身（goods
+// 欄位不看）；這天之前的舊日報，維持舊規則——bean/goods兩個欄位都有值才合併，
+// 缺一個不當0（避免把「只填了一半」的舊資料誤判成完整）
+const OPS_MERGE_DATE = "2026-09-21";
+// 判斷「這筆資料該用新規則（單一欄位）還是舊規則（兩欄都有值才合併）」，關鍵是
+// 用ops_hours_snapshot_at（這筆資料實際被寫入的時間），不是report_date（這份
+// 日報是哪一天的）——兩者不一樣：管理者今天（>=OPS_MERGE_DATE）去更正一筆很舊
+// 的歷史日報時，寫入的就是新的單一欄位形狀（goods=null），但report_date還是
+// 舊的，若用report_date判斷會誤判成「舊制資料不完整」。ops_hours_snapshot_at
+// 在兩種既有寫入路徑（saveOpsFields／atomic wrapper RPC）都是每次儲存必寫的
+// 欄位，可以當作可靠依據；savedAt拿不到時（從未被ops流程動過的資料）才退回
+// 用report_date當備援判斷
+function mergedOpsGoodsRevenue(reportDate, savedAt, beanRevenue, goodsRevenue) {
+  const usesSingleField = savedAt != null ? (savedAt >= OPS_MERGE_DATE) : (reportDate >= OPS_MERGE_DATE);
+  if (usesSingleField) return beanRevenue;
+  return (beanRevenue != null && goodsRevenue != null) ? Number(beanRevenue) + Number(goodsRevenue) : null;
+}
 // 候選公式集中維護：實際產能營業額／每日產能都是「待確認」版本，只用於數據追蹤
-// 預覽，不直接作為獎金依據（見營運數據分頁的提示文字）
-function computeOpsDerived(totalRevenue, beanRevenue, goodsRevenue, hoursUsed) {
-  if (totalRevenue == null || beanRevenue == null || goodsRevenue == null) return { capacityRevenue: null, productivity: null };
-  const capacityRevenue = Number(totalRevenue) - Number(beanRevenue) - Number(goodsRevenue);
+// 預覽，不直接作為獎金依據（見每月營業報表分頁的提示文字）。mergedGoodsRevenue
+// 請先經過 mergedOpsGoodsRevenue() 換算，這支函式本身不知道日期
+function computeOpsDerived(totalRevenue, mergedGoodsRevenue, hoursUsed) {
+  if (totalRevenue == null || mergedGoodsRevenue == null) return { capacityRevenue: null, productivity: null };
+  const capacityRevenue = Number(totalRevenue) - Number(mergedGoodsRevenue);
   const productivity = (hoursUsed != null && hoursUsed > 0) ? capacityRevenue / hoursUsed : null;
   return { capacityRevenue, productivity };
 }
@@ -3031,7 +3053,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
           <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
             <button className={"ph-btn small" + (tab === "matrix" ? " primary" : "")} onClick={() => setTab("matrix")}>繳交總表</button>
             <button className={"ph-btn small" + (tab === "anomalies" ? " primary" : "")} onClick={() => setTab("anomalies")}>異常清單</button>
-            <button className={"ph-btn small" + (tab === "ops" ? " primary" : "")} onClick={() => setTab("ops")}>營運數據</button>
+            <button className={"ph-btn small" + (tab === "ops" ? " primary" : "")} onClick={() => setTab("ops")}>每月營業報表</button>
             {MISSED_PUNCH_ATOMIC_READY && (
               <button className={"ph-btn small" + (tab === "missed_punch" ? " primary" : "")} onClick={() => setTab("missed_punch")}>漏卡待補</button>
             )}
@@ -3050,7 +3072,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
             <DailyReportMatrixTab visibleStores={storeFilter === "all" ? visibleStores : visibleStores.filter((s) => s.id === storeFilter)}
               dateList={dateList} rowsByStore={rowsByStore} today={today} onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
           ) : tab === "ops" ? (
-            <DailyReportOpsTab storeIds={filterStoreIds} storeById={storeById} from={from} to={to} today={today}
+            <DailyReportMonthlyReportTab storeIds={scopeStoreIds} storeById={storeById}
               onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
           ) : tab === "missed_punch" ? (
             <DailyReportMissedPunchTab me={me} storeIds={filterStoreIds} storeById={storeById} from={from} to={to} toast={toast} />
@@ -3105,85 +3127,99 @@ function DailyReportMatrixTab({ visibleStores, dateList, rowsByStore, today, onO
   );
 }
 
-// 營運數據分頁（2026-09-16新增）：直接查daily_reports的ops_*欄位（DailyReportDetail
-// 送出時寫回），不重複查shifts/entries重算工時——表格顯示的是送出當下的
-// ops_hours_snapshot快照，不是即時重算值；要看最新估算或更正紀錄，點列開啟同一份
-// DailyReportDetail（liveOpsHours會在那裡即時算給你看），避免這裡為了「即時」對
-// 一個月份每一天每一店都重新查shifts+entries，造成大量重複查詢
-function DailyReportOpsTab({ storeIds, storeById, from, to, today, onOpenDetail }) {
-  const [rows, setRows] = useState([]);
+// 每月營業報表（2026-09-16「營運數據」分頁新增，2026-09-21簡化為單店月報格式，
+// 取代原本可切today/week/month/自訂＋全部門市的分頁）：固定「一個月＋一間門市」，
+// 月份／門市選擇是這個報表自己的狀態，不跟頁面上方共用的日期範圍/門市篩選連動
+// ——那組共用篩選是给矩陣/異常清單/審核佇列用的，「月報」這個格式本身就該是
+// 月為單位，硬套共用的today/week/自訂沒有意義。直接查daily_reports的ops_*
+// 欄位（DailyReportDetail送出時寫回），不重複查shifts/entries重算工時——表格
+// 顯示的是送出當下的ops_hours_snapshot快照，不是即時重算值；要看最新估算或
+// 更正紀錄，點列開啟同一份DailyReportDetail
+function DailyReportMonthlyReportTab({ storeIds, storeById, onOpenDetail }) {
+  const visibleStores = storeIds.map((id) => storeById[id]).filter(Boolean);
+  const [ym, setYm] = useState(thisMonthStr());
+  const [storeId, setStoreId] = useState(visibleStores[0]?.id || "");
+  const [rowsByDate, setRowsByDate] = useState({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [sortKey, setSortKey] = useState("report_date");
-  const [sortDir, setSortDir] = useState("desc");
+  const today = todayStr();
+  const isCurrentMonth = ym === thisMonthStr();
+
+  useEffect(() => {
+    if (!storeId && visibleStores[0]) setStoreId(visibleStores[0].id);
+  }, [visibleStores.map((s) => s.id).join(","), storeId]);
+
+  const monthFrom = `${ym}-01`;
+  const monthTo = `${ym}-${pad2(monthDays(ym))}`;
+  const rangeTo = isCurrentMonth ? today : monthTo;
 
   const load = useCallback(async () => {
-    if (!storeIds.length || from > to) { setRows([]); setLoading(false); return; }
+    if (!storeId) { setRowsByDate({}); setLoading(false); return; }
     setLoading(true); setLoadError(false);
     const { data, error } = await sb.from("daily_reports")
-      .select("store_id,report_date,status,ops_closed,ops_total_revenue,ops_bean_revenue,ops_goods_revenue,ops_hours_snapshot")
-      .in("store_id", storeIds).gte("report_date", from).lte("report_date", to);
-    if (error) { console.error("daily_reports ops", error); setLoadError(true); setLoading(false); return; }
-    setRows(data || []);
+      .select("report_date,status,ops_closed,ops_total_revenue,ops_bean_revenue,ops_goods_revenue,ops_note,ops_hours_snapshot,ops_hours_snapshot_at")
+      .eq("store_id", storeId).gte("report_date", monthFrom).lte("report_date", rangeTo);
+    if (error) { console.error("daily_reports monthly", error); setLoadError(true); setLoading(false); return; }
+    setRowsByDate(Object.fromEntries((data || []).map((r) => [r.report_date, r])));
     setLoading(false);
-  }, [storeIds, from, to]);
+  }, [storeId, monthFrom, rangeTo]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    const ch = sb.channel("daily_report_ops_sync").on("postgres_changes", { event: "*", schema: "public", table: "daily_reports" }, load).subscribe();
+    const ch = sb.channel("daily_report_monthly_sync").on("postgres_changes", { event: "*", schema: "public", table: "daily_reports" }, load).subscribe();
     return () => sb.removeChannel(ch);
   }, [load]);
 
-  function opsStatusOf(r) {
-    if (!r) return "missing";
-    if (r.report_date < OPS_LAUNCH_DATE) return "legacy";
-    if (r.ops_closed) return "closed";
-    if (r.ops_total_revenue == null) return "missing";
-    if (r.ops_bean_revenue == null || r.ops_goods_revenue == null) return "pending_category";
-    if (r.ops_hours_snapshot == null) return "pending_hours";
-    return "confirmed";
-  }
-  const OPS_STATUS_TONE = { confirmed: "green", pending_hours: "yellow", pending_category: "yellow", closed: "sub", legacy: "sub", missing: "sub" };
-  const OPS_STATUS_LABEL = { confirmed: "已確認", pending_hours: "工時待核對", pending_category: "分類待補", closed: "休店", legacy: "舊版未收集", missing: "未填" };
+  // 逐日一列，只列到今天為止（本月且未到的日期不列出，不會出現一堆「尚未填寫」
+  // 的未來列）；每一列各自帶status＋原因文字，不用額外的「資料狀態」欄位，
+  // 直接在對應數字格子旁註記
+  const days = useMemo(() => {
+    const list = [];
+    let d = monthFrom;
+    while (d <= rangeTo) {
+      const r = rowsByDate[d];
+      let status, merged = null, mergedReason = null;
+      if (d < OPS_LAUNCH_DATE) status = "legacy";
+      else if (!r) status = "not_filled";
+      else if (r.ops_closed) status = "closed";
+      else if (r.ops_total_revenue == null) status = "not_filled";
+      else {
+        merged = mergedOpsGoodsRevenue(d, r.ops_hours_snapshot_at, r.ops_bean_revenue, r.ops_goods_revenue);
+        if (merged == null) {
+          status = "incomplete";
+          mergedReason = d >= OPS_MERGE_DATE ? "商品營業額尚未填寫" : "舊制拆分欄位，資料不完整";
+        } else status = "filled";
+      }
+      const { capacityRevenue, productivity } = status === "filled"
+        ? computeOpsDerived(r.ops_total_revenue, merged, r.ops_hours_snapshot) : { capacityRevenue: null, productivity: null };
+      list.push({ date: d, r, status, merged, mergedReason, capacityRevenue, productivity });
+      d = addDaysStr(d, 1);
+    }
+    return list;
+  }, [rowsByDate, monthFrom, rangeTo]);
 
-  const enriched = useMemo(() => rows.map((r) => {
-    const status = opsStatusOf(r);
-    const { capacityRevenue, productivity } = computeOpsDerived(r.ops_total_revenue, r.ops_bean_revenue, r.ops_goods_revenue, r.ops_hours_snapshot);
-    return { ...r, status, capacityRevenue, productivity, storeName: storeById[r.store_id]?.name || "" };
-  }), [rows, storeById]);
-
-  const sorted = useMemo(() => {
-    const arr = [...enriched];
-    const dir = sortDir === "asc" ? 1 : -1;
-    arr.sort((a, b) => {
-      let av = a[sortKey], bv = b[sortKey];
-      if (sortKey === "storeName") { av = av || ""; bv = bv || ""; return av.localeCompare(bv) * dir; }
-      av = av == null ? -Infinity : av; bv = bv == null ? -Infinity : bv;
-      if (av < bv) return -1 * dir; if (av > bv) return 1 * dir; return 0;
+  // 月度合計：總營業額／商品營業額／產能營業額／工時各自獨立加總（只要求
+  // 那個欄位本身有值就計入，不要求其他欄位也齊全）；月整體產能才要求「相同
+  // 有效日期範圍」——同時有capacityRevenue與工時的天數才算進分子分母，不是
+  // 逐日產能的簡單平均，也不能被沒有工時的天數稀釋
+  const totals = useMemo(() => {
+    let sumTotal = 0, totalCount = 0, sumMerged = 0, mergedCount = 0, sumCap = 0, capCount = 0, sumHours = 0, hoursCount = 0;
+    let ratioCap = 0, ratioHours = 0, ratioCount = 0;
+    days.forEach((day) => {
+      const r = day.r;
+      if (r?.ops_total_revenue != null) { sumTotal += Number(r.ops_total_revenue); totalCount++; }
+      if (day.merged != null) { sumMerged += Number(day.merged); mergedCount++; }
+      if (day.capacityRevenue != null) { sumCap += day.capacityRevenue; capCount++; }
+      if (r?.ops_hours_snapshot != null) { sumHours += Number(r.ops_hours_snapshot); hoursCount++; }
+      if (day.capacityRevenue != null && r?.ops_hours_snapshot != null) {
+        ratioCap += day.capacityRevenue; ratioHours += Number(r.ops_hours_snapshot); ratioCount++;
+      }
     });
-    return arr;
-  }, [enriched, sortKey, sortDir]);
+    const overallProductivity = ratioHours > 0 ? ratioCap / ratioHours : null;
+    return { sumTotal, totalCount, sumMerged, mergedCount, sumCap, capCount, sumHours, hoursCount, overallProductivity, ratioCount };
+  }, [days]);
 
-  function toggleSort(key) {
-    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else { setSortKey(key); setSortDir(key === "report_date" ? "desc" : "asc"); }
-  }
-  function Th({ label, k }) {
-    return (
-      <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort(k)}>
-        {label}{sortKey === k ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
-      </th>
-    );
-  }
-
-  // 整體每工時產值＝範圍內「已確認」列的產能營業額合計÷工時合計，不是逐日產能的
-  // 簡單平均——避免營業額大的日子被營業額小的日子拉平，失真
-  const confirmedRows = enriched.filter((r) => r.status === "confirmed");
-  const sumTotal = confirmedRows.reduce((s, r) => s + (r.ops_total_revenue || 0), 0);
-  const sumCap = confirmedRows.reduce((s, r) => s + (r.capacityRevenue || 0), 0);
-  const sumHours = confirmedRows.reduce((s, r) => s + (r.ops_hours_snapshot || 0), 0);
-  const overallProductivity = sumHours > 0 ? sumCap / sumHours : null;
-  const pendingCount = enriched.filter((r) => r.status === "pending_hours" || r.status === "pending_category" || r.status === "missing").length;
-  const todayInRange = today >= from && today <= to;
+  const incompleteCount = days.filter((d) => d.status === "incomplete" || d.status === "not_filled").length;
+  const storeName = storeById[storeId]?.name || "";
 
   if (loadError) {
     return (
@@ -3195,55 +3231,98 @@ function DailyReportOpsTab({ storeIds, storeById, from, to, today, onOpenDetail 
   }
   return (
     <div>
-      {!OPS_ATOMIC_WRITE_READY && (
-        <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, background: T.yellowBg, border: `1px solid ${T.yellow}55` }}>
-          <p style={{ color: "#5C4600", fontSize: 12.5, margin: 0 }}>
-            營運數據填寫功能暫停中（正在把寫入方式改成後端單一交易，避免半套資料）。以下為暫停前已記錄的資料，可能有本應填寫但因暫停而缺漏的日期，不代表當天真的沒有營運；功能恢復後才會有新資料進來。
-          </p>
-        </div>
-      )}
-      <p style={{ fontSize: 12, color: T.sub, margin: "0 0 4px" }}>
-        候選公式（實際產能營業額＝總營業額－咖啡豆－其他商品；每日產能＝實際產能營業額÷使用工時），僅供數據追蹤預覽，不直接作為獎金依據；使用工時為估算值（無實際打卡時間戳記可用），一律標示「預估」。
+      <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 12px" }}>
+        實際產能營業額＝總營業額－咖啡豆／商品營業額；每日產能＝實際產能營業額÷使用工時。僅供數據追蹤預覽，不直接作為獎金依據；工時無實際打卡時間戳記可用，一律為估算值。
       </p>
-      {todayInRange && <p style={{ fontSize: 12, color: T.yellow, margin: "0 0 12px" }}>查詢範圍包含今天：今天尚未結束，數字僅截至查詢當下，不直接與完整營業日比較。</p>}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 16, marginTop: 12 }}>
-        <StatTile label="範圍內總營業額" value={loading ? "…" : money(sumTotal)} unit="元" />
-        <StatTile label="範圍內產能營業額" value={loading ? "…" : money(sumCap)} unit="元" />
-        <StatTile label="範圍內使用工時" value={loading ? "…" : sumHours.toFixed(1)} unit="人時" />
-        <StatTile label="整體每工時產值" value={loading ? "…" : (overallProductivity == null ? "—" : money(overallProductivity))} unit="元／人時" />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+        <input className="ph-input" style={{ width: 150 }} type="month" max={thisMonthStr()} value={ym} onChange={(e) => setYm(e.target.value)} />
+        <select className="ph-input" style={{ width: 130 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+          {visibleStores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <button className="ph-btn small" onClick={() => setYm(prevMonthStr(ym))}>← 上月</button>
+        <button className="ph-btn small" disabled={isCurrentMonth} onClick={() => setYm(nextMonthStr(ym))}>下月 →</button>
       </div>
-      <p style={{ fontSize: 11.5, color: T.sub, marginTop: -8, marginBottom: 12 }}>
-        以上僅計入「已確認」{confirmedRows.length} 筆；另有 {pendingCount} 筆待核對／待補／未填，不計入統計。
+      <p style={{ fontSize: 11.5, color: T.sub, margin: "0 0 14px" }}>
+        {storeName}・{ym.replace("-", "年")}月・列到{isCurrentMonth ? `今天（${today.slice(5)}）為止，之後尚未到期不列出` : "月底為止"}
       </p>
-      {loading ? <p style={{ color: T.sub }}>載入中…</p> : sorted.length === 0 ? (
-        <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>此範圍尚無資料</p>
-      ) : (
+      {loading ? <p style={{ color: T.sub }}>載入中…</p> : (
         <div className="ph-card" style={{ overflowX: "auto" }}>
-          <table className="ph-table">
+          <table className="ph-table wide-min">
             <thead>
               <tr>
-                <Th label="日期" k="report_date" /><Th label="門店" k="storeName" />
-                <Th label="總營業額" k="ops_total_revenue" /><Th label="咖啡豆" k="ops_bean_revenue" /><Th label="其他商品" k="ops_goods_revenue" />
-                <Th label="產能營業額" k="capacityRevenue" /><Th label="使用工時" k="ops_hours_snapshot" /><Th label="每日產能" k="productivity" />
-                <th>資料狀態</th>
+                <th>日期</th><th>總營業額</th><th>咖啡豆／商品營業額</th>
+                <th>實際產能營業額</th><th>使用工時</th><th>每日產能</th>
               </tr>
             </thead>
             <tbody>
-              {sorted.map((r) => (
-                <tr key={r.store_id + r.report_date} style={{ cursor: "pointer" }} onClick={() => onOpenDetail(r.store_id, r.report_date)}>
-                  <td>{r.report_date}</td>
-                  <td>{r.storeName}</td>
-                  <td>{r.ops_total_revenue == null ? "—" : money(r.ops_total_revenue)}</td>
-                  <td>{r.ops_bean_revenue == null ? "—" : money(r.ops_bean_revenue)}</td>
-                  <td>{r.ops_goods_revenue == null ? "—" : money(r.ops_goods_revenue)}</td>
-                  <td>{r.capacityRevenue == null ? "—" : money(r.capacityRevenue)}</td>
-                  <td>{r.ops_hours_snapshot == null ? "—" : `${r.ops_hours_snapshot.toFixed(1)} `}{r.ops_hours_snapshot != null && <Badge tone="info">預估</Badge>}</td>
-                  <td>{r.productivity == null ? (r.status === "closed" || r.status === "legacy" ? "—" : "無法計算") : money(r.productivity)}</td>
-                  <td><Badge tone={OPS_STATUS_TONE[r.status]}>{OPS_STATUS_LABEL[r.status]}</Badge></td>
-                </tr>
-              ))}
+              {days.map((day) => {
+                const cellStyle = { cursor: "pointer" };
+                if (day.status === "legacy") return (
+                  <tr key={day.date} style={{ ...cellStyle, color: T.sub, background: T.subBg }} onClick={() => onOpenDetail(storeId, day.date)}>
+                    <td>{day.date.slice(5)}（週{weekdayZh(day.date)}）</td>
+                    <td colSpan={5}>舊版未收集（{OPS_LAUNCH_DATE} 前尚未有營運數據欄位，不補 0）</td>
+                  </tr>
+                );
+                if (day.status === "closed") return (
+                  <tr key={day.date} style={{ ...cellStyle, color: T.mute, background: T.muteBg }} onClick={() => onOpenDetail(storeId, day.date)}>
+                    <td>{day.date.slice(5)}（週{weekdayZh(day.date)}）</td>
+                    <td colSpan={5}>休店</td>
+                  </tr>
+                );
+                if (day.status === "not_filled") return (
+                  <tr key={day.date} style={cellStyle} onClick={() => onOpenDetail(storeId, day.date)}>
+                    <td>{day.date.slice(5)}（週{weekdayZh(day.date)}）</td>
+                    <td style={{ color: T.yellow, fontWeight: 500 }}>尚未填寫</td>
+                    <td>—</td><td>—</td><td>—</td><td>—</td>
+                  </tr>
+                );
+                const r = day.r;
+                return (
+                  <tr key={day.date} style={cellStyle} onClick={() => onOpenDetail(storeId, day.date)}>
+                    <td>{day.date.slice(5)}（週{weekdayZh(day.date)}）</td>
+                    <td>{money(r.ops_total_revenue)}</td>
+                    <td>
+                      {day.merged == null ? <>— <span style={{ color: T.sub, fontSize: 11 }}>（{day.mergedReason}）</span></> : money(day.merged)}
+                    </td>
+                    <td>
+                      {day.capacityRevenue == null ? <>— <span style={{ color: T.sub, fontSize: 11 }}>（{day.mergedReason || "無法計算"}）</span></> : money(day.capacityRevenue)}
+                    </td>
+                    <td>
+                      {r.ops_hours_snapshot == null
+                        ? <>— <span style={{ color: T.sub, fontSize: 11 }}>（工時尚未估算）</span></>
+                        : <>{r.ops_hours_snapshot.toFixed(1)} <Badge tone="info">預估</Badge></>}
+                    </td>
+                    <td>
+                      {day.productivity == null
+                        ? <>— <span style={{ color: T.sub, fontSize: 11 }}>（{day.capacityRevenue == null ? (day.mergedReason || "無法計算") : r.ops_hours_snapshot == null ? "工時尚未估算" : "工時為0，無法計算"}）</span></>
+                        : money(day.productivity)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
+            <tfoot>
+              <tr style={{ fontWeight: 600, background: "#FCFAF6" }}>
+                <td>合計（有資料的天數）</td>
+                <td>{money(totals.sumTotal)} <span style={{ color: T.sub, fontSize: 11, fontWeight: 400 }}>{totals.totalCount} 天有填</span></td>
+                <td>{money(totals.sumMerged)} <span style={{ color: T.sub, fontSize: 11, fontWeight: 400 }}>{totals.mergedCount} 天有填</span></td>
+                <td>{money(totals.sumCap)} <span style={{ color: T.sub, fontSize: 11, fontWeight: 400 }}>{totals.capCount} 天可計算</span></td>
+                <td>{totals.sumHours.toFixed(1)} <span style={{ color: T.sub, fontSize: 11, fontWeight: 400 }}>{totals.hoursCount} 天有工時</span></td>
+                <td>—</td>
+              </tr>
+              <tr style={{ fontWeight: 700, color: T.brown, fontSize: 13.5 }}>
+                <td colSpan={5} style={{ textAlign: "right" }}>月整體產能（相同有效日期的產能營業額合計 ÷ 工時合計，非逐日平均）</td>
+                <td>{totals.overallProductivity == null ? "—" : `${money(totals.overallProductivity)} 元／人時`}</td>
+              </tr>
+            </tfoot>
           </table>
+        </div>
+      )}
+      {incompleteCount > 0 && (
+        <div className="ph-card" style={{ padding: "10px 14px", marginTop: 12, background: T.yellowBg, border: `1px solid ${T.yellow}55` }}>
+          <p style={{ color: "#5C4600", fontSize: 12, margin: 0 }}>
+            月整體產能僅計入「營業額與工時同時有完整資料」的 {totals.ratioCount} 天；另有 {incompleteCount} 天尚未填寫或資料不完整，不計入分子分母，不以 0 或平均值頂替。
+          </p>
         </div>
       )}
     </div>
@@ -3703,13 +3782,17 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const [signHistory, setSignHistory] = useState([]); // daily_report_sign_history，領班簽核／人資交接的永久歷程（不受更正清空影響）
   const [correctModal, setCorrectModal] = useState(null); // { r, e } | null
   const [adminReason, setAdminReason] = useState(""); // 管理者更正已送出回報時的必填修改原因
-  // 營運數據（2026-09-16新增）：總營業額/咖啡豆/其他商品/備註/休店標記，隨roster entries
-  // 一起在送出時寫回；dayShifts是當店當日原始班次陣列（供估算工時用，跟已經轉成
-  // employeeId對照表的scheduledShiftByEmployee是同一份資料的兩種形狀，各自用途不同）
+  // 營運數據（2026-09-16新增，2026-09-21簡化為「每月營業報表」格式）：總營業額/
+  // 商品營業額/休店標記，隨roster entries一起在送出時寫回；dayShifts是當店當日
+  // 原始班次陣列（供估算工時用，跟已經轉成employeeId對照表的
+  // scheduledShiftByEmployee是同一份資料的兩種形狀，各自用途不同）。opsMerch是
+  // 簡化後的單一「咖啡豆／商品營業額」欄位，寫入時繼續對應既有的ops_bean_revenue
+  // 資料庫欄位（見OPS_MERGE_DATE說明），不是新欄位
   const [opsClosed, setOpsClosed] = useState(false);
   const [opsTotal, setOpsTotal] = useState("");
-  const [opsBean, setOpsBean] = useState("");
-  const [opsGoods, setOpsGoods] = useState("");
+  const [opsMerch, setOpsMerch] = useState("");
+  // 備註欄已從填寫UI移除（2026-09-21簡化），這裡只保留載入時讀到的舊值原封不動
+  // 傳回去，不提供編輯——舊備註因此不會被清空，也不會再收集新的
   const [opsNote, setOpsNote] = useState("");
   const [dayShifts, setDayShifts] = useState([]);
   // 漏打卡「時間待確認」事件（2026-09-17新增，MISSED_PUNCH_ATOMIC_READY=false時
@@ -3723,13 +3806,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const opsHoursResult = useMemo(() => computeOpsHours(roster, dayShifts, entries, date, pendingMissedPunchEmployeeIds), [roster, dayShifts, entries, date, pendingMissedPunchEmployeeIds]);
   const liveOpsHours = opsHoursResult.total;
   const opsDerived = useMemo(() => computeOpsDerived(
-    opsTotal === "" ? null : Number(opsTotal), opsBean === "" ? null : Number(opsBean), opsGoods === "" ? null : Number(opsGoods), liveOpsHours
-  ), [opsTotal, opsBean, opsGoods, liveOpsHours]);
+    opsTotal === "" ? null : Number(opsTotal), opsMerch === "" ? null : Number(opsMerch), liveOpsHours
+  ), [opsTotal, opsMerch, liveOpsHours]);
   // 營運資料狀態跟日報送出/人資審核狀態分開顯示，避免互相混淆（例如營業額還沒
   // 填齊不代表日報沒送出，日報已核准也不代表營運數據已確認）
   const opsStatus = !opsApplicable ? "舊版未收集" : !OPS_ATOMIC_WRITE_READY ? "功能暫停中" : opsClosed ? "休店"
     : opsTotal === "" ? "未填"
-    : (opsBean === "" || opsGoods === "") ? "分類待補"
+    : opsMerch === "" ? "商品未填"
     : liveOpsHours == null ? "工時待核對"
     : !opsHoursResult.complete ? "工時含漏卡待確認"
     : "已確認";
@@ -3762,8 +3845,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     setPosVerified(rep?.pos_verified || false);
     setOpsClosed(rep?.ops_closed || false);
     setOpsTotal(rep?.ops_total_revenue != null ? String(rep.ops_total_revenue) : "");
-    setOpsBean(rep?.ops_bean_revenue != null ? String(rep.ops_bean_revenue) : "");
-    setOpsGoods(rep?.ops_goods_revenue != null ? String(rep.ops_goods_revenue) : "");
+    {
+      const merged = rep ? mergedOpsGoodsRevenue(date, rep.ops_hours_snapshot_at, rep.ops_bean_revenue, rep.ops_goods_revenue) : null;
+      setOpsMerch(merged != null ? String(merged) : "");
+    }
     setOpsNote(rep?.ops_note || "");
     let entryMap = {};
     let attachRows = [];
@@ -4014,8 +4099,10 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       : {
           ops_closed: false,
           ops_total_revenue: opsTotal === "" ? null : Number(opsTotal),
-          ops_bean_revenue: opsBean === "" ? null : Number(opsBean),
-          ops_goods_revenue: opsGoods === "" ? null : Number(opsGoods),
+          // 合併後的商品營業額寫入既有ops_bean_revenue欄位，ops_goods_revenue
+          // 這天之後不再收集，一律null（見OPS_MERGE_DATE說明），不是新欄位
+          ops_bean_revenue: opsMerch === "" ? null : Number(opsMerch),
+          ops_goods_revenue: null,
           ops_note: opsNote || null,
           ops_hours_snapshot: liveOpsHours,
           ops_hours_snapshot_at: new Date().toISOString(),
@@ -4030,8 +4117,11 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
     return {
       p_ops_closed: opsClosed,
       p_ops_total_revenue: opsClosed ? null : (opsTotal === "" ? null : Number(opsTotal)),
-      p_ops_bean_revenue: opsClosed ? null : (opsBean === "" ? null : Number(opsBean)),
-      p_ops_goods_revenue: opsClosed ? null : (opsGoods === "" ? null : Number(opsGoods)),
+      // 合併後的商品營業額寫入既有p_ops_bean_revenue參數（對應ops_bean_revenue
+      // 欄位），p_ops_goods_revenue這天之後不再收集，一律null——見OPS_MERGE_DATE
+      // 說明，這不是新欄位，是重新利用既有欄位承載簡化後的單一數字
+      p_ops_bean_revenue: opsClosed ? null : (opsMerch === "" ? null : Number(opsMerch)),
+      p_ops_goods_revenue: null,
       p_ops_note: opsNote || null,
       p_ops_hours_snapshot: opsClosed ? null : liveOpsHours,
     };
@@ -4569,63 +4659,52 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
                 <strong style={{ fontSize: 13 }}>當日營運數據</strong>
                 <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.sub }}>
                   <input type="checkbox" disabled={!effectiveCanWrite} checked={opsClosed} onChange={(e) => setOpsClosed(e.target.checked)} />
-                  今日休店（不需填寫營業額／工時）
+                  今日休店
                 </label>
               </div>
-              <p style={{ color: T.sub, fontSize: 12, margin: "4px 0 12px" }}>已存在的來源資料會自動帶入，不需要重複輸入；以下為候選公式，僅供數據追蹤預覽，不直接作為獎金依據。</p>
+              <p style={{ color: T.sub, fontSize: 11.5, margin: "4px 0 12px" }}>實際產能營業額／每日產能為候選估算公式，僅供追蹤參考，不直接作為獎金依據。</p>
               {!opsClosed && (
                 <>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12 }}>
                     <div>
                       <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>總營業額（元）</label>
                       <input className="ph-input" type="number" disabled={!effectiveCanWrite} value={opsTotal} onChange={(e) => setOpsTotal(e.target.value)} />
                     </div>
                     <div>
-                      <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>咖啡豆營業額（元）</label>
-                      <input className="ph-input" type="number" disabled={!effectiveCanWrite} value={opsBean} onChange={(e) => setOpsBean(e.target.value)} />
-                    </div>
-                    <div>
-                      <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>其他商品營業額（元）</label>
-                      <input className="ph-input" type="number" disabled={!effectiveCanWrite} value={opsGoods} onChange={(e) => setOpsGoods(e.target.value)} />
+                      <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>咖啡豆／商品營業額（元）</label>
+                      <input className="ph-input" type="number" disabled={!effectiveCanWrite} value={opsMerch} onChange={(e) => setOpsMerch(e.target.value)} />
                     </div>
                   </div>
                   <div style={{ marginTop: 10, fontSize: 13 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px dashed ${T.line}` }}>
-                      <span style={{ color: T.sub }}>咖啡豆／商品合計</span>
-                      <span style={{ fontWeight: 600 }}>{(opsBean !== "" && opsGoods !== "") ? money(Number(opsBean) + Number(opsGoods)) : "—"} 元（自動計算）</span>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px dashed ${T.line}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: `1px dashed ${T.line}` }}>
                       <span style={{ color: T.sub }}>實際產能營業額</span>
-                      <span style={{ fontWeight: 600 }}>{opsDerived.capacityRevenue == null ? "—" : money(opsDerived.capacityRevenue) + " 元"}（候選公式）</span>
+                      <span style={{ fontWeight: 600 }}>{opsDerived.capacityRevenue == null ? "—" : money(opsDerived.capacityRevenue) + " 元"}</span>
                     </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px dashed ${T.line}`, alignItems: "center" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: `1px dashed ${T.line}`, alignItems: "center" }}>
                       <span style={{ color: T.sub, display: "flex", alignItems: "center", gap: 6 }}>
                         每日使用工時<Badge tone="info">預估</Badge>
                       </span>
                       <span style={{ fontWeight: 600 }}>
                         {liveOpsHours == null
-                          ? <span style={{ color: T.yellow }}>工時待核對，不影響送出</span>
-                          : `${liveOpsHours.toFixed(1)} 人時（依排定班表＋當日異常回報估算）`}
+                          ? <span style={{ color: T.yellow }}>尚未估算，不影響送出</span>
+                          : `${liveOpsHours.toFixed(1)} 人時`}
                       </span>
                     </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0" }}>
                       <span style={{ color: T.sub }}>每日產能</span>
                       <span style={{ fontWeight: 700, color: T.brown, fontSize: 15 }}>
-                        {opsDerived.productivity == null ? (liveOpsHours == null ? "工時待核對，暫不計算" : "無法計算") : `${money(opsDerived.productivity)} 元／人時`}
+                        {opsDerived.productivity == null
+                          ? <span style={{ fontSize: 12, fontWeight: 400, color: T.sub }}>
+                              — （{opsDerived.capacityRevenue == null ? "營業額尚未填寫" : liveOpsHours == null ? "工時尚未估算" : "工時為0，無法計算"}）
+                            </span>
+                          : `${money(opsDerived.productivity)} 元／人時`}
                       </span>
                     </div>
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>營運備註（選填）</label>
-                    <textarea className="ph-input" rows={2} disabled={!effectiveCanWrite} placeholder="活動、設備故障、特殊訂單等說明…" value={opsNote} onChange={(e) => setOpsNote(e.target.value)} />
                   </div>
                 </>
               )}
-              {opsClosed && (
-                <div style={{ marginTop: 10 }}>
-                  <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>營運備註（選填）</label>
-                  <textarea className="ph-input" rows={2} disabled={!effectiveCanWrite} placeholder="休店原因…" value={opsNote} onChange={(e) => setOpsNote(e.target.value)} />
-                </div>
+              {report?.ops_note && (
+                <p style={{ color: T.sub, fontSize: 11.5, margin: "10px 0 0" }}>備註（舊）：{report.ops_note}</p>
               )}
             </div>
           )}
