@@ -9294,7 +9294,18 @@ function AppShell({ session }) {
     </div>
   );
   if (me.is_shared_pin_account) {
-    return <DailyReportKioskShell me={me} store={stores.find((s) => s.id === me.store_id)} stores={stores} toast={toast} />;
+    // 2026-09-24修正：這個分支原本直接return，完全跳過下面「非kiosk」return
+    // 裡才有的{toastMsg && <div className="ph-toast">...}——等於門市PIN模式
+    // 從頭到尾都沒有任何畫面元素會顯示toast()更新的訊息（toast()本身正常
+    // 執行、state有更新，只是沒地方畫出來）。這是既有架構缺陷，不是報廢
+    // 紀錄這次新功能造成的，這次除錯才第一次發現。只在這裡補上同一顆
+    // toast泡泡，不改DailyReportKioskShell的props或內部邏輯
+    return (
+      <>
+        <DailyReportKioskShell me={me} store={stores.find((s) => s.id === me.store_id)} stores={stores} toast={toast} />
+        {toastMsg && <div className="ph-toast">{toastMsg}</div>}
+      </>
+    );
   }
 
   const perm = me.permissions || {};
