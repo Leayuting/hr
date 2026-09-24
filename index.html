@@ -369,7 +369,7 @@ const MISSED_PUNCH_ATOMIC_READY = false;
 // phase-hr_migration_20260924_waste_records.sql)與新的storage bucket，部署前
 // 先關閉新UI的寫入/查詢（不查詢還不存在的表，避免schema cache錯誤）——部署
 // 並核對後改true才會啟用「新增報廢」入口與「今日報廢」區塊
-const WASTE_RECORDS_READY = false;
+const WASTE_RECORDS_READY = true;
 // 報廢原因固定7選項，「其他」排最後（選到才展開必填說明欄位）
 const WASTE_REASON_ORDER = ["made_wrong", "quality_issue", "customer_no_show", "spill_broken", "expired", "wrong_order", "other"];
 const WASTE_REASON_LABEL = {
