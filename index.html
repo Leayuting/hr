@@ -365,6 +365,24 @@ const OPS_ATOMIC_WRITE_READY = true;
 // wrapper RPC，部署前先關閉新UI的寫入/查詢（不查詢還不存在的表，避免schema
 // cache錯誤），只保留既有漏打卡欄位可用——部署並核對後改true才會啟用新流程
 const MISSED_PUNCH_ATOMIC_READY = false;
+// 2026-09-24 報廢紀錄：全新功能，需要新的資料表(waste_records等，見
+// phase-hr_migration_20260924_waste_records.sql)與新的storage bucket，部署前
+// 先關閉新UI的寫入/查詢（不查詢還不存在的表，避免schema cache錯誤）——部署
+// 並核對後改true才會啟用「新增報廢」入口與「今日報廢」區塊
+const WASTE_RECORDS_READY = false;
+// 報廢原因固定7選項，「其他」排最後（選到才展開必填說明欄位）
+const WASTE_REASON_ORDER = ["made_wrong", "quality_issue", "customer_no_show", "spill_broken", "expired", "wrong_order", "other"];
+const WASTE_REASON_LABEL = {
+  made_wrong: "製作失誤", quality_issue: "品質異常", customer_no_show: "客人未取／離席",
+  spill_broken: "打翻／破損", expired: "保存逾期", wrong_order: "出餐錯誤", other: "其他",
+};
+// 是否能更正/作廢報廢紀錄、看報廢歷史頁——比照後端can_manage_waste_record()
+// 的判斷邏輯（店長PIN以上），前端這裡只是決定要不要顯示對應按鈕/分頁，真正
+// 的權限檢查在RPC那邊，不是靠這裡擋
+function canManageWaste(me) {
+  return me.access_tier === "super_admin" || me.permissions?.daily_report === "all"
+    || (me.is_shared_pin_account && me.access_tier === "dept_manager");
+}
 // 2026-09-21 每月營業報表簡化：咖啡豆／其他商品原本是兩個獨立欄位，簡化成一個
 // 「咖啡豆／商品營業額」欄位。不新增資料庫欄位（不新增重複來源）——合併後的
 // 單一欄位繼續寫入既有的 ops_bean_revenue 欄位，ops_goods_revenue 這天之後
@@ -2907,6 +2925,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [detail, setDetail] = useState(null); // { storeId, date }
+  const [wasteModalOpen, setWasteModalOpen] = useState(false);
 
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const visibleStores = stores.filter((s) => scopeStoreIds.includes(s.id));
@@ -3012,6 +3031,9 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
           <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每日回報</h2>
           <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>跨日期檢視繳交狀況、異常結案進度與營運數據；門市可用 PIN 現場填報，管理者也可點擊下方儲存格直接補填或更正歷史回報，不需要切換門市 PIN。</p>
         </div>
+        {WASTE_RECORDS_READY && (
+          <button className="ph-btn primary" onClick={() => setWasteModalOpen(true)}>＋ 新增報廢</button>
+        )}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
         <div className="ph-seg" role="group" aria-label="日期範圍">
@@ -3057,6 +3079,9 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
             {MISSED_PUNCH_ATOMIC_READY && (
               <button className={"ph-btn small" + (tab === "missed_punch" ? " primary" : "")} onClick={() => setTab("missed_punch")}>漏卡待補</button>
             )}
+            {WASTE_RECORDS_READY && canManageWaste(me) && (
+              <button className={"ph-btn small" + (tab === "waste" ? " primary" : "")} onClick={() => setTab("waste")}>報廢紀錄</button>
+            )}
             {canApprove && (
               <button className={"ph-btn small" + (tab === "review" ? " primary" : "")} onClick={() => setTab("review")}>
                 人資審核佇列{reviewQueue.filter((r) => r.hr_review_status === "pending").length > 0 ? `（${new Set(reviewQueue.filter((r) => r.hr_review_status === "pending").map((r) => r.report_id)).size}）` : ""}
@@ -3076,6 +3101,8 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
               onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
           ) : tab === "missed_punch" ? (
             <DailyReportMissedPunchTab me={me} storeIds={filterStoreIds} storeById={storeById} from={from} to={to} toast={toast} />
+          ) : tab === "waste" ? (
+            <WasteRecordHistoryTab me={me} storeIds={scopeStoreIds} storeById={storeById} toast={toast} />
           ) : (
             <DailyReportAnomalyTab me={me} storeIds={filterStoreIds} storeById={storeById} from={from} to={to} toast={toast}
               onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
@@ -3086,6 +3113,12 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
         <Modal title={`${storeById[detail.storeId]?.name || ""}・${detail.date}`} onClose={closeDetail} wide>
           <DailyReportDetail me={me} store={storeById[detail.storeId]} date={detail.date} onDateChange={() => {}} toast={toast} onBack={closeDetail} onGotoRequests={onGotoRequests} />
         </Modal>
+      )}
+      {wasteModalOpen && (
+        <WasteQuickAddModal me={me} storeOptions={visibleStores}
+          defaultStoreId={storeFilter !== "all" ? storeFilter : visibleStores[0]?.id}
+          defaultDate={todayStr()} allowDateEdit toast={toast}
+          onClose={() => setWasteModalOpen(false)} onCreated={load} />
       )}
     </div>
   );
@@ -3754,6 +3787,490 @@ function MissedPunchFillModal({ me, row, canFill, canApprove, onFill, onReview, 
   );
 }
 
+// ============================================================
+// 報廢紀錄（2026-09-24新增，WASTE_RECORDS_READY=true才會渲染這些元件本身；
+// 渲染條件在各進入點那邊控制，這裡假設一定是true才會被掛載，不用再判斷一次）
+// ============================================================
+
+// 照片縮圖：列表一律用縮圖（createSignedUrl限時連結，不是永久公開網址，沿用
+// ReportSignatureDisplay既有模式），點擊才載入/顯示大圖，避免一次載入大量原圖
+function WastePhotoThumb({ storagePath, size = 44 }) {
+  const [url, setUrl] = useState(null);
+  const [big, setBig] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    sb.storage.from("waste-record-photos").createSignedUrl(storagePath, 3600).then(({ data, error }) => {
+      if (error) { console.error("waste photo signed url", error); return; }
+      if (!cancelled) setUrl(data?.signedUrl || null);
+    });
+    return () => { cancelled = true; };
+  }, [storagePath]);
+  return (
+    <>
+      <button type="button" onClick={(e) => { e.stopPropagation(); setBig(true); }}
+        style={{ width: size, height: size, borderRadius: 6, border: `1px solid ${T.line}`, padding: 0, overflow: "hidden", background: T.subBg, cursor: "pointer", flexShrink: 0 }}>
+        {url ? <img src={url} alt="報廢照片縮圖" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : null}
+      </button>
+      {big && (
+        <div className="ph-modal-backdrop" onMouseDown={() => setBig(false)}>
+          <div onMouseDown={(e) => e.stopPropagation()} style={{ maxWidth: "90vw", maxHeight: "90vh" }}>
+            {url ? <img src={url} alt="報廢照片" style={{ maxWidth: "90vw", maxHeight: "90vh", borderRadius: 8 }} /> : <p style={{ color: "#fff" }}>載入中…</p>}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// 新增報廢：手機優先，拍照→選品項→選數量→選原因→送出。storeOptions有值時
+// 顯示門市下拉（admin/hr從每日回報頁首開啟的情境）；沒有值時固定用
+// defaultStoreId（門市PIN從當頁/kiosk topbar開啟的情境，系統自動記錄門市，
+// 不需要現場人員自己選）。allowDateEdit同理，門市PIN一律固定今天。
+function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, allowDateEdit, toast, onClose, onCreated }) {
+  const [storeId, setStoreId] = useState(defaultStoreId || storeOptions?.[0]?.id || "");
+  const [date, setDate] = useState(defaultDate || todayStr());
+  const [photos, setPhotos] = useState([]); // { file, previewUrl }
+  const [itemName, setItemName] = useState("");
+  const [itemSource, setItemSource] = useState("custom"); // 'suggested' | 'custom'，點了建議清單才變suggested
+  const [suggestions, setSuggestions] = useState([]);
+  const [quantity, setQuantity] = useState(1);
+  const [reasonCode, setReasonCode] = useState("");
+  const [reasonNote, setReasonNote] = useState("");
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!storeId) { setSuggestions([]); return; }
+    const t = setTimeout(() => {
+      sb.rpc("waste_item_suggestions", { p_store_id: storeId, p_query: itemName }).then(({ data, error }) => {
+        if (error) { console.error("waste_item_suggestions", error); return; }
+        setSuggestions(data || []);
+      });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [storeId, itemName]);
+
+  function addFiles(fileList) {
+    const arr = Array.from(fileList || []);
+    const accepted = [];
+    for (const file of arr) {
+      if (file.size > 10485760) { toast(`${file.name} 超過 10MB，請重新拍攝或選擇較小的檔案`); continue; }
+      accepted.push({ file, previewUrl: URL.createObjectURL(file) });
+    }
+    if (accepted.length) setPhotos((prev) => [...prev, ...accepted]);
+  }
+  function removePhoto(idx) { setPhotos((prev) => prev.filter((_, i) => i !== idx)); }
+
+  const reasonNoteRequired = reasonCode === "other";
+  const canSubmit = storeId && date && photos.length > 0 && itemName.trim() && quantity > 0 && reasonCode
+    && (!reasonNoteRequired || reasonNote.trim()) && !submitting;
+
+  async function submit() {
+    if (!canSubmit || submitting) return;
+    setSubmitting(true);
+    try {
+      const id = crypto.randomUUID();
+      const uploaded = [];
+      for (let i = 0; i < photos.length; i++) {
+        const { file } = photos[i];
+        const ext = (file.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+        const path = `${storeId}/${id}/${i + 1}.${ext}`;
+        const { error: upErr } = await sb.storage.from("waste-record-photos").upload(path, file, { contentType: file.type || "image/jpeg" });
+        if (upErr) { toast("照片上傳失敗：" + upErr.message); setSubmitting(false); return; }
+        uploaded.push({ storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "image/jpeg" });
+      }
+      const { data, error } = await sb.rpc("create_waste_record", {
+        p_id: id, p_store_id: storeId, p_report_date: date,
+        p_item_name: itemName.trim(), p_item_source: itemSource,
+        p_quantity: quantity, p_reason_code: reasonCode,
+        p_reason_note: reasonNoteRequired ? reasonNote.trim() : null,
+        p_note: note.trim() || null, p_photos: uploaded,
+      });
+      if (error) { toast("建立失敗：" + error.message); setSubmitting(false); return; }
+      await logAudit(me.name, "create_waste_record", data?.[0]?.record_no || id, `${storeId}:${date}`);
+      toast("報廢紀錄已建立");
+      onCreated?.();
+      onClose();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal title="新增報廢" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {storeOptions ? (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 140 }}>
+              <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>門市</label>
+              <select className="ph-input" value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+                {storeOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+            {allowDateEdit && (
+              <div style={{ flex: 1, minWidth: 140 }}>
+                <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>日期</label>
+                <input className="ph-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>報廢照片（必填，至少1張）</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            {photos.map((p, i) => (
+              <div key={i} style={{ position: "relative", width: 64, height: 64 }}>
+                <img src={p.previewUrl} alt="" style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.line}` }} />
+                <button type="button" onClick={() => removePhoto(i)}
+                  style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", border: "none", background: T.red, color: "#fff", cursor: "pointer", fontSize: 12, lineHeight: "20px", padding: 0 }}>×</button>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <label className="ph-btn small" style={{ cursor: "pointer" }}>
+              拍照
+              <input type="file" accept="image/*" capture="environment" multiple style={{ display: "none" }} onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+            </label>
+            <label className="ph-btn small" style={{ cursor: "pointer" }}>
+              從相簿選擇
+              <input type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+            </label>
+          </div>
+        </div>
+
+        <div style={{ position: "relative" }}>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>報廢品項（必填，可搜尋或直接輸入自訂品項）</label>
+          <input className="ph-input" value={itemName}
+            onChange={(e) => { setItemName(e.target.value); setItemSource("custom"); }}
+            placeholder="輸入品項名稱…" />
+          {itemName && suggestions.length > 0 && (
+            <div className="ph-card" style={{ marginTop: 4, padding: 4, maxHeight: 160, overflowY: "auto" }}>
+              {suggestions.map((s) => (
+                <button key={s.item_name} type="button"
+                  onClick={() => { setItemName(s.item_name); setItemSource("suggested"); setSuggestions([]); }}
+                  style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px", border: "none", background: "none", cursor: "pointer", fontSize: 13, borderRadius: 6 }}
+                  onMouseDown={(e) => e.preventDefault()}>
+                  {s.item_name} <span style={{ color: T.sub, fontSize: 11 }}>（用過 {s.use_count} 次）</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>報廢數量</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button type="button" className="ph-btn small" disabled={quantity <= 1} onClick={() => setQuantity((q) => Math.max(1, q - 1))}>－</button>
+            <span style={{ minWidth: 32, textAlign: "center", fontSize: 16, fontWeight: 600 }}>{quantity}</span>
+            <button type="button" className="ph-btn small" onClick={() => setQuantity((q) => q + 1)}>＋</button>
+          </div>
+        </div>
+
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>報廢原因（必填）</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {WASTE_REASON_ORDER.map((code) => (
+              <button key={code} type="button" className={"ph-btn small" + (reasonCode === code ? " primary" : "")}
+                onClick={() => setReasonCode(code)}>{WASTE_REASON_LABEL[code]}</button>
+            ))}
+          </div>
+          {reasonNoteRequired && (
+            <input className="ph-input" style={{ marginTop: 8 }} value={reasonNote} onChange={(e) => setReasonNote(e.target.value)}
+              placeholder="請說明原因（必填）" />
+          )}
+        </div>
+
+        {noteOpen ? (
+          <div>
+            <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>備註（選填）</label>
+            <textarea className="ph-input" rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="特殊狀況補充…" />
+          </div>
+        ) : (
+          <button type="button" onClick={() => setNoteOpen(true)} style={{ alignSelf: "flex-start", background: "none", border: "none", color: T.sub, fontSize: 12.5, cursor: "pointer", padding: 0, textDecoration: "underline" }}>
+            ＋ 新增備註（選填）
+          </button>
+        )}
+
+        <button className="ph-btn primary" disabled={!canSubmit} onClick={submit}>
+          {submitting ? "送出中…" : "確認送出"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// 報廢紀錄歷史查詢頁：只有canManageWaste()為true的身分才會在DailyReportPage
+// 分頁列看到這個分頁（一般門市人員完全看不到），RPC本身也用can_manage_waste_record
+// 真的擋，不是只有前端不顯示分頁按鈕而已
+function WasteRecordHistoryTab({ me, storeIds, storeById, toast }) {
+  const [dateFrom, setDateFrom] = useState(addDaysStr(todayStr(), -30));
+  const [dateTo, setDateTo] = useState(todayStr());
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [itemFilter, setItemFilter] = useState("");
+  const [reasonFilter, setReasonFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState(["active", "void"]);
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [correctModal, setCorrectModal] = useState(null); // row | null
+  const [voidModal, setVoidModal] = useState(null); // row | null
+
+  const activeStoreIds = storeFilter === "all" ? storeIds : [storeFilter];
+
+  const load = useCallback(async () => {
+    if (!activeStoreIds.length || dateFrom > dateTo) { setRows([]); setTotal(0); setLoading(false); return; }
+    setLoading(true); setLoadError(false);
+    const { data, error } = await sb.rpc("waste_record_list", {
+      p_store_ids: activeStoreIds, p_date_from: dateFrom, p_date_to: dateTo,
+      p_item: itemFilter.trim() || null, p_reason_code: reasonFilter === "all" ? null : reasonFilter,
+      p_status: statusFilter.length ? statusFilter : ["active", "void"],
+      p_limit: 100, p_offset: 0,
+    });
+    if (error) { console.error("waste_record_list", error); setLoadError(true); setLoading(false); return; }
+    setRows(data || []);
+    setTotal(data?.[0]?.total_count || 0);
+    setLoading(false);
+  }, [activeStoreIds.join(","), dateFrom, dateTo, itemFilter, reasonFilter, statusFilter.join(",")]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("waste_record_history_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "waste_records" }, load)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
+
+  function toggleStatus(s) {
+    setStatusFilter((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
+  }
+
+  async function submitCorrect(row, fields) {
+    const { error } = await sb.rpc("correct_waste_record", {
+      p_waste_record_id: row.record_id, p_item_name: fields.itemName, p_item_source: fields.itemSource,
+      p_quantity: fields.quantity, p_reason_code: fields.reasonCode,
+      p_reason_note: fields.reasonCode === "other" ? fields.reasonNote : null, p_note: fields.note || null,
+    });
+    if (error) { toast("更正失敗：" + error.message); return; }
+    await logAudit(me.name, "correct_waste_record", row.record_no);
+    toast("已更正報廢紀錄");
+    setCorrectModal(null);
+    load();
+  }
+  async function submitVoid(row, reason) {
+    const { error } = await sb.rpc("void_waste_record", { p_waste_record_id: row.record_id, p_void_reason: reason });
+    if (error) { toast("作廢失敗：" + error.message); return; }
+    await logAudit(me.name, "void_waste_record", row.record_no, reason);
+    toast("已作廢此紀錄");
+    setVoidModal(null);
+    load();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <input className="ph-input" style={{ width: 150 }} type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+        <span style={{ color: T.sub }}>～</span>
+        <input className="ph-input" style={{ width: 150 }} type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+        <select className="ph-input" style={{ width: 130 }} value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)}>
+          <option value="all">全部門市</option>
+          {storeIds.map((sid) => <option key={sid} value={sid}>{storeById[sid]?.name}</option>)}
+        </select>
+        <input className="ph-input" style={{ width: 140 }} value={itemFilter} onChange={(e) => setItemFilter(e.target.value)} placeholder="品項關鍵字" />
+        <select className="ph-input" style={{ width: 120 }} value={reasonFilter} onChange={(e) => setReasonFilter(e.target.value)}>
+          <option value="all">全部原因</option>
+          {WASTE_REASON_ORDER.map((c) => <option key={c} value={c}>{WASTE_REASON_LABEL[c]}</option>)}
+        </select>
+        {[["active", "有效"], ["void", "已作廢"]].map(([k, label]) => (
+          <label key={k} style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 4 }}>
+            <input type="checkbox" checked={statusFilter.includes(k)} onChange={() => toggleStatus(k)} /> {label}
+          </label>
+        ))}
+      </div>
+      {loadError ? (
+        <div className="ph-card" style={{ padding: 24, textAlign: "center" }}>
+          <p style={{ color: T.red, marginBottom: 10 }}>查詢失敗，請重試。</p>
+          <button className="ph-btn small" onClick={load}>重新查詢</button>
+        </div>
+      ) : loading ? <p style={{ color: T.sub }}>載入中…</p> : rows.length === 0 ? (
+        <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>此範圍沒有符合條件的報廢紀錄</p>
+      ) : (
+        <>
+          <div className="ph-card" style={{ overflowX: "auto" }}>
+            <table className="ph-table">
+              <thead>
+                <tr><th>日期時間</th><th>門市</th><th>品項</th><th>數量</th><th>原因</th><th>照片</th><th>填寫人</th><th>狀態</th><th></th></tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.record_id}>
+                    <td>{fmtTaipei(r.created_at)}</td>
+                    <td>{r.store_name}</td>
+                    <td>{r.item_name}</td>
+                    <td>×{r.quantity}</td>
+                    <td>{WASTE_REASON_LABEL[r.reason_code]}{r.reason_note ? `：${r.reason_note}` : ""}</td>
+                    <td><div style={{ display: "flex", gap: 4 }}>{(r.photos || []).map((p) => <WastePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={32} />)}</div></td>
+                    <td>{r.created_by_name}</td>
+                    <td><Badge tone={r.status === "active" ? "green" : "sub"}>{r.status === "active" ? "有效" : "已作廢"}</Badge></td>
+                    <td>
+                      {r.status === "active" && (
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button className="ph-btn small" onClick={() => setCorrectModal(r)}>更正</button>
+                          <button className="ph-btn small danger" onClick={() => setVoidModal(r)}>作廢</button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p style={{ fontSize: 12, color: T.sub, marginTop: 8 }}>共 {total} 筆</p>
+        </>
+      )}
+      {correctModal && (
+        <WasteCorrectModal row={correctModal} onSubmit={(fields) => submitCorrect(correctModal, fields)} onClose={() => setCorrectModal(null)} />
+      )}
+      {voidModal && (
+        <WasteVoidModal row={voidModal} onSubmit={(reason) => submitVoid(voidModal, reason)} onClose={() => setVoidModal(null)} />
+      )}
+    </div>
+  );
+}
+
+// 更正報廢紀錄：重新走一次品項/數量/原因/備註表單，預填舊值；照片不能在這裡
+// 更換（原始照片必須保存，見規格），提交後保留原始內容在歷程表，不覆蓋
+function WasteCorrectModal({ row, onSubmit, onClose }) {
+  const [itemName, setItemName] = useState(row.item_name);
+  const [itemSource] = useState("custom"); // 更正一律視為自訂輸入，不再查建議清單
+  const [quantity, setQuantity] = useState(row.quantity);
+  const [reasonCode, setReasonCode] = useState(row.reason_code);
+  const [reasonNote, setReasonNote] = useState(row.reason_note || "");
+  const [note, setNote] = useState(row.note || "");
+  const reasonNoteRequired = reasonCode === "other";
+  const canSubmit = itemName.trim() && quantity > 0 && reasonCode && (!reasonNoteRequired || reasonNote.trim());
+  return (
+    <Modal title={`更正報廢紀錄・${row.record_no}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>報廢品項</label>
+          <input className="ph-input" value={itemName} onChange={(e) => setItemName(e.target.value)} />
+        </div>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>報廢數量</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button type="button" className="ph-btn small" disabled={quantity <= 1} onClick={() => setQuantity((q) => Math.max(1, q - 1))}>－</button>
+            <span style={{ minWidth: 32, textAlign: "center", fontSize: 16, fontWeight: 600 }}>{quantity}</span>
+            <button type="button" className="ph-btn small" onClick={() => setQuantity((q) => q + 1)}>＋</button>
+          </div>
+        </div>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>報廢原因</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {WASTE_REASON_ORDER.map((code) => (
+              <button key={code} type="button" className={"ph-btn small" + (reasonCode === code ? " primary" : "")}
+                onClick={() => setReasonCode(code)}>{WASTE_REASON_LABEL[code]}</button>
+            ))}
+          </div>
+          {reasonNoteRequired && (
+            <input className="ph-input" style={{ marginTop: 8 }} value={reasonNote} onChange={(e) => setReasonNote(e.target.value)} placeholder="請說明原因（必填）" />
+          )}
+        </div>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>備註（選填）</label>
+          <textarea className="ph-input" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        </div>
+        <p style={{ color: T.sub, fontSize: 11.5, margin: 0 }}>更正後會保留原始內容於歷程，不會覆蓋消失。</p>
+        <button className="ph-btn primary" disabled={!canSubmit} onClick={() => onSubmit({ itemName: itemName.trim(), itemSource, quantity, reasonCode, reasonNote, note })}>送出更正</button>
+      </div>
+    </Modal>
+  );
+}
+
+// 作廢報廢紀錄：不是刪除，必填作廢原因
+function WasteVoidModal({ row, onSubmit, onClose }) {
+  const [reason, setReason] = useState("");
+  return (
+    <Modal title={`作廢報廢紀錄・${row.record_no}`} onClose={onClose}>
+      <p style={{ fontSize: 12.5, color: T.sub }}>作廢後這筆紀錄仍會保留在系統中並標示「已作廢」，不會被刪除。</p>
+      <label style={{ display: "block", fontSize: 12, color: T.sub, margin: "10px 0 4px" }}>作廢原因（必填）</label>
+      <textarea className="ph-input" rows={2} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="請說明作廢原因…" />
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+        <button className="ph-btn danger" disabled={!reason.trim()} onClick={() => onSubmit(reason.trim())}>確認作廢</button>
+      </div>
+    </Modal>
+  );
+}
+
+// 「今日報廢」單筆列：預設精簡顯示（時間／品項×數量／原因／照片縮圖），點擊
+// 展開完整資訊（備註/填寫人/編號/狀態），canManage為true時展開後多顯示
+// 更正/作廢按鈕——沿用WasteCorrectModal/WasteVoidModal（兩者只吃item_name等
+// 欄位跟record_no，這裡的row就是waste_records原始欄位，形狀相容，不用另外轉換）
+function TodayWasteRow({ row, canManage, onChanged, toast, me }) {
+  const [expanded, setExpanded] = useState(false);
+  const [correctOpen, setCorrectOpen] = useState(false);
+  const [voidOpen, setVoidOpen] = useState(false);
+  const photos = row.waste_record_photos || [];
+
+  async function submitCorrect(fields) {
+    const { error } = await sb.rpc("correct_waste_record", {
+      p_waste_record_id: row.id, p_item_name: fields.itemName, p_item_source: fields.itemSource,
+      p_quantity: fields.quantity, p_reason_code: fields.reasonCode,
+      p_reason_note: fields.reasonCode === "other" ? fields.reasonNote : null, p_note: fields.note || null,
+    });
+    if (error) { toast("更正失敗：" + error.message); return; }
+    await logAudit(me.name, "correct_waste_record", row.record_no);
+    toast("已更正報廢紀錄");
+    setCorrectOpen(false);
+    onChanged();
+  }
+  async function submitVoid(reason) {
+    const { error } = await sb.rpc("void_waste_record", { p_waste_record_id: row.id, p_void_reason: reason });
+    if (error) { toast("作廢失敗：" + error.message); return; }
+    await logAudit(me.name, "void_waste_record", row.record_no, reason);
+    toast("已作廢此紀錄");
+    setVoidOpen(false);
+    onChanged();
+  }
+
+  return (
+    <div style={{ borderBottom: `1px solid ${T.line}`, padding: "8px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => setExpanded((v) => !v)}>
+        <span style={{ fontSize: 12, color: T.sub, minWidth: 42 }}>{fmtTaipei(row.created_at).slice(-5)}</span>
+        <span style={{ fontSize: 13, fontWeight: 500 }}>{row.item_name} ×{row.quantity}</span>
+        <span style={{ fontSize: 12, color: T.sub }}>{WASTE_REASON_LABEL[row.reason_code]}</span>
+        {row.status === "void" && <Badge tone="sub">已作廢</Badge>}
+        <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
+          {photos.slice(0, 3).map((p) => <WastePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={28} />)}
+        </div>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 8, marginLeft: 52, fontSize: 12.5, color: T.sub }}>
+          <p style={{ margin: "2px 0" }}>報廢編號：{row.record_no}</p>
+          {row.reason_note && <p style={{ margin: "2px 0" }}>原因說明：{row.reason_note}</p>}
+          {row.note && <p style={{ margin: "2px 0" }}>備註：{row.note}</p>}
+          <p style={{ margin: "2px 0" }}>填寫人：{row.created_by_name}</p>
+          {row.updated_at && <p style={{ margin: "2px 0" }}>最後更正：{row.updated_by_name}・{fmtTaipei(row.updated_at)}</p>}
+          {row.status === "void" && <p style={{ margin: "2px 0", color: T.red }}>作廢原因：{row.void_reason}（{row.voided_by_name}・{fmtTaipei(row.voided_at)}）</p>}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+            {photos.map((p) => <WastePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={44} />)}
+          </div>
+          {canManage && row.status === "active" && (
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              <button className="ph-btn small" onClick={(e) => { e.stopPropagation(); setCorrectOpen(true); }}>更正</button>
+              <button className="ph-btn small danger" onClick={(e) => { e.stopPropagation(); setVoidOpen(true); }}>作廢</button>
+            </div>
+          )}
+        </div>
+      )}
+      {correctOpen && <WasteCorrectModal row={row} onSubmit={submitCorrect} onClose={() => setCorrectOpen(false)} />}
+      {voidOpen && <WasteVoidModal row={row} onSubmit={submitVoid} onClose={() => setVoidOpen(false)} />}
+    </div>
+  );
+}
+
 function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kioskMode, onGotoRequests }) {
   const storeId = store?.id;
   const [roster, setRoster] = useState([]);
@@ -3802,6 +4319,28 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   const pendingMissedPunchEmployeeIds = useMemo(() =>
     new Set(missedPunchEvents.filter((ev) => !ev.is_effective && (ev.status === "pending_confirm" || ev.status === "pending_review")).map((ev) => ev.employee_id)),
   [missedPunchEvents]);
+  // 今日報廢（2026-09-24新增，WASTE_RECORDS_READY=false時不查詢，避免打到
+  // 還不存在的表）：報廢是「發生當下」建立，這裡只唯讀顯示，晚班填每日回報
+  // 不需要重新輸入——查詢直接用store_id+report_date，不透過daily_report_id，
+  // 這樣即使report列還沒建立（尚無人送出過這天的回報）也能正確顯示0筆
+  const [wasteRecords, setWasteRecords] = useState([]);
+  const [wasteModalOpen, setWasteModalOpen] = useState(false);
+  const loadWasteRecords = useCallback(async () => {
+    if (!WASTE_RECORDS_READY || !store?.id) { setWasteRecords([]); return; }
+    const { data, error } = await sb.from("waste_records")
+      .select("*, waste_record_photos(*)").eq("store_id", store.id).eq("report_date", date)
+      .order("created_at", { ascending: false });
+    if (error) { console.error("waste_records load", error); return; }
+    setWasteRecords(data || []);
+  }, [store?.id, date]);
+  useEffect(() => { loadWasteRecords(); }, [loadWasteRecords]);
+  useEffect(() => {
+    if (!WASTE_RECORDS_READY) return;
+    const ch = sb.channel("waste_records_today_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "waste_records" }, loadWasteRecords)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [loadWasteRecords]);
   const opsApplicable = date >= OPS_LAUNCH_DATE;
   const opsHoursResult = useMemo(() => computeOpsHours(roster, dayShifts, entries, date, pendingMissedPunchEmployeeIds), [roster, dayShifts, entries, date, pendingMissedPunchEmployeeIds]);
   const liveOpsHours = opsHoursResult.total;
@@ -4625,6 +5164,28 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
         </div>
       )}
 
+      {WASTE_RECORDS_READY && !loading && (
+        <div className="ph-card-strong" style={{ padding: 16, marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <strong style={{ fontSize: 13 }}>今日報廢　{wasteRecords.length} 筆</strong>
+            <button className="ph-btn small primary" onClick={() => setWasteModalOpen(true)}>＋ 新增報廢</button>
+          </div>
+          {wasteRecords.length === 0 ? (
+            <p style={{ color: T.sub, fontSize: 12.5, margin: "8px 0 0" }}>今天還沒有報廢紀錄。</p>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {wasteRecords.map((r) => (
+                <TodayWasteRow key={r.id} row={r} canManage={canManageWaste(me)} onChanged={loadWasteRecords} toast={toast} me={me} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {wasteModalOpen && (
+        <WasteQuickAddModal me={me} storeOptions={null} defaultStoreId={store?.id} defaultDate={date} allowDateEdit={false}
+          toast={toast} onClose={() => setWasteModalOpen(false)} onCreated={loadWasteRecords} />
+      )}
+
       {!loading && overtimePendingRows.length > 0 && (
         <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, background: T.brownSoft, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
           <p style={{ margin: 0, fontSize: 13, color: T.brown, fontWeight: 600 }}>
@@ -5384,6 +5945,7 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
   const [tab, setTab] = useState("daily_report"); // 'daily_report' | 'self_schedule' | 'schedule_view' | 'requests_review'
   const [systemHubOpen, setSystemHubOpen] = useState(false); // 跟一般管理介面共用同一份EXTERNAL_SYSTEMS設定與SystemHubCards元件，Modal顯示不切換tab，不會弄丟填寫到一半的內容
   const showSystemHub = visibleExternalSystems(me).length > 0; // 共用PIN帳號目前只會通過coffee_ops門市端那一條，實際只會顯示「咖啡豆盤點」卡片
+  const [wasteModalOpen, setWasteModalOpen] = useState(false); // 門市工作首頁快捷入口，固定今天＋自己門市，不需要離開目前在看的分頁
   const KIOSK_TABS = [
     ["schedule_view", isManager ? "門市排班" : "查看本店班表"],
     ["daily_report", "每日回報"],
@@ -5400,6 +5962,9 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
           </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
             <span className="ph-pill">{isManager ? "店長 PIN 模式" : "門市 PIN 模式"}</span>
+            {WASTE_RECORDS_READY && (
+              <button className="ph-btn small primary" onClick={() => setWasteModalOpen(true)}>＋ 新增報廢</button>
+            )}
             {showSystemHub && (
               <button className="ph-btn small" onClick={() => setSystemHubOpen(true)}>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="hub" size={14} />系統中心</span>
@@ -5412,6 +5977,10 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
           <Modal title="系統中心" onClose={() => setSystemHubOpen(false)} wide>
             <SystemHubCards me={me} />
           </Modal>
+        )}
+        {wasteModalOpen && (
+          <WasteQuickAddModal me={me} storeOptions={null} defaultStoreId={store?.id} defaultDate={todayStr()} allowDateEdit={false}
+            toast={toast} onClose={() => setWasteModalOpen(false)} onCreated={() => {}} />
         )}
         <main className="ph-main-pad" style={{ flex: 1, padding: "24px 40px", minWidth: 0 }}>
           <div style={{ maxWidth: 1460, margin: "0 auto" }}>
