@@ -3866,20 +3866,33 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
   const canSubmit = storeId && date && photos.length > 0 && itemName.trim() && quantity > 0 && reasonCode
     && (!reasonNoteRequired || reasonNote.trim()) && !submitting;
 
+  // 2026-09-24除錯修正：原本這裡沒有catch，Storage/RPC呼叫本身若直接拋出例外
+  // （不是乾淨回傳{error}，例如網路中斷）會變成無人攔截的unhandled rejection，
+  // 使用者只會看到按鈕默默恢復、沒有任何訊息，實測已發生過（照片成功上傳
+  // 但create_waste_record從未真的建立資料，4次嘗試皆如此，肇因目前仍不明——
+  // 這次修正的目的就是讓下一次失敗時能看到真正的錯誤內容，不是要解決根因）。
+  // stage變數標記送出流程目前走到哪一步，連同Supabase錯誤原始結構（code/
+  // details/hint/status）一起印在console給開發除錯用，畫面上只顯示不含技術
+  // 細節的簡短訊息——沿用既有submitReport()等處「技術錯誤只進console，使用者
+  // 只看簡短訊息」的既有慣例。失敗時刻意不清空任何欄位、不關閉視窗，讓使用者
+  // 可以直接重試，不用重新填一次
   async function submit() {
     if (!canSubmit || submitting) return;
     setSubmitting(true);
+    const id = crypto.randomUUID();
+    let stage = "photo_upload";
     try {
-      const id = crypto.randomUUID();
       const uploaded = [];
       for (let i = 0; i < photos.length; i++) {
         const { file } = photos[i];
         const ext = (file.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
         const path = `${storeId}/${id}/${i + 1}.${ext}`;
         const { error: upErr } = await sb.storage.from("waste-record-photos").upload(path, file, { contentType: file.type || "image/jpeg" });
-        if (upErr) { toast("照片上傳失敗：" + upErr.message); setSubmitting(false); return; }
+        if (upErr) throw Object.assign(new Error(upErr.message || "照片上傳失敗"), { stage: "photo_upload", supabaseError: upErr });
         uploaded.push({ storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "image/jpeg" });
       }
+
+      stage = "create_waste_record";
       const { data, error } = await sb.rpc("create_waste_record", {
         p_id: id, p_store_id: storeId, p_report_date: date,
         p_item_name: itemName.trim(), p_item_source: itemSource,
@@ -3887,11 +3900,32 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
         p_reason_note: reasonNoteRequired ? reasonNote.trim() : null,
         p_note: note.trim() || null, p_photos: uploaded,
       });
-      if (error) { toast("建立失敗：" + error.message); setSubmitting(false); return; }
+      if (error) throw Object.assign(new Error(error.message || "報廢紀錄建立失敗"), { stage: "create_waste_record", supabaseError: error });
+
+      stage = "audit_log";
       await logAudit(me.name, "create_waste_record", data?.[0]?.record_no || id, `${storeId}:${date}`);
+
       toast("報廢紀錄已建立");
       onCreated?.();
       onClose();
+    } catch (err) {
+      const se = err?.supabaseError;
+      const failedStage = err?.stage || stage;
+      // 開發除錯用：完整原始錯誤結構，不只err.message
+      console.error("[報廢送出失敗]", {
+        stage: failedStage,
+        waste_id: id,
+        message: err?.message,
+        code: se?.code, details: se?.details, hint: se?.hint,
+        status: se?.status ?? se?.statusCode ?? null,
+        raw: se || err,
+      });
+      // 門市人員看到的訊息：不顯示Supabase原始技術錯誤；照片可能已經上傳成功，
+      // 但這次先不告知「照片已上傳」細節（避免使用者誤以為紀錄已建立一半、
+      // 自行處理孤兒檔案），統一顯示「尚未完成」，請使用者直接重試
+      toast(failedStage === "photo_upload" ? "照片上傳失敗，報廢紀錄尚未建立，請稍後再試。" : "報廢紀錄送出失敗，尚未完成建立，請稍後再試。");
+      // 不關閉視窗、不清空欄位（photos/itemName/quantity/reasonCode/note等
+      // state原封不動），讓使用者可以直接按「確認送出」重試
     } finally {
       setSubmitting(false);
     }
