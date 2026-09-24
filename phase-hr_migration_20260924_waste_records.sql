@@ -203,8 +203,13 @@ begin
   end if;
 
   v_actor := current_employee_id();
-  select name into v_actor_name from employees where id = v_actor;
-  select code into v_store_code from stores where id = p_store_id;
+  -- 2026-09-24修正：這支函式宣告returns table(id uuid, ...)，PL/pgSQL會把
+  -- 「id」變成函式內的隱含變數，下面兩行原本沒有指名是哪張表的id，導致
+  -- Postgres報錯"column reference id is ambiguous"、實測100%必然失敗——
+  -- 用交易包起來rollback實際跑過一次真實參數才抓到，不是猜測。改成明確
+  -- 指名employees.id／stores.id即可解決，其餘邏輯不變
+  select name into v_actor_name from employees where employees.id = v_actor;
+  select code into v_store_code from stores where stores.id = p_store_id;
 
   -- get-or-create 當日 daily_reports 列（複製 submit_daily_report_entries 的既有慣例）
   select * into v_report from daily_reports where store_id = p_store_id and report_date = p_report_date;
