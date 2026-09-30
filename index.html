@@ -3848,9 +3848,18 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
 
   useEffect(() => {
     if (!storeId) { setRoster([]); setFilledBy(""); return; }
-    sb.from("employees").select("id,name").eq("store_id", storeId).eq("active", true)
-      .eq("is_shared_pin_account", false).eq("is_non_employee_account", false).order("name")
-      .then(({ data }) => setRoster(data || []));
+    // 2026-09-30修正：原本直接查employees表，但這張表的RLS只放行「自己那筆」
+    // 或有人資/薪資檢視權限的人看全部（見phase-hr_fix_20260810_rbac_fix2.sql
+    // 的employees read政策），一般門市PIN看不到同店其他同事，名冊等於是空的。
+    // 改用既有的store_roster()——這支RPC本來就是為了「排班表下拉選單／同事
+    // 清單」設計的，SECURITY DEFINER繞過這層RLS，且已經內建排除共用PIN帳號／
+    // 非員工帳號，任何已登入身分都能呼叫（含一般門市PIN）。它不會過濾active，
+    // 用回傳的欄位自己篩一次只留在職的
+    sb.rpc("store_roster", { p_store_id: storeId })
+      .then(({ data, error }) => {
+        if (error) { console.error("store_roster", error); setRoster([]); return; }
+        setRoster((data || []).filter((r) => r.active));
+      });
   }, [storeId]);
 
   useEffect(() => {
