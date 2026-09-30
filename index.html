@@ -4280,13 +4280,13 @@ function TodayWasteRow({ row, storeName, canManage, onChanged, toast, me }) {
           {photos.slice(0, 3).map((p) => <WastePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={28} />)}
         </div>
       </div>
+      <div style={{ marginLeft: 52, fontSize: 11, color: T.sub, marginTop: 2 }}>填寫人：{row.created_by_name}</div>
       {expanded && (
         <div style={{ marginTop: 8, marginLeft: 52, fontSize: 12.5, color: T.sub }}>
           <p style={{ margin: "2px 0" }}>報廢編號：{row.record_no}</p>
           <p style={{ margin: "2px 0" }}>門市：{storeName || "—"}　報廢日期：{row.report_date}</p>
           {row.reason_note && <p style={{ margin: "2px 0" }}>原因說明：{row.reason_note}</p>}
           {row.note && <p style={{ margin: "2px 0" }}>備註：{row.note}</p>}
-          <p style={{ margin: "2px 0" }}>填寫人：{row.created_by_name}</p>
           {row.updated_at && <p style={{ margin: "2px 0" }}>最後更正：{row.updated_by_name}・{fmtTaipei(row.updated_at)}</p>}
           {row.status === "void" && <p style={{ margin: "2px 0", color: T.red }}>作廢原因：{row.void_reason}（{row.voided_by_name}・{fmtTaipei(row.voided_at)}）</p>}
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
