@@ -3839,28 +3839,11 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  // 2026-09-30使用者要求：填寫人另外登記，不能只看到共用PIN帳號——從門市
-  // 名冊下拉選單選（比照既有漏打卡「資訊提供者」的做法，不開放自由輸入文字，
-  // 避免打字不一致難以篩選/統計），必填。刻意排除is_shared_pin_account，
-  // 這裡要選的是真正的個人，不能選到PIN帳號本身
-  const [filledBy, setFilledBy] = useState("");
-  const [roster, setRoster] = useState([]);
-
-  useEffect(() => {
-    if (!storeId) { setRoster([]); setFilledBy(""); return; }
-    // 2026-09-30修正：原本直接查employees表，但這張表的RLS只放行「自己那筆」
-    // 或有人資/薪資檢視權限的人看全部（見phase-hr_fix_20260810_rbac_fix2.sql
-    // 的employees read政策），一般門市PIN看不到同店其他同事，名冊等於是空的。
-    // 改用既有的store_roster()——這支RPC本來就是為了「排班表下拉選單／同事
-    // 清單」設計的，SECURITY DEFINER繞過這層RLS，且已經內建排除共用PIN帳號／
-    // 非員工帳號，任何已登入身分都能呼叫（含一般門市PIN）。它不會過濾active，
-    // 用回傳的欄位自己篩一次只留在職的
-    sb.rpc("store_roster", { p_store_id: storeId })
-      .then(({ data, error }) => {
-        if (error) { console.error("store_roster", error); setRoster([]); return; }
-        setRoster((data || []).filter((r) => r.active));
-      });
-  }, [storeId]);
+  // 2026-09-30使用者要求：填寫人另外登記，不能只看到共用PIN帳號。原本規劃
+  // 從門市名冊下拉選單選，但使用者指出有跨店支援的情況——store_roster()只會
+  // 列出「常駐該門市」的員工，支援人員在支援當下選不到自己，改成自由輸入
+  // 文字解決這個邊界情況，不限定格式（可能是姓名也可能是工號），必填
+  const [filledByName, setFilledByName] = useState("");
 
   useEffect(() => {
     if (!storeId) { setSuggestions([]); return; }
@@ -3886,7 +3869,7 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
 
   const reasonNoteRequired = reasonCode === "other";
   const canSubmit = storeId && date && photos.length > 0 && itemName.trim() && quantity > 0 && reasonCode
-    && (!reasonNoteRequired || reasonNote.trim()) && filledBy && !submitting;
+    && (!reasonNoteRequired || reasonNote.trim()) && filledByName.trim() && !submitting;
 
   // 2026-09-24除錯修正：原本這裡沒有catch，Storage/RPC呼叫本身若直接拋出例外
   // （不是乾淨回傳{error}，例如網路中斷）會變成無人攔截的unhandled rejection，
@@ -3920,7 +3903,7 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
         p_item_name: itemName.trim(), p_item_source: itemSource,
         p_quantity: quantity, p_reason_code: reasonCode,
         p_reason_note: reasonNoteRequired ? reasonNote.trim() : null,
-        p_note: note.trim() || null, p_filled_by: filledBy, p_photos: uploaded,
+        p_note: note.trim() || null, p_filled_by_name: filledByName.trim(), p_photos: uploaded,
       });
       if (error) throw Object.assign(new Error(error.message || "報廢紀錄建立失敗"), { stage: "create_waste_record", supabaseError: error });
 
@@ -4039,11 +4022,8 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
         </div>
 
         <div>
-          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>填寫人（必填，從門市名冊選擇）</label>
-          <select className="ph-input" value={filledBy} onChange={(e) => setFilledBy(e.target.value)}>
-            <option value="">請選擇填寫人</option>
-            {roster.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-          </select>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>填寫人（必填）</label>
+          <input className="ph-input" value={filledByName} onChange={(e) => setFilledByName(e.target.value)} placeholder="輸入姓名…" />
         </div>
 
         {noteOpen ? (
