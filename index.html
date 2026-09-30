@@ -4242,7 +4242,7 @@ function WasteVoidModal({ row, onSubmit, onClose }) {
 // 展開完整資訊（備註/填寫人/編號/狀態），canManage為true時展開後多顯示
 // 更正/作廢按鈕——沿用WasteCorrectModal/WasteVoidModal（兩者只吃item_name等
 // 欄位跟record_no，這裡的row就是waste_records原始欄位，形狀相容，不用另外轉換）
-function TodayWasteRow({ row, canManage, onChanged, toast, me }) {
+function TodayWasteRow({ row, storeName, canManage, onChanged, toast, me }) {
   const [expanded, setExpanded] = useState(false);
   const [correctOpen, setCorrectOpen] = useState(false);
   const [voidOpen, setVoidOpen] = useState(false);
@@ -4283,6 +4283,7 @@ function TodayWasteRow({ row, canManage, onChanged, toast, me }) {
       {expanded && (
         <div style={{ marginTop: 8, marginLeft: 52, fontSize: 12.5, color: T.sub }}>
           <p style={{ margin: "2px 0" }}>報廢編號：{row.record_no}</p>
+          <p style={{ margin: "2px 0" }}>門市：{storeName || "—"}　報廢日期：{row.report_date}</p>
           {row.reason_note && <p style={{ margin: "2px 0" }}>原因說明：{row.reason_note}</p>}
           {row.note && <p style={{ margin: "2px 0" }}>備註：{row.note}</p>}
           <p style={{ margin: "2px 0" }}>填寫人：{row.created_by_name}</p>
@@ -4359,10 +4360,13 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
   // 這樣即使report列還沒建立（尚無人送出過這天的回報）也能正確顯示0筆
   const [wasteRecords, setWasteRecords] = useState([]);
   const [wasteModalOpen, setWasteModalOpen] = useState(false);
+  // 2026-09-24修正：原本沒有篩selectstatus，作廢的紀錄會混進「今日報廢」筆數
+  // 跟列表——已作廢的紀錄不列入這裡（有需要查看的話從報廢歷史頁看，那邊本來
+  // 就不限狀態），只留 status='active'，這樣0筆才真的代表「沒有有效紀錄」
   const loadWasteRecords = useCallback(async () => {
     if (!WASTE_RECORDS_READY || !store?.id) { setWasteRecords([]); return; }
     const { data, error } = await sb.from("waste_records")
-      .select("*, waste_record_photos(*)").eq("store_id", store.id).eq("report_date", date)
+      .select("*, waste_record_photos(*)").eq("store_id", store.id).eq("report_date", date).eq("status", "active")
       .order("created_at", { ascending: false });
     if (error) { console.error("waste_records load", error); return; }
     setWasteRecords(data || []);
@@ -5209,7 +5213,7 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           ) : (
             <div style={{ marginTop: 8 }}>
               {wasteRecords.map((r) => (
-                <TodayWasteRow key={r.id} row={r} canManage={canManageWaste(me)} onChanged={loadWasteRecords} toast={toast} me={me} />
+                <TodayWasteRow key={r.id} row={r} storeName={store?.name} canManage={canManageWaste(me)} onChanged={loadWasteRecords} toast={toast} me={me} />
               ))}
             </div>
           )}
