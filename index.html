@@ -3839,6 +3839,19 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // 2026-09-30使用者要求：填寫人另外登記，不能只看到共用PIN帳號——從門市
+  // 名冊下拉選單選（比照既有漏打卡「資訊提供者」的做法，不開放自由輸入文字，
+  // 避免打字不一致難以篩選/統計），必填。刻意排除is_shared_pin_account，
+  // 這裡要選的是真正的個人，不能選到PIN帳號本身
+  const [filledBy, setFilledBy] = useState("");
+  const [roster, setRoster] = useState([]);
+
+  useEffect(() => {
+    if (!storeId) { setRoster([]); setFilledBy(""); return; }
+    sb.from("employees").select("id,name").eq("store_id", storeId).eq("active", true)
+      .eq("is_shared_pin_account", false).eq("is_non_employee_account", false).order("name")
+      .then(({ data }) => setRoster(data || []));
+  }, [storeId]);
 
   useEffect(() => {
     if (!storeId) { setSuggestions([]); return; }
@@ -3864,7 +3877,7 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
 
   const reasonNoteRequired = reasonCode === "other";
   const canSubmit = storeId && date && photos.length > 0 && itemName.trim() && quantity > 0 && reasonCode
-    && (!reasonNoteRequired || reasonNote.trim()) && !submitting;
+    && (!reasonNoteRequired || reasonNote.trim()) && filledBy && !submitting;
 
   // 2026-09-24除錯修正：原本這裡沒有catch，Storage/RPC呼叫本身若直接拋出例外
   // （不是乾淨回傳{error}，例如網路中斷）會變成無人攔截的unhandled rejection，
@@ -3898,7 +3911,7 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
         p_item_name: itemName.trim(), p_item_source: itemSource,
         p_quantity: quantity, p_reason_code: reasonCode,
         p_reason_note: reasonNoteRequired ? reasonNote.trim() : null,
-        p_note: note.trim() || null, p_photos: uploaded,
+        p_note: note.trim() || null, p_filled_by: filledBy, p_photos: uploaded,
       });
       if (error) throw Object.assign(new Error(error.message || "報廢紀錄建立失敗"), { stage: "create_waste_record", supabaseError: error });
 
@@ -4014,6 +4027,14 @@ function WasteQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, all
             <input className="ph-input" style={{ marginTop: 8 }} value={reasonNote} onChange={(e) => setReasonNote(e.target.value)}
               placeholder="請說明原因（必填）" />
           )}
+        </div>
+
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>填寫人（必填，從門市名冊選擇）</label>
+          <select className="ph-input" value={filledBy} onChange={(e) => setFilledBy(e.target.value)}>
+            <option value="">請選擇填寫人</option>
+            {roster.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
         </div>
 
         {noteOpen ? (
@@ -4146,7 +4167,7 @@ function WasteRecordHistoryTab({ me, storeIds, storeById, toast }) {
                     <td>×{r.quantity}</td>
                     <td>{WASTE_REASON_LABEL[r.reason_code]}{r.reason_note ? `：${r.reason_note}` : ""}</td>
                     <td><div style={{ display: "flex", gap: 4 }}>{(r.photos || []).map((p) => <WastePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={32} />)}</div></td>
-                    <td>{r.created_by_name}</td>
+                    <td>{r.filled_by_name}</td>
                     <td><Badge tone={r.status === "active" ? "green" : "sub"}>{r.status === "active" ? "有效" : "已作廢"}</Badge></td>
                     <td>
                       {r.status === "active" && (
@@ -4280,7 +4301,7 @@ function TodayWasteRow({ row, storeName, canManage, onChanged, toast, me }) {
           {photos.slice(0, 3).map((p) => <WastePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={28} />)}
         </div>
       </div>
-      <div style={{ marginLeft: 52, fontSize: 11, color: T.sub, marginTop: 2 }}>填寫人：{row.created_by_name}</div>
+      <div style={{ marginLeft: 52, fontSize: 11, color: T.sub, marginTop: 2 }}>填寫人：{row.filled_by_name}</div>
       {expanded && (
         <div style={{ marginTop: 8, marginLeft: 52, fontSize: 12.5, color: T.sub }}>
           <p style={{ margin: "2px 0" }}>報廢編號：{row.record_no}</p>
