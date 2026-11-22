@@ -383,6 +383,23 @@ function canManageWaste(me) {
   return me.access_tier === "super_admin" || me.permissions?.daily_report === "all"
     || (me.is_shared_pin_account && me.access_tier === "dept_manager");
 }
+// 2026-11-22 器具破損紀錄：全新功能，完全比照報廢紀錄架構，見
+// phase-hr_migration_20261122_equipment_damage.sql。跟報廢紀錄的差異：破損
+// 類型用固定7選項（不是自由輸入品項）、沒有數量欄位、填寫人從一開始就是
+// 自由文字filled_by_name。
+const EQUIPMENT_DAMAGE_READY = true;
+const DAMAGE_TYPE_ORDER = ["unusable", "drop_impact", "power_wire", "scratch_crack", "part_missing", "wear_aging", "other"];
+const DAMAGE_TYPE_LABEL = {
+  unusable: "故障無法使用", drop_impact: "摔落碰撞損壞", power_wire: "電源電線問題",
+  scratch_crack: "外觀刮傷裂痕（仍可使用）", part_missing: "零件缺損", wear_aging: "老化耗損", other: "其他",
+};
+// 是否能更正/作廢器具破損紀錄、看破損歷史頁——比照後端
+// can_manage_equipment_damage()的判斷邏輯，前端只決定要不要顯示對應按鈕/
+// 分頁，真正的權限檢查在RPC那邊
+function canManageEquipmentDamage(me) {
+  return me.access_tier === "super_admin" || me.permissions?.daily_report === "all"
+    || (me.is_shared_pin_account && me.access_tier === "dept_manager");
+}
 // 2026-09-21 每月營業報表簡化：咖啡豆／其他商品原本是兩個獨立欄位，簡化成一個
 // 「咖啡豆／商品營業額」欄位。不新增資料庫欄位（不新增重複來源）——合併後的
 // 單一欄位繼續寫入既有的 ops_bean_revenue 欄位，ops_goods_revenue 這天之後
@@ -2926,6 +2943,7 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
   const [loadError, setLoadError] = useState(false);
   const [detail, setDetail] = useState(null); // { storeId, date }
   const [wasteModalOpen, setWasteModalOpen] = useState(false);
+  const [equipmentDamageModalOpen, setEquipmentDamageModalOpen] = useState(false);
 
   const storeById = useMemo(() => Object.fromEntries(stores.map((s) => [s.id, s])), [stores]);
   const visibleStores = stores.filter((s) => scopeStoreIds.includes(s.id));
@@ -3031,9 +3049,14 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
           <h2 className="ph-serif" style={{ margin: "2px 0 4px" }}>每日回報</h2>
           <p style={{ color: T.sub, fontSize: 12.5, margin: 0 }}>跨日期檢視繳交狀況、異常結案進度與營運數據；門市可用 PIN 現場填報，管理者也可點擊下方儲存格直接補填或更正歷史回報，不需要切換門市 PIN。</p>
         </div>
-        {WASTE_RECORDS_READY && (
-          <button className="ph-btn primary" onClick={() => setWasteModalOpen(true)}>＋ 新增報廢</button>
-        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          {WASTE_RECORDS_READY && (
+            <button className="ph-btn primary" onClick={() => setWasteModalOpen(true)}>＋ 新增報廢</button>
+          )}
+          {EQUIPMENT_DAMAGE_READY && (
+            <button className="ph-btn primary" onClick={() => setEquipmentDamageModalOpen(true)}>＋ 新增器具破損</button>
+          )}
+        </div>
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
         <div className="ph-seg" role="group" aria-label="日期範圍">
@@ -3082,6 +3105,9 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
             {WASTE_RECORDS_READY && canManageWaste(me) && (
               <button className={"ph-btn small" + (tab === "waste" ? " primary" : "")} onClick={() => setTab("waste")}>報廢紀錄</button>
             )}
+            {EQUIPMENT_DAMAGE_READY && canManageEquipmentDamage(me) && (
+              <button className={"ph-btn small" + (tab === "equipment_damage" ? " primary" : "")} onClick={() => setTab("equipment_damage")}>器具破損紀錄</button>
+            )}
             {canApprove && (
               <button className={"ph-btn small" + (tab === "review" ? " primary" : "")} onClick={() => setTab("review")}>
                 人資審核佇列{reviewQueue.filter((r) => r.hr_review_status === "pending").length > 0 ? `（${new Set(reviewQueue.filter((r) => r.hr_review_status === "pending").map((r) => r.report_id)).size}）` : ""}
@@ -3103,6 +3129,8 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
             <DailyReportMissedPunchTab me={me} storeIds={filterStoreIds} storeById={storeById} from={from} to={to} toast={toast} />
           ) : tab === "waste" ? (
             <WasteRecordHistoryTab me={me} storeIds={scopeStoreIds} storeById={storeById} toast={toast} />
+          ) : tab === "equipment_damage" ? (
+            <EquipmentDamageHistoryTab me={me} storeIds={scopeStoreIds} storeById={storeById} toast={toast} />
           ) : (
             <DailyReportAnomalyTab me={me} storeIds={filterStoreIds} storeById={storeById} from={from} to={to} toast={toast}
               onOpenDetail={(storeId, date) => setDetail({ storeId, date })} />
@@ -3119,6 +3147,12 @@ function DailyReportPage({ me, stores, scopeStoreIds, toast, onGotoRequests }) {
           defaultStoreId={storeFilter !== "all" ? storeFilter : visibleStores[0]?.id}
           defaultDate={todayStr()} allowDateEdit toast={toast}
           onClose={() => setWasteModalOpen(false)} onCreated={load} />
+      )}
+      {equipmentDamageModalOpen && (
+        <EquipmentDamageQuickAddModal me={me} storeOptions={visibleStores}
+          defaultStoreId={storeFilter !== "all" ? storeFilter : visibleStores[0]?.id}
+          defaultDate={todayStr()} allowDateEdit toast={toast}
+          onClose={() => setEquipmentDamageModalOpen(false)} onCreated={load} />
       )}
     </div>
   );
@@ -4316,6 +4350,499 @@ function TodayWasteRow({ row, storeName, canManage, onChanged, toast, me }) {
   );
 }
 
+// ============================================================
+// 器具破損紀錄（2026-11-22新增，完全比照上面報廢紀錄的架構，
+// EQUIPMENT_DAMAGE_READY=true才會渲染這些元件本身）。跟報廢紀錄的差異：
+// 沒有數量欄位、破損類型用固定7選項DAMAGE_TYPE_ORDER/LABEL。
+// ============================================================
+
+function EquipmentDamagePhotoThumb({ storagePath, size = 44 }) {
+  const [url, setUrl] = useState(null);
+  const [big, setBig] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    sb.storage.from("equipment-damage-photos").createSignedUrl(storagePath, 3600).then(({ data, error }) => {
+      if (error) { console.error("equipment damage photo signed url", error); return; }
+      if (!cancelled) setUrl(data?.signedUrl || null);
+    });
+    return () => { cancelled = true; };
+  }, [storagePath]);
+  return (
+    <>
+      <button type="button" onClick={(e) => { e.stopPropagation(); setBig(true); }}
+        style={{ width: size, height: size, borderRadius: 6, border: `1px solid ${T.line}`, padding: 0, overflow: "hidden", background: T.subBg, cursor: "pointer", flexShrink: 0 }}>
+        {url ? <img src={url} alt="破損照片縮圖" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : null}
+      </button>
+      {big && (
+        <div className="ph-modal-backdrop" onMouseDown={() => setBig(false)}>
+          <div onMouseDown={(e) => e.stopPropagation()} style={{ maxWidth: "90vw", maxHeight: "90vh" }}>
+            {url ? <img src={url} alt="破損照片" style={{ maxWidth: "90vw", maxHeight: "90vh", borderRadius: 8 }} /> : <p style={{ color: "#fff" }}>載入中…</p>}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// 新增器具破損：手機優先，拍照→選器具→選破損類型→送出。沒有數量欄位
+// （跟報廢紀錄最大的差異）。storeOptions/defaultStoreId/allowDateEdit同報廢
+// 紀錄慣例。
+function EquipmentDamageQuickAddModal({ me, storeOptions, defaultStoreId, defaultDate, allowDateEdit, toast, onClose, onCreated }) {
+  const [storeId, setStoreId] = useState(defaultStoreId || storeOptions?.[0]?.id || "");
+  const [date, setDate] = useState(defaultDate || todayStr());
+  const [photos, setPhotos] = useState([]); // { file, previewUrl }
+  const [itemName, setItemName] = useState("");
+  const [itemSource, setItemSource] = useState("custom"); // 'suggested' | 'custom'，點了建議清單才變suggested
+  const [suggestions, setSuggestions] = useState([]);
+  const [reasonCode, setReasonCode] = useState("");
+  const [reasonNote, setReasonNote] = useState("");
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [filledByName, setFilledByName] = useState("");
+
+  useEffect(() => {
+    if (!storeId) { setSuggestions([]); return; }
+    const t = setTimeout(() => {
+      sb.rpc("equipment_item_suggestions", { p_store_id: storeId, p_query: itemName }).then(({ data, error }) => {
+        if (error) { console.error("equipment_item_suggestions", error); return; }
+        setSuggestions(data || []);
+      });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [storeId, itemName]);
+
+  function addFiles(fileList) {
+    const arr = Array.from(fileList || []);
+    const accepted = [];
+    for (const file of arr) {
+      if (file.size > 10485760) { toast(`${file.name} 超過 10MB，請重新拍攝或選擇較小的檔案`); continue; }
+      accepted.push({ file, previewUrl: URL.createObjectURL(file) });
+    }
+    if (accepted.length) setPhotos((prev) => [...prev, ...accepted]);
+  }
+  function removePhoto(idx) { setPhotos((prev) => prev.filter((_, i) => i !== idx)); }
+
+  const reasonNoteRequired = reasonCode === "other";
+  const canSubmit = storeId && date && photos.length > 0 && itemName.trim() && reasonCode
+    && (!reasonNoteRequired || reasonNote.trim()) && filledByName.trim() && !submitting;
+
+  async function submit() {
+    if (!canSubmit || submitting) return;
+    setSubmitting(true);
+    const id = crypto.randomUUID();
+    let stage = "photo_upload";
+    try {
+      const uploaded = [];
+      for (let i = 0; i < photos.length; i++) {
+        const { file } = photos[i];
+        const ext = (file.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+        const path = `${storeId}/${id}/${i + 1}.${ext}`;
+        const { error: upErr } = await sb.storage.from("equipment-damage-photos").upload(path, file, { contentType: file.type || "image/jpeg" });
+        if (upErr) throw Object.assign(new Error(upErr.message || "照片上傳失敗"), { stage: "photo_upload", supabaseError: upErr });
+        uploaded.push({ storage_path: path, file_name: file.name, file_size: file.size, mime_type: file.type || "image/jpeg" });
+      }
+
+      stage = "create_equipment_damage_record";
+      const { data, error } = await sb.rpc("create_equipment_damage_record", {
+        p_id: id, p_store_id: storeId, p_report_date: date,
+        p_item_name: itemName.trim(), p_item_source: itemSource,
+        p_reason_code: reasonCode,
+        p_reason_note: reasonNoteRequired ? reasonNote.trim() : null,
+        p_note: note.trim() || null, p_filled_by_name: filledByName.trim(), p_photos: uploaded,
+      });
+      if (error) throw Object.assign(new Error(error.message || "器具破損紀錄建立失敗"), { stage: "create_equipment_damage_record", supabaseError: error });
+
+      stage = "audit_log";
+      await logAudit(me.name, "create_equipment_damage_record", data?.[0]?.record_no || id, `${storeId}:${date}`);
+
+      toast("器具破損紀錄已建立");
+      onCreated?.();
+      onClose();
+    } catch (err) {
+      const se = err?.supabaseError;
+      const failedStage = err?.stage || stage;
+      console.error("[器具破損送出失敗]", {
+        stage: failedStage,
+        equipment_damage_id: id,
+        message: err?.message,
+        code: se?.code, details: se?.details, hint: se?.hint,
+        status: se?.status ?? se?.statusCode ?? null,
+        raw: se || err,
+      });
+      toast(failedStage === "photo_upload" ? "照片上傳失敗，器具破損紀錄尚未建立，請稍後再試。" : "器具破損紀錄送出失敗，尚未完成建立，請稍後再試。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal title="新增器具破損" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {storeOptions ? (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 140 }}>
+              <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>門市</label>
+              <select className="ph-input" value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+                {storeOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+            {allowDateEdit && (
+              <div style={{ flex: 1, minWidth: 140 }}>
+                <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>日期</label>
+                <input className="ph-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>破損照片（必填，至少1張）</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            {photos.map((p, i) => (
+              <div key={i} style={{ position: "relative", width: 64, height: 64 }}>
+                <img src={p.previewUrl} alt="" style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.line}` }} />
+                <button type="button" onClick={() => removePhoto(i)}
+                  style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", border: "none", background: T.red, color: "#fff", cursor: "pointer", fontSize: 12, lineHeight: "20px", padding: 0 }}>×</button>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <label className="ph-btn small" style={{ cursor: "pointer" }}>
+              拍照
+              <input type="file" accept="image/*" capture="environment" multiple style={{ display: "none" }} onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+            </label>
+            <label className="ph-btn small" style={{ cursor: "pointer" }}>
+              從相簿選擇
+              <input type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+            </label>
+          </div>
+        </div>
+
+        <div style={{ position: "relative" }}>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>損壞器具（必填，可搜尋或直接輸入）</label>
+          <input className="ph-input" value={itemName}
+            onChange={(e) => { setItemName(e.target.value); setItemSource("custom"); }}
+            placeholder="輸入器具名稱…" />
+          {itemName && suggestions.length > 0 && (
+            <div className="ph-card" style={{ marginTop: 4, padding: 4, maxHeight: 160, overflowY: "auto" }}>
+              {suggestions.map((s) => (
+                <button key={s.item_name} type="button"
+                  onClick={() => { setItemName(s.item_name); setItemSource("suggested"); setSuggestions([]); }}
+                  style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px", border: "none", background: "none", cursor: "pointer", fontSize: 13, borderRadius: 6 }}
+                  onMouseDown={(e) => e.preventDefault()}>
+                  {s.item_name} <span style={{ color: T.sub, fontSize: 11 }}>（用過 {s.use_count} 次）</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>破損類型（必填）</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {DAMAGE_TYPE_ORDER.map((code) => (
+              <button key={code} type="button" className={"ph-btn small" + (reasonCode === code ? " primary" : "")}
+                onClick={() => setReasonCode(code)}>{DAMAGE_TYPE_LABEL[code]}</button>
+            ))}
+          </div>
+          {reasonNoteRequired && (
+            <input className="ph-input" style={{ marginTop: 8 }} value={reasonNote} onChange={(e) => setReasonNote(e.target.value)}
+              placeholder="請說明類型（必填）" />
+          )}
+        </div>
+
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>填寫人（必填）</label>
+          <input className="ph-input" value={filledByName} onChange={(e) => setFilledByName(e.target.value)} placeholder="輸入姓名…" />
+        </div>
+
+        {noteOpen ? (
+          <div>
+            <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>備註（選填）</label>
+            <textarea className="ph-input" rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="特殊狀況補充…" />
+          </div>
+        ) : (
+          <button type="button" onClick={() => setNoteOpen(true)} style={{ alignSelf: "flex-start", background: "none", border: "none", color: T.sub, fontSize: 12.5, cursor: "pointer", padding: 0, textDecoration: "underline" }}>
+            ＋ 新增備註（選填）
+          </button>
+        )}
+
+        <button className="ph-btn primary" disabled={!canSubmit} onClick={submit}>
+          {submitting ? "送出中…" : "確認送出"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// 器具破損歷史查詢頁：只有canManageEquipmentDamage()為true的身分才會在
+// DailyReportPage分頁列看到這個分頁，RPC本身也用can_manage_equipment_damage
+// 真的擋
+function EquipmentDamageHistoryTab({ me, storeIds, storeById, toast }) {
+  const [dateFrom, setDateFrom] = useState(addDaysStr(todayStr(), -30));
+  const [dateTo, setDateTo] = useState(todayStr());
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [itemFilter, setItemFilter] = useState("");
+  const [reasonFilter, setReasonFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState(["active", "void"]);
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [correctModal, setCorrectModal] = useState(null); // row | null
+  const [voidModal, setVoidModal] = useState(null); // row | null
+
+  const activeStoreIds = storeFilter === "all" ? storeIds : [storeFilter];
+
+  const load = useCallback(async () => {
+    if (!activeStoreIds.length || dateFrom > dateTo) { setRows([]); setTotal(0); setLoading(false); return; }
+    setLoading(true); setLoadError(false);
+    const { data, error } = await sb.rpc("equipment_damage_record_list", {
+      p_store_ids: activeStoreIds, p_date_from: dateFrom, p_date_to: dateTo,
+      p_item: itemFilter.trim() || null, p_reason_code: reasonFilter === "all" ? null : reasonFilter,
+      p_status: statusFilter.length ? statusFilter : ["active", "void"],
+      p_limit: 100, p_offset: 0,
+    });
+    if (error) { console.error("equipment_damage_record_list", error); setLoadError(true); setLoading(false); return; }
+    setRows(data || []);
+    setTotal(data?.[0]?.total_count || 0);
+    setLoading(false);
+  }, [activeStoreIds.join(","), dateFrom, dateTo, itemFilter, reasonFilter, statusFilter.join(",")]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const ch = sb.channel("equipment_damage_history_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "equipment_damage_records" }, load)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [load]);
+
+  function toggleStatus(s) {
+    setStatusFilter((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
+  }
+
+  async function submitCorrect(row, fields) {
+    const { error } = await sb.rpc("correct_equipment_damage_record", {
+      p_equipment_damage_record_id: row.record_id, p_item_name: fields.itemName, p_item_source: fields.itemSource,
+      p_reason_code: fields.reasonCode,
+      p_reason_note: fields.reasonCode === "other" ? fields.reasonNote : null, p_note: fields.note || null,
+      p_filled_by_name: fields.filledByName,
+    });
+    if (error) { toast("更正失敗：" + error.message); return; }
+    await logAudit(me.name, "correct_equipment_damage_record", row.record_no);
+    toast("已更正器具破損紀錄");
+    setCorrectModal(null);
+    load();
+  }
+  async function submitVoid(row, reason) {
+    const { error } = await sb.rpc("void_equipment_damage_record", { p_equipment_damage_record_id: row.record_id, p_void_reason: reason });
+    if (error) { toast("作廢失敗：" + error.message); return; }
+    await logAudit(me.name, "void_equipment_damage_record", row.record_no, reason);
+    toast("已作廢此紀錄");
+    setVoidModal(null);
+    load();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <input className="ph-input" style={{ width: 150 }} type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+        <span style={{ color: T.sub }}>～</span>
+        <input className="ph-input" style={{ width: 150 }} type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+        <select className="ph-input" style={{ width: 130 }} value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)}>
+          <option value="all">全部門市</option>
+          {storeIds.map((sid) => <option key={sid} value={sid}>{storeById[sid]?.name}</option>)}
+        </select>
+        <input className="ph-input" style={{ width: 140 }} value={itemFilter} onChange={(e) => setItemFilter(e.target.value)} placeholder="器具關鍵字" />
+        <select className="ph-input" style={{ width: 150 }} value={reasonFilter} onChange={(e) => setReasonFilter(e.target.value)}>
+          <option value="all">全部類型</option>
+          {DAMAGE_TYPE_ORDER.map((c) => <option key={c} value={c}>{DAMAGE_TYPE_LABEL[c]}</option>)}
+        </select>
+        {[["active", "有效"], ["void", "已作廢"]].map(([k, label]) => (
+          <label key={k} style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 4 }}>
+            <input type="checkbox" checked={statusFilter.includes(k)} onChange={() => toggleStatus(k)} /> {label}
+          </label>
+        ))}
+      </div>
+      {loadError ? (
+        <div className="ph-card" style={{ padding: 24, textAlign: "center" }}>
+          <p style={{ color: T.red, marginBottom: 10 }}>查詢失敗，請重試。</p>
+          <button className="ph-btn small" onClick={load}>重新查詢</button>
+        </div>
+      ) : loading ? <p style={{ color: T.sub }}>載入中…</p> : rows.length === 0 ? (
+        <p style={{ color: T.sub, textAlign: "center", padding: "24px 0" }}>此範圍沒有符合條件的器具破損紀錄</p>
+      ) : (
+        <>
+          <div className="ph-card" style={{ overflowX: "auto" }}>
+            <table className="ph-table">
+              <thead>
+                <tr><th>日期時間</th><th>門市</th><th>器具</th><th>破損類型</th><th>照片</th><th>填寫人</th><th>狀態</th><th></th></tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.record_id}>
+                    <td>{fmtTaipei(r.created_at)}</td>
+                    <td>{r.store_name}</td>
+                    <td>{r.item_name}</td>
+                    <td>{DAMAGE_TYPE_LABEL[r.reason_code]}{r.reason_note ? `：${r.reason_note}` : ""}</td>
+                    <td><div style={{ display: "flex", gap: 4 }}>{(r.photos || []).map((p) => <EquipmentDamagePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={32} />)}</div></td>
+                    <td>{r.filled_by_name}</td>
+                    <td><Badge tone={r.status === "active" ? "green" : "sub"}>{r.status === "active" ? "有效" : "已作廢"}</Badge></td>
+                    <td>
+                      {r.status === "active" && (
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button className="ph-btn small" onClick={() => setCorrectModal(r)}>更正</button>
+                          <button className="ph-btn small danger" onClick={() => setVoidModal(r)}>作廢</button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p style={{ fontSize: 12, color: T.sub, marginTop: 8 }}>共 {total} 筆</p>
+        </>
+      )}
+      {correctModal && (
+        <EquipmentDamageCorrectModal row={correctModal} onSubmit={(fields) => submitCorrect(correctModal, fields)} onClose={() => setCorrectModal(null)} />
+      )}
+      {voidModal && (
+        <EquipmentDamageVoidModal row={voidModal} onSubmit={(reason) => submitVoid(voidModal, reason)} onClose={() => setVoidModal(null)} />
+      )}
+    </div>
+  );
+}
+
+// 更正器具破損紀錄：重新走一次器具/類型/填寫人/備註表單，預填舊值；照片
+// 不能在這裡更換（原始照片必須保存），提交後保留原始內容在歷程表，不覆蓋
+function EquipmentDamageCorrectModal({ row, onSubmit, onClose }) {
+  const [itemName, setItemName] = useState(row.item_name);
+  const [itemSource] = useState("custom"); // 更正一律視為自訂輸入，不再查建議清單
+  const [reasonCode, setReasonCode] = useState(row.reason_code);
+  const [reasonNote, setReasonNote] = useState(row.reason_note || "");
+  const [note, setNote] = useState(row.note || "");
+  const [filledByName, setFilledByName] = useState(row.filled_by_name || "");
+  const reasonNoteRequired = reasonCode === "other";
+  const canSubmit = itemName.trim() && reasonCode && (!reasonNoteRequired || reasonNote.trim()) && filledByName.trim();
+  return (
+    <Modal title={`更正器具破損紀錄・${row.record_no}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>損壞器具</label>
+          <input className="ph-input" value={itemName} onChange={(e) => setItemName(e.target.value)} />
+        </div>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>破損類型</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {DAMAGE_TYPE_ORDER.map((code) => (
+              <button key={code} type="button" className={"ph-btn small" + (reasonCode === code ? " primary" : "")}
+                onClick={() => setReasonCode(code)}>{DAMAGE_TYPE_LABEL[code]}</button>
+            ))}
+          </div>
+          {reasonNoteRequired && (
+            <input className="ph-input" style={{ marginTop: 8 }} value={reasonNote} onChange={(e) => setReasonNote(e.target.value)} placeholder="請說明類型（必填）" />
+          )}
+        </div>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>填寫人</label>
+          <input className="ph-input" value={filledByName} onChange={(e) => setFilledByName(e.target.value)} />
+        </div>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: T.sub, marginBottom: 4 }}>備註（選填）</label>
+          <textarea className="ph-input" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        </div>
+        <p style={{ color: T.sub, fontSize: 11.5, margin: 0 }}>更正後會保留原始內容於歷程，不會覆蓋消失。</p>
+        <button className="ph-btn primary" disabled={!canSubmit} onClick={() => onSubmit({ itemName: itemName.trim(), itemSource, reasonCode, reasonNote, note, filledByName: filledByName.trim() })}>送出更正</button>
+      </div>
+    </Modal>
+  );
+}
+
+// 作廢器具破損紀錄：不是刪除，必填作廢原因
+function EquipmentDamageVoidModal({ row, onSubmit, onClose }) {
+  const [reason, setReason] = useState("");
+  return (
+    <Modal title={`作廢器具破損紀錄・${row.record_no}`} onClose={onClose}>
+      <p style={{ fontSize: 12.5, color: T.sub }}>作廢後這筆紀錄仍會保留在系統中並標示「已作廢」，不會被刪除。</p>
+      <label style={{ display: "block", fontSize: 12, color: T.sub, margin: "10px 0 4px" }}>作廢原因（必填）</label>
+      <textarea className="ph-input" rows={2} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="請說明作廢原因…" />
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+        <button className="ph-btn danger" disabled={!reason.trim()} onClick={() => onSubmit(reason.trim())}>確認作廢</button>
+      </div>
+    </Modal>
+  );
+}
+
+// 「今日器具破損」單筆列：預設精簡顯示（時間／器具／類型／照片縮圖），點擊
+// 展開完整資訊（備註/填寫人/編號/狀態），canManage為true時展開後多顯示
+// 更正/作廢按鈕
+function TodayEquipmentDamageRow({ row, storeName, canManage, onChanged, toast, me }) {
+  const [expanded, setExpanded] = useState(false);
+  const [correctOpen, setCorrectOpen] = useState(false);
+  const [voidOpen, setVoidOpen] = useState(false);
+  const photos = row.equipment_damage_photos || [];
+
+  async function submitCorrect(fields) {
+    const { error } = await sb.rpc("correct_equipment_damage_record", {
+      p_equipment_damage_record_id: row.id, p_item_name: fields.itemName, p_item_source: fields.itemSource,
+      p_reason_code: fields.reasonCode,
+      p_reason_note: fields.reasonCode === "other" ? fields.reasonNote : null, p_note: fields.note || null,
+      p_filled_by_name: fields.filledByName,
+    });
+    if (error) { toast("更正失敗：" + error.message); return; }
+    await logAudit(me.name, "correct_equipment_damage_record", row.record_no);
+    toast("已更正器具破損紀錄");
+    setCorrectOpen(false);
+    onChanged();
+  }
+  async function submitVoid(reason) {
+    const { error } = await sb.rpc("void_equipment_damage_record", { p_equipment_damage_record_id: row.id, p_void_reason: reason });
+    if (error) { toast("作廢失敗：" + error.message); return; }
+    await logAudit(me.name, "void_equipment_damage_record", row.record_no, reason);
+    toast("已作廢此紀錄");
+    setVoidOpen(false);
+    onChanged();
+  }
+
+  return (
+    <div style={{ borderBottom: `1px solid ${T.line}`, padding: "8px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => setExpanded((v) => !v)}>
+        <span style={{ fontSize: 12, color: T.sub, minWidth: 42 }}>{fmtTaipei(row.created_at).slice(-5)}</span>
+        <span style={{ fontSize: 13, fontWeight: 500 }}>{row.item_name}</span>
+        <span style={{ fontSize: 12, color: T.sub }}>{DAMAGE_TYPE_LABEL[row.reason_code]}</span>
+        {row.status === "void" && <Badge tone="sub">已作廢</Badge>}
+        <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
+          {photos.slice(0, 3).map((p) => <EquipmentDamagePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={28} />)}
+        </div>
+      </div>
+      <div style={{ marginLeft: 52, fontSize: 11, color: T.sub, marginTop: 2 }}>填寫人：{row.filled_by_name}</div>
+      {expanded && (
+        <div style={{ marginTop: 8, marginLeft: 52, fontSize: 12.5, color: T.sub }}>
+          <p style={{ margin: "2px 0" }}>破損編號：{row.record_no}</p>
+          <p style={{ margin: "2px 0" }}>門市：{storeName || "—"}　破損日期：{row.report_date}</p>
+          {row.reason_note && <p style={{ margin: "2px 0" }}>類型說明：{row.reason_note}</p>}
+          {row.note && <p style={{ margin: "2px 0" }}>備註：{row.note}</p>}
+          {row.updated_at && <p style={{ margin: "2px 0" }}>最後更正：{row.updated_by_name}・{fmtTaipei(row.updated_at)}</p>}
+          {row.status === "void" && <p style={{ margin: "2px 0", color: T.red }}>作廢原因：{row.void_reason}（{row.voided_by_name}・{fmtTaipei(row.voided_at)}）</p>}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+            {photos.map((p) => <EquipmentDamagePhotoThumb key={p.storage_path} storagePath={p.storage_path} size={44} />)}
+          </div>
+          {canManage && row.status === "active" && (
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              <button className="ph-btn small" onClick={(e) => { e.stopPropagation(); setCorrectOpen(true); }}>更正</button>
+              <button className="ph-btn small danger" onClick={(e) => { e.stopPropagation(); setVoidOpen(true); }}>作廢</button>
+            </div>
+          )}
+        </div>
+      )}
+      {correctOpen && <EquipmentDamageCorrectModal row={row} onSubmit={submitCorrect} onClose={() => setCorrectOpen(false)} />}
+      {voidOpen && <EquipmentDamageVoidModal row={row} onSubmit={submitVoid} onClose={() => setVoidOpen(false)} />}
+    </div>
+  );
+}
+
 function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kioskMode, onGotoRequests }) {
   const storeId = store?.id;
   const [roster, setRoster] = useState([]);
@@ -4389,6 +4916,25 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
       .subscribe();
     return () => sb.removeChannel(ch);
   }, [loadWasteRecords]);
+  // 今日器具破損：完全比照上面今日報廢的查詢慣例
+  const [equipmentDamageRecords, setEquipmentDamageRecords] = useState([]);
+  const [equipmentDamageModalOpen, setEquipmentDamageModalOpen] = useState(false);
+  const loadEquipmentDamageRecords = useCallback(async () => {
+    if (!EQUIPMENT_DAMAGE_READY || !store?.id) { setEquipmentDamageRecords([]); return; }
+    const { data, error } = await sb.from("equipment_damage_records")
+      .select("*, equipment_damage_photos(*)").eq("store_id", store.id).eq("report_date", date).eq("status", "active")
+      .order("created_at", { ascending: false });
+    if (error) { console.error("equipment_damage_records load", error); return; }
+    setEquipmentDamageRecords(data || []);
+  }, [store?.id, date]);
+  useEffect(() => { loadEquipmentDamageRecords(); }, [loadEquipmentDamageRecords]);
+  useEffect(() => {
+    if (!EQUIPMENT_DAMAGE_READY) return;
+    const ch = sb.channel("equipment_damage_records_today_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "equipment_damage_records" }, loadEquipmentDamageRecords)
+      .subscribe();
+    return () => sb.removeChannel(ch);
+  }, [loadEquipmentDamageRecords]);
   const opsApplicable = date >= OPS_LAUNCH_DATE;
   const opsHoursResult = useMemo(() => computeOpsHours(roster, dayShifts, entries, date, pendingMissedPunchEmployeeIds), [roster, dayShifts, entries, date, pendingMissedPunchEmployeeIds]);
   const liveOpsHours = opsHoursResult.total;
@@ -5234,6 +5780,28 @@ function DailyReportDetail({ me, store, date, onDateChange, toast, onBack, kiosk
           toast={toast} onClose={() => setWasteModalOpen(false)} onCreated={loadWasteRecords} />
       )}
 
+      {EQUIPMENT_DAMAGE_READY && !loading && (
+        <div className="ph-card-strong" style={{ padding: 16, marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <strong style={{ fontSize: 13 }}>今日器具破損　{equipmentDamageRecords.length} 筆</strong>
+            <button className="ph-btn small primary" onClick={() => setEquipmentDamageModalOpen(true)}>＋ 新增器具破損</button>
+          </div>
+          {equipmentDamageRecords.length === 0 ? (
+            <p style={{ color: T.sub, fontSize: 12.5, margin: "8px 0 0" }}>今天還沒有器具破損紀錄。</p>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {equipmentDamageRecords.map((r) => (
+                <TodayEquipmentDamageRow key={r.id} row={r} storeName={store?.name} canManage={canManageEquipmentDamage(me)} onChanged={loadEquipmentDamageRecords} toast={toast} me={me} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {equipmentDamageModalOpen && (
+        <EquipmentDamageQuickAddModal me={me} storeOptions={null} defaultStoreId={store?.id} defaultDate={date} allowDateEdit={false}
+          toast={toast} onClose={() => setEquipmentDamageModalOpen(false)} onCreated={loadEquipmentDamageRecords} />
+      )}
+
       {!loading && overtimePendingRows.length > 0 && (
         <div className="ph-card" style={{ padding: "12px 16px", marginBottom: 14, background: T.brownSoft, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
           <p style={{ margin: 0, fontSize: 13, color: T.brown, fontWeight: 600 }}>
@@ -5994,6 +6562,7 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
   const [systemHubOpen, setSystemHubOpen] = useState(false); // 跟一般管理介面共用同一份EXTERNAL_SYSTEMS設定與SystemHubCards元件，Modal顯示不切換tab，不會弄丟填寫到一半的內容
   const showSystemHub = visibleExternalSystems(me).length > 0; // 共用PIN帳號目前只會通過coffee_ops門市端那一條，實際只會顯示「咖啡豆盤點」卡片
   const [wasteModalOpen, setWasteModalOpen] = useState(false); // 門市工作首頁快捷入口，固定今天＋自己門市，不需要離開目前在看的分頁
+  const [equipmentDamageModalOpen, setEquipmentDamageModalOpen] = useState(false);
   const KIOSK_TABS = [
     ["schedule_view", isManager ? "門市排班" : "查看本店班表"],
     ["daily_report", "每日回報"],
@@ -6013,6 +6582,9 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
             {WASTE_RECORDS_READY && (
               <button className="ph-btn small primary" onClick={() => setWasteModalOpen(true)}>＋ 新增報廢</button>
             )}
+            {EQUIPMENT_DAMAGE_READY && (
+              <button className="ph-btn small primary" onClick={() => setEquipmentDamageModalOpen(true)}>＋ 新增器具破損</button>
+            )}
             {showSystemHub && (
               <button className="ph-btn small" onClick={() => setSystemHubOpen(true)}>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="hub" size={14} />系統中心</span>
@@ -6029,6 +6601,10 @@ function DailyReportKioskShell({ me, store, stores, toast }) {
         {wasteModalOpen && (
           <WasteQuickAddModal me={me} storeOptions={null} defaultStoreId={store?.id} defaultDate={todayStr()} allowDateEdit={false}
             toast={toast} onClose={() => setWasteModalOpen(false)} onCreated={() => {}} />
+        )}
+        {equipmentDamageModalOpen && (
+          <EquipmentDamageQuickAddModal me={me} storeOptions={null} defaultStoreId={store?.id} defaultDate={todayStr()} allowDateEdit={false}
+            toast={toast} onClose={() => setEquipmentDamageModalOpen(false)} onCreated={() => {}} />
         )}
         <main className="ph-main-pad" style={{ flex: 1, padding: "24px 40px", minWidth: 0 }}>
           <div style={{ maxWidth: 1460, margin: "0 auto" }}>
