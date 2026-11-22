@@ -2779,6 +2779,9 @@ function RequestFormModal({ me, storeId, onClose, onSaved }) {
           </select>
         </Field>
       )}
+      {type === "annual_leave" && (
+        <p style={{ color: T.sub, fontSize: 12, margin: "-4px 0 10px" }}>目前特休剩餘 {me.annual_leave_remaining_days ?? "—"} 天</p>
+      )}
       <Field label="日期"><input className="ph-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
       <div style={{ display: "flex", gap: 8 }}>
         <Field label="開始時間"><input className="ph-input" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} /></Field>
@@ -6900,6 +6903,15 @@ function KioskSelfSchedule({ store, toast }) {
     }
   }
 
+  // 特休剩餘天數可能因為排特休/取消而變動，重新載入roster並同步selected，
+  // 讓畫面上的「特休剩餘」數字立刻反映最新值
+  async function refreshSelectedRemaining() {
+    const { data, error } = await sb.rpc("store_roster", { p_store_id: store.id });
+    if (error) { console.error("store_roster refresh", error); return; }
+    setRoster((data || []).filter((r) => r.active));
+    setSelected((prev) => prev ? (data || []).find((r) => r.id === prev.id) || prev : prev);
+  }
+
   async function pickAnnualLeave(date) {
     if (!selected) return;
     setBusyDate(date);
@@ -6908,6 +6920,7 @@ function KioskSelfSchedule({ store, toast }) {
       if (error) { toast("設定失敗：" + error.message); return; }
       toast(`${date} 已排特休`);
       loadSelectedData();
+      refreshSelectedRemaining();
     } finally {
       setBusyDate("");
     }
@@ -6921,6 +6934,7 @@ function KioskSelfSchedule({ store, toast }) {
       if (error) { toast("取消失敗：" + error.message); return; }
       toast(`${date} 已取消排休`);
       loadSelectedData();
+      refreshSelectedRemaining();
     } finally {
       setBusyDate("");
     }
@@ -6950,7 +6964,7 @@ function KioskSelfSchedule({ store, toast }) {
   return (
     <div>
       <button type="button" className="ph-btn small" style={{ marginBottom: 12, border: "none", background: "none", color: T.sub, padding: 0 }} onClick={() => setSelected(null)}>‹ 重新選擇姓名</button>
-      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>{selected.name}・排{targetMonthLabel}的假（提交期間 {openFrom} ～ {openTo}）</p>
+      <p style={{ color: T.sub, fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>{selected.name}・排{targetMonthLabel}的假（提交期間 {openFrom} ～ {openTo}）・特休剩餘 {selected.annual_leave_remaining_days ?? "—"} 天</p>
       <div className="ph-card" style={{ padding: 0, overflow: "hidden" }}>
         {dateList.map((d) => {
           const s = shiftsByDate[d];
@@ -8602,6 +8616,10 @@ function StaffPage({ me, stores, scopeStoreIds, activeStoreId, toast }) {
             <div style={{ color: T.sub, marginBottom: 4 }}>特休天數</div>
             <div style={{ fontWeight: 600 }}>{r.annual_leave_days ?? annualLeaveDaysForSeniority(r.hire_date)} 天{r.annual_leave_days == null ? "（自動計算）" : ""}</div>
           </div>
+          <div>
+            <div style={{ color: T.sub, marginBottom: 4 }}>特休剩餘</div>
+            <div style={{ fontWeight: 600 }}>{r.annual_leave_remaining_days ?? "尚未設定"}{r.annual_leave_remaining_days != null ? " 天" : ""}</div>
+          </div>
         </div>
         {me.permissions?.staff === "edit" && (
           <button className="ph-btn small" style={{ width: "100%" }} onClick={() => setEditing({ ...r })}>查看資料</button>
@@ -8660,6 +8678,12 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
   const [bonus, setBonus] = useState(editing.bonus ?? 0);
   const [hireDate, setHireDate] = useState(editing.hire_date || "");
   const [annualLeaveDays, setAnnualLeaveDays] = useState(editing.annual_leave_days ?? "");
+  // 2026-11-22新增：特休剩餘天數，新夥伴預設＝目前特休天數欄位算出來的值
+  // （留空時用年資公式），之後排特休會由DB trigger自動連動扣除，這裡只是
+  // 起始值／手動覆寫
+  const [annualLeaveRemainingDays, setAnnualLeaveRemainingDays] = useState(
+    editing.annual_leave_remaining_days ?? (editing.isNew ? (editing.annual_leave_days ?? annualLeaveDaysForSeniority(editing.hire_date || "")) : "")
+  );
   const [mealAllowance, setMealAllowance] = useState(editing.meal_allowance ?? 0);
   const [positionAllowance, setPositionAllowance] = useState(editing.position_allowance ?? 0);
   const [laborInsuranceFee, setLaborInsuranceFee] = useState(editing.labor_insurance_fee ?? 0);
@@ -8729,6 +8753,7 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
     if (isHr) {
       payload.access_tier = accessTier;
       payload.annual_leave_days = annualLeaveDays === "" ? null : Number(annualLeaveDays);
+      payload.annual_leave_remaining_days = annualLeaveRemainingDays === "" ? null : Number(annualLeaveRemainingDays);
       if (hasPersonalAccount) payload.email = email.trim() || null;
       if (editing.isNew) {
         // 新增夥伴：comp欄位隨建立時的初始insert一起寫入，之後再補一筆
@@ -8841,6 +8866,11 @@ function StaffEditModal({ me, stores, editing, onClose, onSaved }) {
         <input className="ph-input" type="number" min="0" max="30" disabled={!isHr} placeholder={`留空＝依到職日自動算（目前 ${annualLeaveDaysForSeniority(hireDate)} 天）`}
           value={annualLeaveDays} onChange={(e) => setAnnualLeaveDays(e.target.value)} />
         {isHr && <p style={{ color: T.sub, fontSize: 11.5, margin: "6px 0 0" }}>留空會依《勞基法》第38條年資對照表自動計算；填數字則覆蓋自動計算結果。</p>}
+      </Field>
+      <Field label={"特休剩餘天數" + (isHr ? "" : "（僅管理者可調整）")}>
+        <input className="ph-input" type="number" min="0" step="0.5" disabled={!isHr} placeholder="留空＝尚未設定（不會連動扣除）"
+          value={annualLeaveRemainingDays} onChange={(e) => setAnnualLeaveRemainingDays(e.target.value)} />
+        {isHr && <p style={{ color: T.sub, fontSize: 11.5, margin: "6px 0 0" }}>排特休（自助排休或請假申請核准）會自動從這裡扣除，取消／駁回會自動補回；餘額不足時會擋下排休。這裡可以隨時手動覆寫。</p>}
       </Field>
       <div style={{ display: "flex", gap: 8 }}>
         <Field label={"伙食費" + (isHr ? "" : "（僅管理者可調整）")}><input className="ph-input" type="number" disabled={!isHr} value={mealAllowance} onChange={(e) => setMealAllowance(e.target.value)} /></Field>
